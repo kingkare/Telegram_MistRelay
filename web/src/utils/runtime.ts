@@ -12,10 +12,6 @@ export function normalizeServerBaseUrl(value: string): string {
   return withProtocol.replace(/\/+$/, '')
 }
 
-export function isDesktopShell(): boolean {
-  return false
-}
-
 export function shouldUseHashHistory(): boolean {
   return import.meta.env.VITE_USE_HASH_ROUTER === 'true'
 }

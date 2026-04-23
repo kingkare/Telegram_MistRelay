@@ -99,7 +99,7 @@ def _apply_cors_headers(request: web.Request, response: web.StreamResponse) -> w
 
 @web.middleware
 async def cors_middleware(request, handler):
-    """为桌面端和独立前端提供跨域访问支持。"""
+    """为独立 Web 前端提供跨域访问支持。"""
     if request.method == "OPTIONS":
         return _apply_cors_headers(request, web.Response(status=204))
 

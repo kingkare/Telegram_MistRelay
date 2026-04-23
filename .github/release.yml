@@ -9,11 +9,6 @@ changelog:
       labels:
         - breaking
         - breaking-change
-    - title: Desktop Client
-      labels:
-        - desktop
-        - tauri
-        - ui
     - title: Features
       labels:
         - feature
