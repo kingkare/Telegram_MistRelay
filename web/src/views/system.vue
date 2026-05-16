@@ -156,7 +156,7 @@
           <el-skeleton v-if="loadingDockerLogs && !wsConnected" :rows="10" animated />
 
           <div v-else class="logs-container" ref="dockerLogsContainerRef">
-            <pre class="logs-content" ref="logsContentRef">{{ dockerLogs }}</pre>
+            <pre class="logs-content">{{ dockerLogs }}</pre>
           </div>
 
           <el-empty v-if="!dockerLogs && !wsConnected" description="无法获取容器日志" />
@@ -279,7 +279,6 @@ const wsConnected = ref(false)
 const connecting = ref(false)
 const ws = ref<WebSocket | null>(null)
 const dockerLogsContainerRef = ref<HTMLElement | null>(null)
-const logsContentRef = ref<HTMLElement | null>(null)
 
 const logFiles = ref<LogFile[]>([])
 const appLogLines = ref<string[]>([])

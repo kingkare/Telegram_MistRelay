@@ -87,7 +87,7 @@ async def handler(event):
     welcome_msg = (
         f"🤖 <b>MistRelay 下载机器人</b>\n\n"
         f"📥 支持HTTP、磁力、种子下载\n"
-        f"☁️ 支持OneDrive自动上传\n"
+        f"☁️ 支持Telegram频道网盘自动上传\n"
         f"🔗 支持Telegram文件直链生成\n\n"
         f"👤 你的ID: <code>{event.chat_id}</code>\n\n"
         f"💡 使用下方菜单按钮或发送 <code>/help</code> 查看帮助"

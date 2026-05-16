@@ -7,16 +7,9 @@ BOT_TOKEN: xxxxxx:xxxxxxxxxxxx      # Telegram Bot Token (从 @BotFather 获取)
 ADMIN_ID: xxxxxxxxx                 # 管理员的Telegram ID (数字)
 FORWARD_ID:                         # 可选，文件转发目标ID
 
-#默认是否上传到电报 true 或者 false
-UP_TELEGRAM: false
-#是否启用rclone上传到OneDrive
-UP_ONEDRIVE: true
+# 默认是否上传到 Telegram 频道网盘 true 或者 false
+UP_TELEGRAM: true
 
-#rclone配置
-RCLONE_REMOTE: onedrive             # rclone配置的远程名称
-RCLONE_PATH: /Downloads             # OneDrive上的目标路径
-#是否在成功上传到OneDrive后自动删除本地文件
-AUTO_DELETE_AFTER_UPLOAD: true
 #下载保存路径
 SAVE_PATH: ./downloads
 
@@ -28,11 +21,11 @@ PROXY_PORT:
 RPC_SECRET: xxxxxxx                 # RPC密钥（建议修改为自定义强密码）
 RPC_URL: localhost:6800/jsonrpc     # 使用Docker部署时必须使用localhost或127.0.0.1
 
-# 直链功能配置（默认启用，作为TG媒体文件下载的前置功能）
+# 直链与 TG 频道网盘配置（默认启用，作为 TG 媒体文件下载和上传的前置能力）
 # 是否启用直链功能
 ENABLE_STREAM: true
-# 日志频道ID（用于存储转发文件，启用直链功能时必须配置）
-# 创建一个公开频道，将机器人添加为管理员，然后获取频道ID
+# TG 频道网盘存储频道 ID（启用直链或 TG 上传时必须配置）
+# 创建一个频道，将机器人添加为管理员，然后获取频道 ID
 BIN_CHANNEL: -100xxxxxxxxxx        # 频道ID（必须以 -100 开头）
 # Web服务器端口
 STREAM_PORT: 8080

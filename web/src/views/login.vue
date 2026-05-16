@@ -45,7 +45,7 @@
         <el-form-item prop="serverUrl">
           <el-input
             v-model="form.serverUrl"
-            placeholder="服务器地址，示例: https://mistrelay.example.com"
+            placeholder="服务器地址，如 127.0.0.1:8080 或 https://mistrelay.example.com"
             size="large"
             :prefix-icon="Link"
           />

@@ -29,7 +29,6 @@ export TOKEN="<jwt-token>"
 
 - `POST /api/auth/login`
 - `GET /api/status`
-- `GET /api/rclone/thumbnail/serve/{remote}/{filename}`
 
 其余 `/api/*` 接口都需要 token。
 
@@ -69,8 +68,8 @@ JWT 特性：
 服务端对所有请求统一添加 CORS 响应头：
 
 - `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS`
-- `Access-Control-Allow-Headers: Authorization, Content-Type, Accept, Origin, X-Requested-With`
-- `Access-Control-Expose-Headers: Content-Disposition, Content-Length`
+- `Access-Control-Allow-Headers: Authorization, Content-Type, Accept, Origin, X-Requested-With, Range`
+- `Access-Control-Expose-Headers: Content-Disposition, Content-Length, Content-Range, Accept-Ranges, X-MistRelay-Min-Threads`
 
 `OPTIONS` 预检请求直接返回 `204`。
 
@@ -103,6 +102,52 @@ JWT 特性：
 ### 1.5 上传大小限制
 
 `aiohttp` 应用的 `client_max_size` 固定为 `30000000` 字节，约 28.6 MiB。超过该大小的请求体可能在进入业务逻辑前就被拒绝。
+
+### 1.6 接口索引
+
+| 方法 | 路径 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| `POST` | `/api/auth/login` | 否 | 登录获取 JWT |
+| `GET` | `/api/auth/me` | 是 | 获取当前用户 |
+| `POST` | `/api/auth/password` | 是 | 修改密码 |
+| `GET` | `/api/status` | 否 | 服务状态 |
+| `GET` | `/api/system/docker/status` | 是 | Docker 状态 |
+| `POST` | `/api/system/docker/restart` | 是 | 重启 Docker 容器 |
+| `GET` | `/api/system/docker/logs` | 是 | Docker 日志 |
+| `GET` | `/api/system/resources` | 是 | 系统资源 |
+| `GET` | `/api/system/docker/logs/ws` | 是 | Docker 日志 WebSocket |
+| `GET` | `/api/config` | 是 | 获取配置 |
+| `POST` | `/api/config` | 是 | 更新配置 |
+| `POST` | `/api/config/reload` | 是 | 从配置文件重载 |
+| `GET` | `/api/downloads` | 是 | 下载记录 |
+| `GET` | `/api/downloads/statistics` | 是 | 下载统计 |
+| `DELETE` | `/api/downloads/all` | 是 | 清空下载记录 |
+| `GET` | `/api/monitor/trend` | 是 | 监控趋势 |
+| `GET` | `/api/uploads/statistics` | 是 | 上传统计 |
+| `GET` | `/api/uploads` | 是 | 上传记录 |
+| `GET` | `/api/ws/status` | 是 | 下载/上传状态 WebSocket |
+| `GET` | `/api/queue` | 是 | 消息队列状态 |
+| `POST` | `/api/downloads/{gid}/retry` | 是 | 重试下载 |
+| `DELETE` | `/api/downloads/{gid}` | 是 | 取消/删除 aria2 任务 |
+| `DELETE` | `/api/downloads/record/{download_id}` | 是 | 删除下载记录 |
+| `POST` | `/api/uploads/{upload_id}/retry` | 是 | 重试上传 |
+| `DELETE` | `/api/uploads/{upload_id}` | 是 | 取消/删除上传 |
+| `GET` | `/api/telegram/browse` | 是 | TG 频道网盘浏览 |
+| `GET` | `/api/telegram/usage` | 是 | TG 频道网盘统计 |
+| `DELETE` | `/api/telegram/item/{message_id}` | 是 | 删除单个 TG 文件 |
+| `DELETE` | `/api/telegram/group/{media_group_id}` | 是 | 删除媒体组文件夹 |
+| `DELETE` | `/api/telegram/all` | 是 | 清空 TG 频道网盘 |
+| `GET` | `/api/files/list` | 是 | 本地文件列表 |
+| `GET` | `/api/files/download` | 是 | 本地文件下载 |
+| `POST` | `/api/files/upload` | 是 | 本地文件上传 |
+| `POST` | `/api/files/mkdir` | 是 | 创建本地目录 |
+| `DELETE` | `/api/files/delete` | 是 | 删除本地文件/目录 |
+| `GET` | `/api/logs` | 是 | 应用日志内容 |
+| `GET` | `/api/logs/files` | 是 | 应用日志文件列表 |
+| `GET` | `/api/logs/download/{filename}` | 是 | 应用日志文件下载 |
+| `GET/POST/DELETE` | `/api/rclone/*` | 是 | 废弃兼容占位，统一返回 `410 Gone` |
+| `GET` | `/` | 否 | 前端入口或状态降级响应 |
+| `GET` | `/{message_id}/{filename}?hash=...` | 是 | Telegram 流媒体/下载 |
 
 ## 2. 关键数据结构
 
@@ -196,7 +241,7 @@ JWT 特性：
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | integer | 上传记录 ID |
-| `upload_target` | string | 常见值：`onedrive`、`gdrive`、`telegram` |
+| `upload_target` | string | 新任务固定为 `telegram`；旧库可能保留 `onedrive`/`gdrive` 历史值 |
 | `remote_path` | string \| null | 远端路径 |
 | `status` | string | `pending`、`waiting_download`、`uploading`、`completed`、`failed`、`cancelled`、`paused` |
 | `total_size` | integer \| null | 总大小 |
@@ -256,25 +301,42 @@ JWT 特性：
 | `total_size` | integer | 总大小 |
 | `completed_size` | integer | 已完成大小 |
 
-### 2.6 `TelegramMediaItem`
+### 2.6 `TelegramDriveEntry`
 
-`GET /api/telegram/browse` 的 `items[]` 元素。
+`GET /api/telegram/browse` 的 `items[]` 元素。根目录可能返回媒体组文件夹或真实文件；传入 `media_group_id` 时只返回真实文件。
+
+通用字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `file_unique_id` | string | Telegram 文件唯一 ID |
+| `entry_type` | string | `folder` 或 `file` |
+| `file_unique_id` | string | 文件唯一 ID；文件夹条目仅作代表记录，不可作为文件夹 ID |
 | `chat_id` | integer | 聊天 ID |
-| `message_id` | integer | 消息 ID |
-| `file_name` | string \| null | 文件名 |
-| `mime_type` | string \| null | MIME 类型 |
-| `file_size` | integer \| null | 文件大小 |
+| `message_id` | integer | 消息 ID；删除真实文件时使用 |
+| `file_name` | string \| null | 文件或文件夹显示名；历史真实文件可能为空或缺少扩展名 |
+| `mime_type` | string \| null | MIME 类型；媒体组文件夹为 `application/x-mistrelay-media-group` |
+| `file_size` | integer \| null | 文件大小；媒体组文件夹为组内总大小 |
+| `message_date` | string | ISO8601 时间；媒体组文件夹为组内最新消息时间 |
+| `media_group_id` | string \| null | 媒体组 ID；删除文件夹和进入文件夹时使用 |
+
+文件夹专有字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `item_count` | integer | 组内真实文件数量 |
+| `total_size` | integer | 组内真实文件总大小 |
+| `group_mime_types` | string[] | 组内真实文件 MIME 类型集合 |
+
+真实文件专有字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
 | `duration` | integer \| null | 时长，秒 |
 | `width` | integer \| null | 宽 |
 | `height` | integer \| null | 高 |
 | `caption` | string \| null | caption |
-| `message_date` | string | ISO8601 时间 |
-| `media_group_id` | string \| null | 媒体组 ID |
 | `supports_streaming` | integer | 0/1 |
+| `download_file_name` | string | 下载保存建议名，服务端会尽量补齐扩展名 |
 | `hash` | string | 用于直链校验的安全 hash |
 | `stream_url` | string | 可直接访问的相对流媒体 URL |
 
@@ -365,24 +427,7 @@ JWT 特性：
 
 #### `/api/rclone/cache/monitor`
 
-这个 WebSocket 不使用统一事件包，直接发送以下 JSON：
-
-```json
-{
-  "status": "caching",
-  "cached_size": 1048576,
-  "total_size": 8388608,
-  "percent": 12.5
-}
-```
-
-错误时：
-
-```json
-{
-  "error": "Missing remote or path"
-}
-```
+该第三方网盘缓存监控接口已废弃，返回 `410 Gone` JSON，不再提供 WebSocket 监控。
 
 ## 3. 认证接口
 
@@ -699,7 +744,7 @@ curl "$BASE_URL/api/system/resources" \
 
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `category` | string | 否 | 按分类过滤，如 `telegram`、`rclone`、`download`、`stream` |
+| `category` | string | 否 | 按分类过滤，如 `telegram`、`download`、`stream` |
 
 成功响应：
 
@@ -709,7 +754,7 @@ curl "$BASE_URL/api/system/resources" \
   "data": {
     "API_ID": 123456,
     "BOT_TOKEN": "123:abc",
-    "UP_ONEDRIVE": true
+    "UP_TELEGRAM": true
   }
 }
 ```
@@ -737,9 +782,7 @@ curl "$BASE_URL/api/config?category=telegram" \
 
 ```json
 {
-  "UP_ONEDRIVE": true,
-  "RCLONE_REMOTE": "onedrive",
-  "RCLONE_PATH": "/Downloads"
+  "UP_TELEGRAM": true
 }
 ```
 
@@ -781,14 +824,7 @@ curl "$BASE_URL/api/config?category=telegram" \
 | `BOT_TOKEN` | `string` | `telegram` | Telegram Bot Token | 是 |
 | `ADMIN_ID` | `int` | `telegram` | Telegram 管理员 ID | 是 |
 | `FORWARD_ID` | `string` | `telegram` | 转发 ID | 否 |
-| `UP_TELEGRAM` | `bool` | `telegram` | 是否上传到 Telegram | 否 |
-| `UP_ONEDRIVE` | `bool` | `rclone` | 是否启用 rclone 上传到 OneDrive | 否 |
-| `RCLONE_REMOTE` | `string` | `rclone` | rclone remote 名称 | 否 |
-| `RCLONE_PATH` | `string` | `rclone` | OneDrive 目标路径 | 否 |
-| `UP_GOOGLE_DRIVE` | `bool` | `rclone` | 是否上传到 Google Drive | 否 |
-| `GOOGLE_DRIVE_REMOTE` | `string` | `rclone` | Google Drive remote 名称 | 否 |
-| `GOOGLE_DRIVE_PATH` | `string` | `rclone` | Google Drive 上传路径 | 否 |
-| `AUTO_DELETE_AFTER_UPLOAD` | `bool` | `rclone` | 上传后自动删除本地文件 | 否 |
+| `UP_TELEGRAM` | `bool` | `telegram` | 是否上传到 Telegram 频道网盘 | 否 |
 | `SAVE_PATH` | `string` | `download` | 下载保存路径 | 否 |
 | `PROXY_IP` | `string` | `download` | 代理 IP | 否 |
 | `PROXY_PORT` | `string` | `download` | 代理端口 | 否 |
@@ -852,414 +888,33 @@ curl -X POST "$BASE_URL/api/config/reload" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## 6. Rclone 配置与云盘信息接口
+## 6. 已废弃的第三方网盘接口
 
-### 6.1 `GET /api/rclone/config`
+第三方网盘（rclone/OneDrive/Google Drive）已废弃。以下旧接口仅保留兼容占位，并统一返回 `410 Gone`：
 
-读取容器内的 rclone 配置文件内容。
+- `GET /api/rclone/config`
+- `POST /api/rclone/config`
+- `GET /api/rclone/remotes`
+- `GET /api/rclone/about`
+- `GET /api/rclone/browse`
+- `GET /api/rclone/thumbnail`
+- `GET /api/rclone/file`
+- `DELETE /api/rclone/file`
+- `GET /api/rclone/cache/monitor`
 
-- 鉴权：是
-- 请求参数：无
-
-文件路径固定为 `/root/.config/rclone/rclone.conf`。
-
-成功响应示例：
-
-```json
-{
-  "success": true,
-  "content": "[onedrive]\ntype = onedrive\n...",
-  "file_path": "/root/.config/rclone/rclone.conf",
-  "exists": true
-}
-```
-
-如果文件不存在：
+响应示例：
 
 ```json
 {
-  "success": true,
-  "content": "",
-  "file_path": "/root/.config/rclone/rclone.conf",
-  "exists": false,
-  "message": "配置文件不存在,请先创建配置"
+  "success": false,
+  "error": "第三方网盘已废弃，请使用 Telegram 频道网盘",
+  "deprecated": true
 }
 ```
 
-示例：
+## 7. Telegram 频道网盘概览
 
-```bash
-curl "$BASE_URL/api/rclone/config" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 6.2 `POST /api/rclone/config`
-
-保存 rclone 配置文件内容。
-
-- 鉴权：是
-- 请求体：JSON
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `content` | string | 是 | 完整的 `rclone.conf` 文本 |
-
-成功响应：
-
-```json
-{
-  "success": true,
-  "message": "配置已保存,修改将在下次上传时生效",
-  "file_path": "/root/.config/rclone/rclone.conf",
-  "backup_path": "/root/.config/rclone/rclone.conf.bak"
-}
-```
-
-说明：
-
-- 若原文件存在，服务端会尽量生成 `.bak` 备份
-- 若内容非空但看起来不像 INI 配置，服务端只记录警告，不阻止保存
-
-失败：
-
-| 状态码 | 场景 |
-| --- | --- |
-| `400` | 请求体格式错误或缺少 `content` |
-| `500` | 文件写入失败 |
-
-示例：
-
-```bash
-curl -X POST "$BASE_URL/api/rclone/config" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"content":"[onedrive]\ntype = onedrive\n"}'
-```
-
-### 6.3 `GET /api/rclone/remotes`
-
-解析 `rclone.conf` 中的全部 remote。
-
-- 鉴权：是
-- 请求参数：无
-
-成功响应：
-
-```json
-{
-  "success": true,
-  "remotes": [
-    {
-      "name": "onedrive",
-      "type": "onedrive"
-    },
-    {
-      "name": "gdrive",
-      "type": "drive"
-    }
-  ]
-}
-```
-
-如果配置文件不存在，返回空数组而不是错误。
-
-示例：
-
-```bash
-curl "$BASE_URL/api/rclone/remotes" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 6.4 `GET /api/rclone/about`
-
-查询 remote 容量信息。
-
-- 鉴权：是
-- Query 参数：
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `remote` | string | 是 | remote 名称，如 `onedrive` |
-
-成功响应：
-
-```json
-{
-  "success": true,
-  "supported": true,
-  "remote": "onedrive",
-  "data": {
-    "total": 107374182400,
-    "used": 21474836480,
-    "free": 85899345920,
-    "trashed": 0,
-    "other": 0,
-    "objects": 1234
-  }
-}
-```
-
-如果当前网盘不支持容量统计：
-
-```json
-{
-  "success": true,
-  "supported": false,
-  "remote": "some-remote",
-  "error": "当前网盘暂不支持容量统计"
-}
-```
-
-失败：
-
-| 状态码 | 场景 |
-| --- | --- |
-| `400` | `remote` 为空 |
-| `500` | rclone 执行失败或输出解析失败 |
-| `504` | rclone 超时 |
-
-示例：
-
-```bash
-curl "$BASE_URL/api/rclone/about?remote=onedrive" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-## 7. Rclone 浏览、缩略图与文件接口
-
-### 7.1 `GET /api/rclone/browse`
-
-列出指定 remote/path 下的文件与目录。
-
-- 鉴权：是
-- Query 参数：
-
-| 参数 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `remote` | string | `onedrive` | remote 名称 |
-| `path` | string | `/` | 远端路径 |
-
-成功响应：
-
-```json
-{
-  "success": true,
-  "remote": "onedrive",
-  "path": "/Movies",
-  "items": [
-    {
-      "name": "movie.mp4",
-      "path": "Movies/movie.mp4",
-      "size": 123456789,
-      "mimeType": "video/mp4",
-      "modTime": "2026-04-22T10:00:00Z",
-      "isDir": false,
-      "id": "0123456789ABCDEF"
-    }
-  ]
-}
-```
-
-失败：
-
-| 状态码 | 场景 |
-| --- | --- |
-| `400` | `remote` 为空 |
-| `500` | rclone 执行或 JSON 解析失败 |
-| `504` | rclone 超时 |
-
-示例：
-
-```bash
-curl "$BASE_URL/api/rclone/browse?remote=onedrive&path=/Movies" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 7.2 `GET /api/rclone/thumbnail`
-
-为远端文件生成或获取缩略图地址。
-
-- 鉴权：是
-- Query 参数：
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `remote` | string | 是 | remote 名称 |
-| `path` | string | 是 | 文件路径 |
-| `dir` | string | 否 | 当前目录，兼容旧前端时用于补全相对路径 |
-
-说明：
-
-- 如果传入的是相对路径，且 `dir` 不为 `/`，服务端会尝试拼接成完整路径
-- 接口成功时不会直接返回图片二进制，而是返回相对 URL
-
-成功响应：
-
-```json
-{
-  "success": true,
-  "thumbnail_url": "/api/rclone/thumbnail/serve/onedrive/4c6f0d9f9b5f.webp"
-}
-```
-
-失败：
-
-| 状态码 | 场景 |
-| --- | --- |
-| `400` | `remote` 或 `path` 缺失 |
-| `500` | 挂载失败、文件路径获取失败、缩略图生成失败 |
-
-示例：
-
-```bash
-curl "$BASE_URL/api/rclone/thumbnail?remote=onedrive&path=Movies/movie.mp4&dir=/Movies" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 7.3 `GET /api/rclone/thumbnail/serve/{remote}/{filename}`
-
-直接返回缩略图文件。
-
-- 鉴权：否
-- Path 参数：
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `remote` | string | remote 名称 |
-| `filename` | string | 缩略图文件名，通常是 hash 后的 `.webp` |
-
-成功响应：
-
-- `Content-Type: image/webp`
-- `Cache-Control: public, max-age=86400`
-
-失败：
-
-| 状态码 | 场景 |
-| --- | --- |
-| `404` | 缩略图不存在 |
-| `500` | 服务内部错误 |
-
-示例：
-
-```bash
-curl -O "$BASE_URL/api/rclone/thumbnail/serve/onedrive/4c6f0d9f9b5f.webp"
-```
-
-### 7.4 `GET /api/rclone/file`
-
-读取远端文件。成功时返回文件流，不是 JSON。
-
-- 鉴权：是
-- Query 参数：
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `remote` | string | 是 | remote 名称 |
-| `path` | string | 是 | 文件路径 |
-| `download` | boolean | 否 | 为 `true` 时添加 `Content-Disposition: attachment` |
-
-说明：
-
-- 服务端会先确保 remote 已挂载
-- 成功时由 `aiohttp.web.FileResponse` 直接返回本地挂载文件
-- 浏览器直接下载场景建议使用 `?token=` 方式
-
-失败：
-
-| 状态码 | 场景 |
-| --- | --- |
-| `400` | 缺少 `remote` 或 `path` |
-| `404` | 文件不存在或不可访问 |
-| `500` | 挂载或内部处理失败，返回纯文本响应 |
-
-示例：
-
-```bash
-curl -L "$BASE_URL/api/rclone/file?remote=onedrive&path=Movies/movie.mp4&download=true&token=$TOKEN" \
-  -o movie.mp4
-```
-
-### 7.5 `DELETE /api/rclone/file`
-
-删除远端文件或目录。
-
-- 鉴权：是
-- Query 参数：
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `remote` | string | 是 | remote 名称 |
-| `path` | string | 是 | 文件或目录路径 |
-| `is_dir` | boolean | 否 | `true` 时删除目录并清空内容；默认删除单个文件 |
-
-成功响应：
-
-```json
-{
-  "success": true,
-  "message": "删除成功"
-}
-```
-
-失败：
-
-| 状态码 | 场景 |
-| --- | --- |
-| `400` | 缺少 `remote` 或 `path` |
-| `500` | rclone 删除失败 |
-| `504` | 删除超时 |
-
-示例：
-
-```bash
-curl -X DELETE "$BASE_URL/api/rclone/file?remote=onedrive&path=Movies/movie.mp4&is_dir=false" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 7.6 `GET /api/rclone/cache/monitor`
-
-监控 VFS 缓存进度。
-
-- 鉴权：是
-- 协议：WebSocket
-- Query 参数：
-
-| 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `remote` | string | 是 | remote 名称 |
-| `path` | string | 是 | 文件路径 |
-
-成功消息：
-
-```json
-{
-  "status": "caching",
-  "cached_size": 1048576,
-  "total_size": 8388608,
-  "percent": 12.5
-}
-```
-
-`status` 可能值：
-
-- `waiting`
-- `caching`
-- `fully_cached`
-
-错误时直接发送：
-
-```json
-{
-  "error": "File not found on mount"
-}
-```
-
-示例：
-
-```bash
-wscat -c "ws://localhost:8080/api/rclone/cache/monitor?token=$TOKEN&remote=onedrive&path=Movies/movie.mp4"
-```
+TG 频道网盘是当前唯一维护的网盘能力，接口集中在第 9 节 `/api/telegram/*`。PC 客户端适配时应以 `entry_type` 区分媒体组文件夹和真实文件，不再调用第三方网盘接口。
 
 ## 8. 下载、上传、队列与统计接口
 
@@ -1413,8 +1068,8 @@ curl "$BASE_URL/api/monitor/trend" \
     "total_size": 1234567890,
     "uploaded_size": 987654321,
     "by_target": {
-      "onedrive": 8,
-      "telegram": 7
+      "telegram": 7,
+      "onedrive": 8
     },
     "by_failure_reason": {
       "network_error": 1,
@@ -1446,7 +1101,7 @@ curl "$BASE_URL/api/uploads/statistics" \
 | --- | --- | --- | --- |
 | `limit` | integer | `100` | 最大返回条数，限制到 `1-500` |
 | `status` | string | 无 | 按上传状态过滤 |
-| `upload_target` | string | 无 | 按目标过滤，如 `onedrive`、`telegram`、`gdrive` |
+| `upload_target` | string | 无 | 按目标过滤；新任务为 `telegram`，旧记录可能是 `onedrive`/`gdrive` |
 
 成功响应：
 
@@ -1459,7 +1114,7 @@ curl "$BASE_URL/api/uploads/statistics" \
     {
       "id": 1,
       "download_id": 10,
-      "upload_target": "onedrive",
+      "upload_target": "telegram",
       "status": "uploading",
       "uploaded_size": 123456,
       "total_size": 999999,
@@ -1472,7 +1127,7 @@ curl "$BASE_URL/api/uploads/statistics" \
 示例：
 
 ```bash
-curl "$BASE_URL/api/uploads?limit=100&status=failed&upload_target=onedrive" \
+curl "$BASE_URL/api/uploads?limit=100&status=failed&upload_target=telegram" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -1668,7 +1323,7 @@ curl -X DELETE "$BASE_URL/api/downloads/record/10?delete_file=true" \
 ```json
 {
   "success": true,
-  "message": "上传任务 5 已重新提交rclone上传"
+  "message": "上传任务 5 已重新提交Telegram上传"
 }
 ```
 
@@ -1691,8 +1346,8 @@ curl -X DELETE "$BASE_URL/api/downloads/record/10?delete_file=true" \
 
 说明：
 
-- `onedrive` / `gdrive` 走 rclone 上传重试
-- `telegram` 走 Telegram 上传重试
+- 仅 `telegram` 支持上传重试
+- `onedrive` / `gdrive` 是历史第三方网盘目标，重试会返回 `410 Gone`
 - 重试前会把上传状态重置为 `pending`
 
 示例：
@@ -1738,11 +1393,15 @@ curl -X DELETE "$BASE_URL/api/uploads/5" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## 9. Telegram 媒体库接口
+## 9. Telegram 频道网盘接口
 
 ### 9.1 `GET /api/telegram/browse`
 
-浏览已入库的 Telegram 媒体文件。
+默认按 TG 网盘根目录返回条目：同一 `media_group_id` 会聚合成一个 `entry_type = "folder"` 的媒体组文件夹；单文件返回 `entry_type = "file"`。传入 `media_group_id` 时返回该媒体组内的真实文件列表。
+
+PC 客户端详细适配指南见 [`docs/pc-client-tg-drive.md`](pc-client-tg-drive.md)。
+
+浏览已入库的 Telegram 频道网盘文件。
 
 - 鉴权：是
 - Query 参数：
@@ -1753,6 +1412,7 @@ curl -X DELETE "$BASE_URL/api/uploads/5" \
 | `page_size` | integer | `50` | 每页数量，服务端上限 `200` |
 | `search` | string | 无 | 按 `file_name` 或 `caption` 模糊搜索 |
 | `type` | string | 无 | `video`、`image`、`audio`、`document` |
+| `media_group_id` | string | 无 | 进入指定媒体组文件夹，返回组内真实文件 |
 | `sort_by` | string | `message_date` | 允许：`message_date`、`file_size`、`file_name` |
 | `sort_desc` | boolean | `true` | 只要不是显式传 `false`，都按降序处理 |
 
@@ -1763,23 +1423,48 @@ curl -X DELETE "$BASE_URL/api/uploads/5" \
   "success": true,
   "items": [
     {
+      "entry_type": "folder",
+      "media_group_id": "1234567890",
+      "file_unique_id": "AQAD_group_rep",
+      "chat_id": -1001234567890,
+      "message_id": 12344,
+      "file_name": "媒体组 1234567890",
+      "mime_type": "application/x-mistrelay-media-group",
+      "file_size": 123456789,
+      "total_size": 123456789,
+      "item_count": 4,
+      "message_date": "2026-04-24T10:20:30"
+    },
+    {
+      "entry_type": "file",
       "file_unique_id": "AQAD...",
+      "chat_id": -1001234567890,
       "message_id": 12345,
       "file_name": "movie.mp4",
+      "download_file_name": "movie.mp4",
+      "mime_type": "video/mp4",
+      "file_size": 104857600,
+      "message_date": "2026-04-24T10:10:00",
       "hash": "a1b2c3d4",
       "stream_url": "/12345/movie.mp4?hash=a1b2c3d4"
     }
   ],
   "total": 100,
   "page": 1,
-  "page_size": 50
+  "page_size": 50,
+  "grouped": true
 }
 ```
 
 说明：
 
+- 根目录 `total` 是“媒体组文件夹 + 单文件”的数量，不是底层真实媒体文件数量
+- 传入 `media_group_id` 后 `grouped` 为 `false`，`items[]` 均为真实文件
 - `type=document` 会排除 video/image/audio
 - 非法 `sort_by` 会自动回退为 `message_date`
+- `stream_url` 是相对服务端 origin 的 URL，客户端可按需追加 `token` 查询参数
+- PC 客户端下载保存名应优先使用流媒体响应头 `Content-Disposition`，拿不到响应头时使用 `download_file_name`
+- 服务端会在 `download_file_name` 和 `stream_url` 路径中尽量补齐扩展名：优先使用真实文件名已有的常见扩展名；若文件名缺少扩展名，或最后的点后缀不是常见文件扩展名，则按 MIME/媒体类型补 `.mp4`、`.jpg`、`.ogg` 等后缀
 
 示例：
 
@@ -1790,7 +1475,7 @@ curl "$BASE_URL/api/telegram/browse?page=1&page_size=50&search=movie&type=video&
 
 ### 9.2 `GET /api/telegram/usage`
 
-统计 Telegram 媒体库容量与文件类型分布。
+统计 Telegram 频道网盘容量与文件类型分布。
 
 - 鉴权：是
 
@@ -1819,7 +1504,7 @@ curl "$BASE_URL/api/telegram/usage" \
 
 ### 9.3 `DELETE /api/telegram/item/{message_id}`
 
-删除单个 Telegram 媒体项。
+删除单个 Telegram 频道网盘文件。
 
 - 鉴权：是
 - Path 参数：`message_id`
@@ -1904,7 +1589,7 @@ curl -X DELETE "$BASE_URL/api/telegram/group/12345678901234567" \
 
 ### 9.5 `DELETE /api/telegram/all`
 
-清空整个 Telegram 媒体库。
+清空整个 Telegram 频道网盘。
 
 - 鉴权：是
 
@@ -2292,6 +1977,7 @@ curl -L "$BASE_URL/api/logs/download/mistrelay.log?token=$TOKEN" \
 - `Content-Range`
 - `Content-Length`
 - `Content-Disposition`
+- `Content-Disposition` 会尽量同时提供 `filename` 和 `filename*`，下载客户端应优先解析 `filename*`
 - `X-MistRelay-Min-Threads`
 
 说明：
@@ -2307,6 +1993,34 @@ curl -L "$BASE_URL/api/logs/download/mistrelay.log?token=$TOKEN" \
 curl -L "$BASE_URL/12345/movie.mp4?hash=a1b2c3d4"
 ```
 
+### 12.4 下载文件名与后缀规则
+
+PC 客户端下载 TG 网盘文件时，保存名优先级必须是：
+
+1. 流媒体响应头 `Content-Disposition` 的 `filename*`
+2. 流媒体响应头 `Content-Disposition` 的 `filename`
+3. `/api/telegram/browse` 返回的 `download_file_name`
+4. `stream_url` 路径最后一段解码后的文件名
+5. `file_name`
+6. `media_<message_id>.bin`
+
+服务端生成 `download_file_name` 时会：
+
+- 清理路径分隔符、换行和危险引号，只保留基础文件名
+- 保留常见真实扩展名，例如 `.mp4`、`.jpg`、`.mkv`、`.zip`
+- 对缺少扩展名的图片、视频、音频按 MIME 或媒体类型补齐扩展名
+- 对类似 `movie.1080p` 这类非标准点后缀继续补真实扩展名，最终形如 `movie.1080p.mp4`
+- 对未知二进制且文件名已有不明点后缀的情况不强行追加 `.bin`，避免误改用户原始文件名
+
+示例：
+
+| 原始文件名 | MIME/媒体类型 | 下载保存名 |
+| --- | --- | --- |
+| `movie` | `video/mp4` | `movie.mp4` |
+| `movie.1080p` | `video/mp4` | `movie.1080p.mp4` |
+| 空 | `image/jpeg` | `media_<message_id>.jpg` |
+| `archive.7z` | `application/octet-stream` | `archive.7z` |
+
 ## 13. 常见错误码速查
 
 | 状态码 | 常见来源 |
@@ -2319,4 +2033,4 @@ curl -L "$BASE_URL/12345/movie.mp4?hash=a1b2c3d4"
 | `404` | 资源不存在、文件不存在、下载记录不存在 |
 | `500` | 后端异常、子进程失败、数据库/IO 错误 |
 | `503` | 依赖服务未初始化，例如 aria2 客户端缺失 |
-| `504` | 调用 rclone 或外部系统超时 |
+| `504` | 调用外部系统超时 |

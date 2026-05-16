@@ -1,15 +1,14 @@
 # MistRelay
 
-基于 Telegram 机器人的 aria2 下载控制系统，支持 OneDrive 自动上传，并集成了文件直链功能。
+基于 Telegram 机器人的 aria2 下载控制系统，专注 Telegram 频道网盘，并集成文件直链功能。
 
 ## ✨ 功能特点
 
 ### 核心功能
 - **Telegram 控制**: 基于电报机器人控制 aria2，支持任务管理。
-- **自动上传**: 下载完成后通过 rclone 自动上传到 OneDrive。
+- **自动上传**: 下载完成后自动上传到 Telegram 频道网盘。
 - **数据完整性保障**: 
   - 下载文件大小校验（与 aria2 报告对比）。
-  - OneDrive 上传后远程文件校验（存在性 + 大小 + MD5）。
   - 校验失败自动重试（最多3次）。
   - 确保数据安全，防止数据丢失。
 - **文件直链**: 整合 [TG-FileStreamBot](https://github.com/rong6/TG-FileStreamBot)，为 Telegram 文件生成可访问的直链。
@@ -26,10 +25,14 @@
   - 下载记录管理，支持查看跳过文件状态。
   - **任务中心**: 统一管理下载和上传任务，支持实时状态更新。
   - **数据一致性保证**: WebSocket 实时同步，确保前后端数据一致。
-- **部署友好**: Docker 一键部署，集成 aria2、rclone 和前端。
+- **部署友好**: Docker 一键部署，集成 aria2、Telegram 频道网盘和前端。
 - **性能优化**: 
   - 上传操作完全异步化，不阻塞 API 响应。
   - 支持配置热重载，无需重启服务。
+
+## 📚 客户端文档
+
+- PC 客户端适配 TG 网盘：`docs/pc-client-tg-drive.md`
 
 ## 🚀 快速开始
 
@@ -49,6 +52,8 @@ API_ID: xxxx                      # Telegram API ID
 API_HASH: xxxxxxxx                # Telegram API Hash
 BOT_TOKEN: xxxx:xxxxxxxxxxxx      # Telegram Bot Token
 ADMIN_ID: management_id           # 管理员 Telegram ID
+BIN_CHANNEL: -100xxxxxxxxxx       # Telegram 频道网盘存储频道 ID
+UP_TELEGRAM: true                 # 下载完成后上传到 TG 频道网盘
 
 # 下载配置
 SKIP_SMALL_FILES: false          # 是否跳过小于指定大小的媒体文件
@@ -57,18 +62,11 @@ MIN_FILE_SIZE_MB: 100            # 最小文件大小（MB），小于此大小�
 # ... 其他配置 ...
 ```
 
-### 2. 配置 Rclone
+### 2. 配置 Telegram 频道网盘
 
-由于 VPS 通常没有图形界面，建议在本地配置 rclone 后上传配置文件：
+配置 `BIN_CHANNEL` 为用于存储文件的 Telegram 频道 ID，并确保 Bot 是该频道管理员。建议使用以 `-100` 开头的频道 ID，并开启 `UP_TELEGRAM: true`。
 
-1.  **本地配置**: 在本地电脑运行 `rclone config` 完成 OneDrive 授权。
-2.  **上传配置**: 将本地生成的 `rclone.conf` 复制到项目的 `rclone/` 目录下。
-
-```bash
-# 示例：创建目录并上传
-mkdir -p rclone
-# 将 rclone.conf 放入此目录
-```
+第三方网盘（rclone/OneDrive/Google Drive）已废弃；历史上传记录可继续展示，但新任务只维护 Telegram 频道网盘流程。
 
 ### 3. Docker 部署 (生产环境)
 
@@ -111,11 +109,11 @@ docker compose logs -f --tail=100
 2. **结果**: Bot 会返回文件的直链地址（支持文档、视频、音频等）。
 3. **自动下载**: 
    - 若开启 `STREAM_AUTO_DOWNLOAD: true`，管理员发送的文件会自动加入 Aria2 下载队列。
-   - 需配置 `BIN_CHANNEL` 以确保日志存储正常。
+   - 需配置 `BIN_CHANNEL` 以确保直链和 TG 频道网盘存储正常。
 
 ### 快捷提示
-- **OneDrive 上传优化**: 项目默认配置了优化参数（如 `--transfers 4`, `--checkers 8`, `--buffer-size 64M` 等）以提升速度。
-- **自动删除**: 配置 `AUTO_DELETE_AFTER_UPLOAD: true` 可在上传成功后自动清理本地文件。
+- **TG 频道网盘**: 上传完成后可在 Web 的“TG网盘”页面浏览、预览和删除频道文件。
+- **媒体组文件夹**: 同一 Telegram 媒体组会在 TG 网盘根目录显示为文件夹，进入后查看组内真实文件。
 - **跳过小文件**: 
   - 配置 `SKIP_SMALL_FILES: true` 启用跳过小文件功能。
   - 配置 `MIN_FILE_SIZE_MB: 100` 设置最小文件大小（默认 100MB）。
@@ -204,8 +202,6 @@ Dockerfile 使用多阶段构建：
 ### [1.1.0] - 2026-01-26 (数据完整性增强)
 - **🔒 数据安全**:
   - 新增下载文件大小校验（与 aria2 totalLength 对比）。
-  - 新增 OneDrive 上传后远程文件校验（存在性 + 大小）。
-  - 新增 MD5 哈希校验（可选，提供字节级完整性保证）。
   - 新增自动重试机制（校验失败时自动重试最多3次）。
 - **🛡️ 防护机制**:
   - 校验失败时保留本地文件，防止数据丢失。
@@ -215,7 +211,7 @@ Dockerfile 使用多阶段构建：
 ### [1.0.0] - 2026-01-22 (首个发行版)
 - **🎉 发布**: 整合了 [MistRelay](https://github.com/Lapis0x0/MistRelay) 和 [TG-FileStreamBot](https://github.com/rong6/TG-FileStreamBot)。
 - **✨ 新增**:
-  - 完整的 Aria2 + Rclone 自动化流程。
+  - 完整的 Aria2 + Telegram 频道网盘自动化流程。
   - 统一的 Web UI。
   - Docker 容器集成与系统管理功能。
   - 消息美化与实时进度展示。

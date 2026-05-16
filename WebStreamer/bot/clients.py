@@ -82,7 +82,7 @@ async def initialize_clients():
     # 调试日志：检查配置状态
     logger.info(f"🔍 多客户端初始化检查: MULTI_CLIENT={Var.MULTI_CLIENT}, MULTI_BOT_TOKENS数量={len(Var.MULTI_BOT_TOKENS) if Var.MULTI_BOT_TOKENS else 0}")
     if Var.MULTI_BOT_TOKENS:
-        logger.info(f"📋 配置的额外BOT_TOKEN: {[token[:15] + '...' for token in Var.MULTI_BOT_TOKENS]}")
+        logger.info(f"已配置额外BOT_TOKEN数量: {len(Var.MULTI_BOT_TOKENS)}")
     
     # 如果配置了额外的BOT_TOKEN，创建额外的客户端
     if Var.MULTI_CLIENT and Var.MULTI_BOT_TOKENS and len(Var.MULTI_BOT_TOKENS) > 0:
@@ -129,7 +129,7 @@ async def initialize_clients():
                 register_bot_client(index)
                 logger.info(f"客户端 {index} 已初始化: @{bot_info.username}")
             except Exception as e:
-                logger.error(f"初始化客户端 {index} 失败 (token: {bot_token[:10]}...): {e}", exc_info=True)
+                logger.error(f"初始化客户端 {index} 失败: {e}", exc_info=True)
                 # 继续初始化其他客户端，不因单个失败而停止
         
         successful_clients = len(multi_clients)

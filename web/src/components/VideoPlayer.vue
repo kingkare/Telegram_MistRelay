@@ -21,23 +21,11 @@ const props = defineProps({
   options: {
     type: Object,
     default: () => ({})
-  },
-  remote: {
-    type: String,
-    default: ''
-  },
-  path: {
-    type: String,
-    default: ''
   }
 });
 
-import { ElNotification } from 'element-plus'
-import { buildWsUrl } from '@/utils/websocket'
-
 const videoPlayer = ref<HTMLVideoElement | null>(null);
 let player: any = null; // Use any to avoid complex typing issues for now, or use ReturnType<typeof videojs>
-let ws: WebSocket | null = null;
 
 onMounted(() => {
   if (videoPlayer.value) {
@@ -56,44 +44,12 @@ onMounted(() => {
       console.log('player is ready');
     });
     
-    // Connect to cache monitor
-    if (props.remote && props.path) {
-      const wsUrl = buildWsUrl('/api/rclone/cache/monitor', {
-        remote: props.remote,
-        path: props.path,
-      });
-      
-      try {
-        ws = new WebSocket(wsUrl);
-        ws.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.status === 'fully_cached') {
-              ElNotification({
-                title: '缓存完成',
-                message: '视频已完全缓存，可以流畅拖动进度条',
-                type: 'success',
-                duration: 4500
-              });
-              ws?.close();
-            }
-          } catch (e) {
-            console.error('WS parse error', e);
-          }
-        };
-      } catch (e) {
-        console.error('WebSocket init error', e);
-      }
-    }
   }
 });
 
 onBeforeUnmount(() => {
   if (player) {
     player.dispose();
-  }
-  if (ws) {
-    ws.close();
   }
 });
 

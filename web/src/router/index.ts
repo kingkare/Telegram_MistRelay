@@ -26,8 +26,7 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/tasks',
-    name: 'Tasks',
-    component: () => import('@/views/tasks.vue')
+    redirect: '/downloads?tab=queue'
   },
   {
     path: '/settings',
@@ -41,17 +40,18 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/system',
-    name: 'System',
-    component: () => import('@/views/system.vue')
+    redirect: '/settings?tab=container'
   },
   {
     path: '/logs',
-    redirect: '/system?tab=app-logs'
+    redirect: '/settings?tab=app-logs'
   }
 ]
 
 export const router = createRouter({
-  history: shouldUseHashHistory() ? createWebHashHistory() : createWebHistory(),
+  history: shouldUseHashHistory()
+    ? createWebHashHistory(import.meta.env.BASE_URL || '/')
+    : createWebHistory(import.meta.env.BASE_URL || '/'),
   routes
 })
 

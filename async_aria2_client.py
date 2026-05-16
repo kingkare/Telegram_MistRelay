@@ -20,28 +20,18 @@ from aria2_client.constants import (
     DOWNLOAD_PROGRESS_UPDATE_INTERVAL,
     FILE_MODIFIED_TIME_WINDOW,
     PROGRESS_UPDATE_FREQUENCY,
-    RCLONE_MAX_RETRIES,
-    RCLONE_RETRY_BASE_DELAY,
-    RCLONE_RETRY_EXTRA_DELAY,
-    PROCESS_TERMINATE_TIMEOUT,
     upload_work_loads,
     pyrogram_clients,
     channel_accessible_clients,
     logger
 )
-from aria2_client.utils import (
-    format_progress_bar,
-    format_upload_message,
-    parse_rclone_progress
-)
+from aria2_client.utils import format_progress_bar
 from configer import RPC_URL, RPC_SECRET
 
 # 导出所有公共接口
 __all__ = [
     'AsyncAria2Client',
     'format_progress_bar',
-    'format_upload_message',
-    'parse_rclone_progress',
 ]
 
 

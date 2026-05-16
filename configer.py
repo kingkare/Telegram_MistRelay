@@ -92,17 +92,7 @@ PROXY_IP = result.get('PROXY_IP') or None
 PROXY_PORT = result.get('PROXY_PORT') or None
 ADMIN_ID = result.get('ADMIN_ID') or 0
 FORWARD_ID = result.get('FORWARD_ID') or None
-UP_TELEGRAM = result.get('UP_TELEGRAM', False)
-# rclone相关配置
-UP_ONEDRIVE = result.get('UP_ONEDRIVE', False)
-RCLONE_REMOTE = result.get('RCLONE_REMOTE', 'onedrive')
-RCLONE_PATH = result.get('RCLONE_PATH', '/Downloads')
-# 谷歌网盘配置
-UP_GOOGLE_DRIVE = result.get('UP_GOOGLE_DRIVE', False)
-GOOGLE_DRIVE_REMOTE = result.get('GOOGLE_DRIVE_REMOTE', 'gdrive')
-GOOGLE_DRIVE_PATH = result.get('GOOGLE_DRIVE_PATH', '/Downloads')
-# 自动删除本地文件设置
-AUTO_DELETE_AFTER_UPLOAD = result.get('AUTO_DELETE_AFTER_UPLOAD', True)
+UP_TELEGRAM = result.get('UP_TELEGRAM', True)
 RPC_SECRET = result.get('RPC_SECRET') or ''
 RPC_URL = result.get('RPC_URL') or 'localhost:6800/jsonrpc'
 
@@ -136,8 +126,7 @@ ARIA2_MAX_CONCURRENT_DOWNLOADS = result.get('ARIA2_MAX_CONCURRENT_DOWNLOADS', 5)
 # MULTI_BOT_TOKENS 可以是字符串（逗号分隔）或列表
 # 注意：这些是额外的token，默认的BOT_TOKEN会作为第一个客户端
 MULTI_BOT_TOKENS_raw = result.get('MULTI_BOT_TOKENS', [])
-# 调试：打印原始配置值（使用print因为配置加载在日志初始化之前）
-print(f"[CONFIG] 读取 MULTI_BOT_TOKENS 配置: 值={MULTI_BOT_TOKENS_raw}, 类型={type(MULTI_BOT_TOKENS_raw)}")
+print(f"[CONFIG] 读取 MULTI_BOT_TOKENS 配置: 类型={type(MULTI_BOT_TOKENS_raw)}")
 
 # 处理配置：支持字符串和列表两种格式
 if MULTI_BOT_TOKENS_raw:
@@ -157,10 +146,10 @@ if MULTI_BOT_TOKENS_raw:
     # 如果配置了至少一个额外的token，启用多客户端模式（加上默认的BOT_TOKEN，至少有两个客户端）
     STREAM_MULTI_CLIENT = len(MULTI_BOT_TOKENS) > 0
     if STREAM_MULTI_CLIENT:
-        print(f"[CONFIG] ✅ 多机器人配置: 找到 {len(MULTI_BOT_TOKENS)} 个额外的BOT_TOKEN，启用多客户端模式")
+        print(f"[CONFIG] 多机器人配置: 找到 {len(MULTI_BOT_TOKENS)} 个额外的BOT_TOKEN，启用多客户端模式")
     else:
-        print(f"[CONFIG] ⚠️ 多机器人配置: MULTI_BOT_TOKENS 配置存在但为空，使用单客户端模式")
+        print(f"[CONFIG] 多机器人配置: MULTI_BOT_TOKENS 配置存在但为空，使用单客户端模式")
 else:
     MULTI_BOT_TOKENS = []
     STREAM_MULTI_CLIENT = False
-    print(f"[CONFIG] ℹ️ 多机器人配置: 未配置额外的BOT_TOKEN，使用单客户端模式")
+    print(f"[CONFIG] 多机器人配置: 未配置额外的BOT_TOKEN，使用单客户端模式")

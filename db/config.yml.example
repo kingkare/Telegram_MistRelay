@@ -7,24 +7,10 @@ BOT_TOKEN: your_bot_token
 ADMIN_ID: your_admin_id
 FORWARD_ID: 转发id
 
-#默认是否上传到电报 true 或者 false
-UP_TELEGRAM: false
-#是否启用rclone上传到OneDrive
-UP_ONEDRIVE: true
-#是否启用rclone上传到Google Drive
-UP_GOOGLE_DRIVE: false
+# 默认是否上传到 Telegram 频道网盘 true 或者 false
+UP_TELEGRAM: true
 
-#rclone配置
-RCLONE_REMOTE: onedrive #rclone配置的远程名称
-RCLONE_PATH: /Downloads #OneDrive上的目标路径
-#是否在成功上传到OneDrive后自动删除本地文件
-AUTO_DELETE_AFTER_UPLOAD: true
 
-#Google Drive配置
-# 注意：Google Drive上传使用rclone，需要在rclone.conf中配置OAuth2 token
-# 请使用 rclone config 命令配置Google Drive，参考: https://rclone.org/drive/
-GOOGLE_DRIVE_REMOTE: gdrive #rclone配置的Google Drive远程名称（需与rclone.conf中的配置名称一致）
-GOOGLE_DRIVE_PATH: /Downloads #Google Drive上的目标路径
 #下载保存路径
 SAVE_PATH: /root/mistrelay_downloads
 
@@ -36,10 +22,10 @@ PROXY_PORT:
 RPC_SECRET: your_rpc_secret
 RPC_URL: localhost:6800/jsonrpc
 
-# 直链功能配置(默认启用,作为TG媒体文件下载的前置功能)
+# 直链与 TG 频道网盘配置(默认启用,作为 TG 媒体文件下载和上传的前置能力)
 # 是否启用直链功能
 ENABLE_STREAM: true
-# 日志频道ID(用于存储转发文件,启用直链功能时必须配置)
+# TG 频道网盘存储频道 ID(启用直链或 TG 上传时必须配置)
 BIN_CHANNEL: your_bin_channel_id
 # Web服务器端口
 STREAM_PORT: 8080

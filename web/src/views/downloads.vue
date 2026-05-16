@@ -2,10 +2,10 @@
   <div class="tasks-center-page">
     <el-card shadow="hover">
       <template #header>
-        <div class="flex justify-between items-center">
-          <span class="text-xl font-semibold">任务中心</span>
-          <div class="flex gap-4 items-center">
-            <el-select v-model="limit" @change="handleLimitChange" style="width: 150px">
+        <div class="tasks-card-header">
+          <span class="tasks-card-title">任务中心</span>
+          <div class="tasks-card-actions">
+            <el-select v-model="limit" class="tasks-limit-select" @change="handleLimitChange">
               <el-option label="显示 50 条" :value="50" />
               <el-option label="显示 100 条" :value="100" />
               <el-option label="显示 200 条" :value="200" />
@@ -34,7 +34,7 @@
         </template>
       </el-alert>
       
-      <div v-else-if="groups && groups.length > 0" class="tasks-tabs-container">
+      <div v-else class="tasks-tabs-container">
         <el-tabs v-model="activeTab" class="tasks-tabs">
           <!-- 下载标签页 -->
           <el-tab-pane name="download">
@@ -151,8 +151,8 @@
                 
                 <el-table-column label="上传目标" width="120">
                   <template #default="{ row }">
-                    <el-tag size="small" :type="row.upload_target === 'onedrive' ? 'primary' : 'success'">
-                      {{ row.upload_target === 'onedrive' ? 'OneDrive' : row.upload_target === 'telegram' ? 'Telegram' : row.upload_target }}
+                    <el-tag size="small" :type="getUploadTargetTagType(row.upload_target)">
+                      {{ getUploadTargetLabel(row.upload_target) }}
                     </el-tag>
                   </template>
                 </el-table-column>
@@ -204,8 +204,9 @@
                             size="small"
                             :icon="RefreshRight"
                             :loading="operationLoading"
+                            :disabled="isDeprecatedUploadTarget(row.upload_target)"
                             @click.stop="handleRetryUpload(row)"
-                            title="重试"
+                            :title="isDeprecatedUploadTarget(row.upload_target) ? '历史第三方网盘已废弃' : '重试'"
                           />
                           <el-button
                             size="small"
@@ -223,6 +224,104 @@
             </div>
           </el-tab-pane>
 
+          <!-- 队列标签页 -->
+          <el-tab-pane name="queue">
+            <template #label>
+              <span class="flex items-center gap-2">
+                <el-icon><List /></el-icon>
+                队列
+                <el-tag v-if="queueSize > 0" size="small" type="warning">{{ queueSize }}</el-tag>
+              </span>
+            </template>
+
+            <div class="queue-toolbar">
+              <el-button @click="fetchQueue" :icon="Refresh" size="small" :loading="queueLoading">刷新队列</el-button>
+              <el-button @click="toggleQueueAutoRefresh" :type="queueAutoRefresh ? 'primary' : ''" size="small">
+                {{ queueAutoRefresh ? '停止自动刷新' : '开启自动刷新' }}
+              </el-button>
+            </div>
+
+            <el-skeleton v-if="queueLoading && !queueData" :rows="6" animated />
+            <div v-else>
+              <el-alert
+                v-if="queueData?.flood_wait?.is_waiting"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="flood-wait-alert"
+              >
+                <template #title>
+                  <strong>⚠️ Telegram 限流中</strong>
+                </template>
+                <div class="flood-wait-info">
+                  <p><strong>限流时长:</strong> {{ queueData.flood_wait.wait_seconds }} 秒 ({{ Math.floor(queueData.flood_wait.wait_seconds / 60) }} 分钟)</p>
+                  <p><strong>剩余时间:</strong> {{ queueData.flood_wait.remaining_seconds }} 秒</p>
+                  <p class="flood-wait-message">所有消息已进入等待队列，限流结束后将自动恢复处理</p>
+                </div>
+              </el-alert>
+
+              <div class="queue-stats">
+                <el-statistic title="队列大小" :value="queueSize">
+                  <template #suffix>
+                    <span class="stat-suffix">个任务</span>
+                  </template>
+                </el-statistic>
+                <el-statistic title="等待中" :value="waitingItems.length">
+                  <template #suffix>
+                    <span class="stat-suffix">个</span>
+                  </template>
+                </el-statistic>
+              </div>
+
+              <el-divider />
+
+              <div class="current-processing">
+                <h3>正在处理</h3>
+                <el-empty v-if="!currentProcessing" description="当前没有正在处理的任务" :image-size="80" />
+                <el-card v-else shadow="never" class="processing-card">
+                  <div class="processing-info">
+                    <el-tag type="primary" size="large">处理中</el-tag>
+                    <div class="processing-details">
+                      <p><strong>标题:</strong> {{ currentProcessing.title }}</p>
+                      <p><strong>类型:</strong> {{ currentProcessing.type === 'media_group' ? '媒体组' : '单个文件' }}</p>
+                      <p v-if="currentProcessing.media_group_total"><strong>文件数:</strong> {{ currentProcessing.media_group_total }}</p>
+                      <p v-if="currentProcessing.task_gids && currentProcessing.task_gids.length">
+                        <strong>下载任务:</strong> {{ currentProcessing.task_gids.length }} 个
+                      </p>
+                    </div>
+                  </div>
+                </el-card>
+              </div>
+
+              <el-divider />
+
+              <div class="waiting-queue">
+                <h3>等待队列 ({{ waitingItems.length }})</h3>
+                <el-empty v-if="waitingItems.length === 0" description="队列为空" :image-size="80" />
+                <el-timeline v-else>
+                  <el-timeline-item
+                    v-for="(item, index) in waitingItems"
+                    :key="item.queue_id || index"
+                    :timestamp="`位置 ${Number(index) + 1}`"
+                    placement="top"
+                  >
+                    <el-card shadow="never" class="queue-item-card">
+                      <div class="queue-item-info">
+                        <el-tag :type="item.type === 'media_group' ? 'warning' : 'info'" size="small">
+                          {{ item.type === 'media_group' ? '媒体组' : '单个文件' }}
+                        </el-tag>
+                        <p class="item-title">{{ item.title }}</p>
+                        <p v-if="item.media_group_total" class="item-detail">
+                          包含 {{ item.media_group_total }} 个文件
+                        </p>
+                      </div>
+                    </el-card>
+                  </el-timeline-item>
+                </el-timeline>
+              </div>
+            </div>
+          </el-tab-pane>
+
           <!-- 记录标签页 -->
           <el-tab-pane name="records">
             <template #label>
@@ -233,7 +332,8 @@
               </span>
             </template>
 
-            <el-collapse v-model="activeGroups" accordion>
+            <el-empty v-if="!groups || groups.length === 0" description="暂无任务记录" :image-size="80" />
+            <el-collapse v-else v-model="activeGroups" accordion>
               <el-collapse-item
                 v-for="group in groups"
                 :key="group.group_key"
@@ -373,8 +473,7 @@
           </el-tab-pane>
         </el-tabs>
       </div>
-      
-      <el-empty v-else-if="!isLoading && !error && (!groups || groups.length === 0)" description="暂无任务记录" />
+
     </el-card>
     
     <!-- 文件详情对话框 -->
@@ -437,8 +536,8 @@
           <el-descriptions-item label="上传状态" v-if="selectedRecord.uploads && selectedRecord.uploads.length > 0">
             <div class="space-y-2">
               <div v-for="upload in selectedRecord.uploads" :key="upload.id" class="flex items-center gap-2">
-                <el-tag size="small" :type="upload.upload_target === 'onedrive' ? 'primary' : 'success'">
-                  {{ upload.upload_target === 'onedrive' ? 'OneDrive' : upload.upload_target === 'telegram' ? 'Telegram' : upload.upload_target }}
+                <el-tag size="small" :type="getUploadTargetTagType(upload.upload_target)">
+                  {{ getUploadTargetLabel(upload.upload_target) }}
                 </el-tag>
                 <el-tag 
                   :type="getUploadStatusTagType(upload.status)" 
@@ -511,15 +610,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Files, Document, Delete, InfoFilled, Download, Upload, Link, RefreshRight } from '@element-plus/icons-vue'
+import { Refresh, Files, Document, Delete, InfoFilled, Download, Upload, Link, RefreshRight, List } from '@element-plus/icons-vue'
 import { useIntervalFn } from '@vueuse/core'
 import { 
   getDownloads, 
   deleteAllDownloads, 
   getUploads, 
-  getConfig,
+  getQueue,
   retryDownload,
   deleteDownload,
   deleteDownloadRecord,
@@ -581,9 +681,8 @@ function getRecordStatusText(record: DownloadRecord): string {
       // 检查是否有失败的上传任务
       const hasFailed = record.uploads.some(u => u.status === 'failed')
       if (hasFailed) {
-        // 如果还有未失败的上传任务，显示上传中；否则显示失败
         const hasCompleted = record.uploads.some(u => u.status === 'completed')
-        return hasCompleted ? '上传中' : '失败'
+        return hasCompleted ? '部分失败' : '失败'
       }
       
       // 检查所有上传是否都已完成
@@ -647,8 +746,7 @@ function getRecordStatusTagType(record: DownloadRecord): 'success' | 'warning' |
       // 检查是否有失败的上传任务
       const hasFailed = record.uploads.some(u => u.status === 'failed')
       if (hasFailed) {
-        const hasCompleted = record.uploads.some(u => u.status === 'completed')
-        return hasCompleted ? 'warning' : 'danger'
+        return 'danger'
       }
       
       // 检查所有上传是否都已完成
@@ -689,11 +787,26 @@ const isLoading = ref(true)
 const error = ref<string | null>(null)
 const limit = ref(100)
 const activeGroups = ref<string[]>([])
-const activeTab = ref<'download' | 'upload' | 'records'>('download') // 默认显示"下载"标签页
+type TaskCenterTab = 'download' | 'upload' | 'queue' | 'records'
+const route = useRoute()
+const validTabs: TaskCenterTab[] = ['download', 'upload', 'queue', 'records']
+const initialTab = typeof route.query.tab === 'string' && validTabs.includes(route.query.tab as TaskCenterTab)
+  ? route.query.tab as TaskCenterTab
+  : 'download'
+const activeTab = ref<TaskCenterTab>(initialTab) // 默认显示"下载"标签页
 const detailDialogVisible = ref(false)
 const selectedRecord = ref<DownloadRecord | null>(null)
 const autoDeleteAfterUpload = ref<boolean>(true) // 默认启用自动清理
 const operationLoading = ref(false)
+const queueData = ref<any>(null)
+const queueLoading = ref(false)
+const queueAutoRefresh = ref(true)
+
+watch(() => route.query.tab, (tab) => {
+  if (typeof tab === 'string' && validTabs.includes(tab as TaskCenterTab)) {
+    activeTab.value = tab as TaskCenterTab
+  }
+})
 
 // totalDownloads 已移除，不再需要
 
@@ -769,6 +882,37 @@ const activeUploads = computed<UploadRecord[]>(() => {
   return sorted
 })
 
+const currentProcessing = computed(() => queueData.value?.current_processing || null)
+const waitingItems = computed(() => queueData.value?.waiting_items || [])
+const queueSize = computed(() => queueData.value?.queue_size || waitingItems.value.length || 0)
+
+
+function fetchQueue() {
+  queueLoading.value = true
+  getQueue()
+    .then(data => {
+      if (data.success) {
+        queueData.value = data
+      } else if (data.error) {
+        console.error('获取队列状态失败:', data.error)
+      }
+    })
+    .catch(err => console.error('获取队列状态失败:', err))
+    .finally(() => {
+      queueLoading.value = false
+    })
+}
+
+function toggleQueueAutoRefresh() {
+  queueAutoRefresh.value = !queueAutoRefresh.value
+  if (queueAutoRefresh.value) {
+    resumeQueueRefresh()
+    fetchQueue()
+  } else {
+    pauseQueueRefresh()
+  }
+}
+
 
 function fetchUploads() {
   getUploads(limit.value)
@@ -809,6 +953,7 @@ function fetchDownloads() {
 function handleRefresh() {
   fetchDownloads()
   fetchUploads()
+  fetchQueue()
 }
 
 function handleLimitChange() {
@@ -845,6 +990,22 @@ function getProgressStatus(status?: string): 'success' | 'exception' | 'warning'
   return 'warning'
 }
 
+function isDeprecatedUploadTarget(target?: string): boolean {
+  return target === 'onedrive' || target === 'gdrive'
+}
+
+function getUploadTargetLabel(target?: string): string {
+  if (target === 'telegram') return 'Telegram'
+  if (isDeprecatedUploadTarget(target)) return '历史第三方网盘'
+  return target || '未知'
+}
+
+function getUploadTargetTagType(target?: string): 'success' | 'warning' | 'danger' | 'info' {
+  if (target === 'telegram') return 'success'
+  if (isDeprecatedUploadTarget(target)) return 'info'
+  return 'warning'
+}
+
 function getUploadStatusText(status?: string, target?: string): string {
   if (!status) return '未知'
   const statusMap: Record<string, string> = {
@@ -859,7 +1020,8 @@ function getUploadStatusText(status?: string, target?: string): string {
   const statusText = statusMap[status] || status
   if (target && status === 'uploading') {
     const targetMap: Record<string, string> = {
-      'onedrive': 'OneDrive',
+      'onedrive': '历史第三方网盘',
+      'gdrive': '历史第三方网盘',
       'telegram': 'Telegram'
     }
     return `${statusText} (${targetMap[target] || target})`
@@ -1010,12 +1172,14 @@ async function handleRetryUpload(upload: UploadRecord) {
   
   try {
     operationLoading.value = true
+    if (isDeprecatedUploadTarget(upload.upload_target)) {
+      ElMessage.warning('历史第三方网盘上传目标已废弃，不能重试历史任务')
+      return
+    }
+
     const result = await retryUpload(upload.id)
     if (result.success) {
-      const uploadTarget = upload.upload_target === 'onedrive' ? 'OneDrive' : 
-                          upload.upload_target === 'gdrive' ? 'Google Drive' : 
-                          upload.upload_target === 'telegram' ? 'Telegram' : upload.upload_target
-      ElMessage.success(result.message || `上传任务已重新提交${uploadTarget === 'Telegram' ? 'Telegram' : 'rclone'}上传`)
+      ElMessage.success(result.message || '上传任务已重新提交Telegram上传')
       fetchUploads()
     } else {
       ElMessage.error(result.error || '重试失败')
@@ -1096,6 +1260,8 @@ const { pause, resume } = useIntervalFn(() => {
   fetchUploads()
 }, 30000, { immediate: false })
 
+const { pause: pauseQueueRefresh, resume: resumeQueueRefresh } = useIntervalFn(fetchQueue, 3000, { immediate: false })
+
 // 检查 WebSocket 连接状态并管理轮询
 function checkConnectionAndPoll() {
   if (!wsClient.isConnected()) {
@@ -1110,27 +1276,21 @@ function checkConnectionAndPoll() {
 // 组件卸载时清理
 onUnmounted(() => {
   pause()
+  pauseQueueRefresh()
   // 取消 WebSocket 订阅
   wsUnsubscribers.forEach(unsub => unsub())
   wsUnsubscribers = []
 })
 
 onMounted(() => {
-  // 获取配置，特别是 AUTO_DELETE_AFTER_UPLOAD
-  getConfig('rclone')
-    .then(response => {
-      if (response.success && response.data?.rclone) {
-        autoDeleteAfterUpload.value = response.data.rclone.AUTO_DELETE_AFTER_UPLOAD ?? true
-      }
-    })
-    .catch(err => {
-      console.error('获取配置失败:', err)
-      // 使用默认值
-      autoDeleteAfterUpload.value = true
-    })
-  
+  autoDeleteAfterUpload.value = true
+
   fetchDownloads()
   fetchUploads()
+  fetchQueue()
+  if (queueAutoRefresh.value) {
+    resumeQueueRefresh()
+  }
   
   // 连接 WebSocket 并订阅更新
   wsClient.connect()
@@ -1169,7 +1329,7 @@ onMounted(() => {
   wsUnsubscribers.push(unsubCleanup)
   
   // 订阅统计更新（统计更新不需要刷新列表，避免排序跳动）
-  const unsubStats = wsClient.on('statistics_update', (message) => {
+  const unsubStats = wsClient.on('statistics_update', () => {
     // 统计更新不影响列表排序，可以忽略或只更新统计信息
     // 如果需要更新统计，可以在dashboard页面处理
   })
@@ -1369,7 +1529,12 @@ function updateGroupStats(group: DownloadGroup) {
     const downloadStatus = download.status || 'pending'
     const uploads = download.uploads || []
     
-    // 检查是否真正完成（下载完成且所有上传都完成或失败）
+    const hasUploadActive = uploads.some(upload => upload.status === 'uploading')
+    const hasUploadPending = uploads.some(upload => ['pending', 'waiting_download'].includes(upload.status || ''))
+    const hasUploadFailed = uploads.some(upload => ['failed', 'cancelled'].includes(upload.status || ''))
+    const hasUploadCleanupPending = uploads.some(upload => upload.status === 'completed' && !upload.cleaned_at)
+
+    // 检查是否真正完成（下载完成且所有上传都完成并清理）
     const isTrulyCompleted = () => {
       if (downloadStatus !== 'completed') {
         return false
@@ -1378,8 +1543,7 @@ function updateGroupStats(group: DownloadGroup) {
         return true
       }
       for (const upload of uploads) {
-        const uploadStatus = upload.status
-        if (uploadStatus && ['uploading', 'pending', 'waiting_download'].includes(uploadStatus)) {
+        if (upload.status !== 'completed' || !upload.cleaned_at) {
           return false
         }
       }
@@ -1388,11 +1552,11 @@ function updateGroupStats(group: DownloadGroup) {
     
     if (isTrulyCompleted()) {
       completed++
-    } else if (downloadStatus === 'downloading') {
+    } else if (downloadStatus === 'downloading' || hasUploadActive) {
       downloading++
-    } else if (downloadStatus === 'failed') {
+    } else if (downloadStatus === 'failed' || hasUploadFailed) {
       failed++
-    } else if (downloadStatus === 'pending') {
+    } else if (downloadStatus === 'pending' || hasUploadPending || hasUploadCleanupPending) {
       pending++
     } else if (downloadStatus === 'skipped' || (download.error_message && download.error_message.includes('跳过'))) {
       skipped++
@@ -1402,7 +1566,7 @@ function updateGroupStats(group: DownloadGroup) {
     const fileSize = download.total_length || download.file_size || 0
     total_size += fileSize
     
-    if (downloadStatus === 'completed') {
+    if (isTrulyCompleted()) {
       completed_size += fileSize
     }
   }
@@ -1476,34 +1640,64 @@ function updateGroupStats(group: DownloadGroup) {
   border-color: rgba(102, 126, 234, 0.2);
 }
 
-.downloads-page :deep(.el-card__header) {
+.tasks-center-page :deep(.el-card__header) {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(249, 250, 251, 0.9));
   border-bottom: 1px solid rgba(229, 231, 235, 0.8);
   padding: 20px 24px;
+}
+
+.tasks-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+}
+
+.tasks-card-title {
+  flex: 0 0 auto;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #111827;
+  white-space: nowrap;
+}
+
+.tasks-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+  min-width: 0;
+}
+
+.tasks-limit-select {
+  width: 150px;
+  flex: 0 0 150px;
 }
 
 .download-groups {
   @apply space-y-3;
 }
 
-.downloads-tabs :deep(.el-tabs__header) {
+.tasks-tabs :deep(.el-tabs__header) {
   margin: 0 0 12px 0;
 }
 
-.downloads-tabs :deep(.el-tabs__nav-wrap::after) {
+.tasks-tabs :deep(.el-tabs__nav-wrap::after) {
   height: 1px;
   background-color: rgba(229, 231, 235, 0.8);
 }
 
-.downloads-tabs :deep(.el-tabs__item) {
+.tasks-tabs :deep(.el-tabs__item) {
   font-weight: 600;
 }
 
-.downloads-tabs :deep(.el-tabs__item.is-active) {
+.tasks-tabs :deep(.el-tabs__item.is-active) {
   color: #667eea;
 }
 
-.downloads-tabs :deep(.el-tabs__active-bar) {
+.tasks-tabs :deep(.el-tabs__active-bar) {
   background-color: #667eea;
 }
 
@@ -1698,6 +1892,86 @@ function updateGroupStats(group: DownloadGroup) {
   @apply flex items-center;
 }
 
+.queue-toolbar {
+  @apply flex justify-end gap-2 mb-4;
+}
+
+.queue-stats {
+  @apply flex gap-8 mb-6;
+}
+
+.stat-suffix {
+  @apply text-sm text-gray-500 ml-1;
+}
+
+.flood-wait-alert {
+  @apply mb-6;
+  border-radius: 12px;
+  border: 2px solid #f59e0b;
+}
+
+.flood-wait-info {
+  @apply mt-2 space-y-2;
+}
+
+.flood-wait-info p {
+  @apply mb-1;
+}
+
+.flood-wait-message {
+  @apply text-sm text-gray-600 mt-3;
+  font-style: italic;
+}
+
+.current-processing h3,
+.waiting-queue h3 {
+  @apply text-lg font-semibold text-gray-800 mb-4;
+}
+
+.processing-card {
+  @apply bg-blue-50 border-blue-200;
+}
+
+.processing-info {
+  @apply flex items-start gap-4;
+}
+
+.processing-details {
+  @apply flex-1;
+}
+
+.processing-details p {
+  @apply mb-2 text-gray-700;
+}
+
+.queue-item-card {
+  @apply bg-gray-50;
+}
+
+.queue-item-info {
+  @apply space-y-2;
+}
+
+.item-title {
+  @apply font-semibold text-gray-800;
+}
+
+.item-detail {
+  @apply text-sm text-gray-600;
+}
+
+:deep(.el-timeline-item__timestamp) {
+  @apply font-semibold text-blue-600;
+}
+
+:deep(.el-statistic__head) {
+  @apply text-gray-600 font-medium;
+}
+
+:deep(.el-statistic__content) {
+  @apply text-2xl font-bold text-gray-900;
+}
+
 /* 详情对话框样式 */
 :deep(.file-detail-dialog) {
   animation: dialogFadeIn 0.3s ease-out;
@@ -1734,6 +2008,10 @@ function updateGroupStats(group: DownloadGroup) {
 
 :deep(.file-detail-dialog .el-dialog__headerbtn:hover .el-dialog__close) {
   color: rgba(255, 255, 255, 0.8);
+}
+
+:deep(.file-detail-dialog) {
+  max-width: calc(100vw - 32px);
 }
 
 :deep(.file-detail-dialog .el-dialog__body) {
@@ -1822,5 +2100,104 @@ function updateGroupStats(group: DownloadGroup) {
 .group-downloads :deep(.el-table__row:hover) {
   background-color: rgba(102, 126, 234, 0.08);
   transform: translateX(4px);
+}
+
+@media (max-width: 768px) {
+  .tasks-center-page {
+    padding: 0;
+  }
+
+  .tasks-center-page :deep(.el-card__header) {
+    padding: 16px 20px;
+  }
+
+  .tasks-card-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .tasks-card-title {
+    white-space: normal;
+    word-break: keep-all;
+  }
+
+  .tasks-card-actions {
+    align-items: stretch;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 10px;
+    width: 100%;
+  }
+
+  .tasks-limit-select {
+    flex: 1 1 150px;
+    min-width: 0;
+    width: auto;
+  }
+
+  .tasks-card-actions :deep(.el-button) {
+    flex: 0 0 auto;
+    margin-left: 0;
+  }
+
+  .tasks-card-actions :deep(.el-button--danger) {
+    flex-basis: 100%;
+  }
+
+  .tasks-tabs-container {
+    margin: 0 -4px;
+  }
+
+  .tasks-tabs {
+    overflow-x: auto;
+  }
+
+  .tasks-tabs :deep(.el-tabs__nav-wrap) {
+    margin-bottom: 8px;
+  }
+
+  .tasks-tabs :deep(.el-tabs__nav-scroll) {
+    overflow-x: auto;
+  }
+
+  .tasks-tabs :deep(.el-tabs__nav) {
+    gap: 4px;
+    min-width: max-content;
+  }
+
+  .tasks-tabs :deep(.el-tabs__item) {
+    padding: 0 6px;
+  }
+
+  .tasks-tabs :deep(.el-tabs__item .flex) {
+    gap: 4px;
+  }
+
+  .tasks-tabs :deep(.el-tabs__item .el-icon) {
+    display: none;
+  }
+
+  .tasks-tabs :deep(.el-tabs__item .el-tag) {
+    display: none;
+  }
+
+  .tasks-tabs :deep(.el-tabs__nav-scroll::-webkit-scrollbar) {
+    display: none;
+  }
+
+  :deep(.file-detail-dialog .el-dialog__body) {
+    padding: 16px;
+  }
+
+  .group-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .group-progress {
+    width: 100%;
+    justify-content: space-between;
+  }
 }
 </style>

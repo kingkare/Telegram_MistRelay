@@ -1,269 +1,179 @@
 <template>
-  <div class="drive-page" v-loading="previewLoading">
+  <div class="drive-page">
     <el-card shadow="hover">
       <template #header>
         <div class="drive-header">
           <div>
-            <h2>我的网盘</h2>
-            <p class="drive-header-subtitle">浏览远程存储、查看容量并管理文件</p>
+            <h2>Telegram 频道网盘</h2>
+            <p class="drive-header-subtitle">第三方网盘已废弃，这里只管理 TG 频道中的媒体文件。</p>
           </div>
-
-          <div v-if="availableRemotes.length > 0" class="drive-header-tools">
-            <el-select
-              v-model="currentRemote"
-              @change="handleRemoteChange"
-              placeholder="选择云存储"
-              class="header-remote-select"
-              popper-class="drive-remote-popper"
-              fit-input-width
-            >
-              <el-option
-                v-for="remote in availableRemotes"
-                :key="remote.name"
-                :label="remote.name"
-                :value="remote.name"
-              >
-                <div class="remote-option">
-                  <div class="remote-option-head">
-                    <span class="remote-option-name">{{ remote.name }}</span>
-                    <el-tag size="small" effect="plain" round>{{ remote.type }}</el-tag>
-                  </div>
-                  <div class="remote-option-meta">
-                    <span>{{ getRemoteUsageSummary(remote.name) }}</span>
-                    <span v-if="getRemoteUsagePercent(remote.name) !== null" class="remote-option-percent">
-                      {{ getRemoteUsagePercent(remote.name)!.toFixed(0) }}%
-                    </span>
-                  </div>
-                </div>
-              </el-option>
-            </el-select>
-
-            <div v-if="currentRemote" class="header-usage">
-              <template v-if="loadingDriveUsage">
-                <span class="header-usage-text">容量读取中...</span>
-              </template>
-              <template v-else-if="driveUsage?.supported && driveUsage.data">
-                <span class="header-usage-name">{{ currentRemote }}</span>
-                <span class="header-usage-text">{{ formatBytes(driveUsage.data.used) }} / {{ formatBytes(driveUsage.data.total) }}</span>
-                <el-tag size="small" round :type="usagePercent >= 90 ? 'danger' : usagePercent >= 75 ? 'warning' : 'success'">
-                  {{ usagePercent.toFixed(1) }}%
-                </el-tag>
-              </template>
-              <template v-else>
-                <span class="header-usage-name">{{ currentRemote }}</span>
-                <span class="header-usage-text">{{ driveUsage?.error || '暂不支持容量统计' }}</span>
-              </template>
-
-              <el-button :icon="RefreshRight" circle size="small" @click="loadDriveUsage(true, true)" :loading="loadingDriveUsage" />
-            </div>
+          <div class="drive-header-actions">
+            <el-button :icon="RefreshRight" @click="refreshAll" :loading="loading">刷新</el-button>
+            <el-button type="danger" :icon="Delete" @click="handleClearAll" :disabled="items.length === 0">
+              清空 TG 网盘
+            </el-button>
           </div>
         </div>
       </template>
 
-      <div class="drive-topbar">
-        <div class="drive-controls">
-          <div class="drive-breadcrumb-card">
-            <el-breadcrumb separator="/">
-              <el-breadcrumb-item @click="navigateToPath('/')">
-                <el-icon><HomeFilled /></el-icon>
-                根目录
-              </el-breadcrumb-item>
-              <el-breadcrumb-item
-                v-for="(segment, index) in pathSegments"
-                :key="index"
-                @click="navigateToSegment(index)"
-              >
-                {{ segment }}
-              </el-breadcrumb-item>
-            </el-breadcrumb>
-          </div>
+      <el-row :gutter="16" class="stats-row">
+        <el-col :xs="12" :sm="6">
+          <el-statistic title="文件总数" :value="usageStats?.total_count || 0" />
+        </el-col>
+        <el-col :xs="12" :sm="6">
+          <el-statistic title="占用空间" :value="formatBytes(usageStats?.total_size || 0)" />
+        </el-col>
+        <el-col :xs="12" :sm="6">
+          <el-statistic title="视频" :value="usageStats?.videos || 0" />
+        </el-col>
+        <el-col :xs="12" :sm="6">
+          <el-statistic title="图片" :value="usageStats?.images || 0" />
+        </el-col>
+      </el-row>
 
-          <div class="drive-actions">
-            <el-button-group class="view-mode-toggle">
-              <el-button :type="viewMode === 'list' ? 'primary' : ''" @click="viewMode = 'list'">
-                <el-icon><List /></el-icon>
-              </el-button>
-              <el-button :type="viewMode === 'grid' ? 'primary' : ''" @click="viewMode = 'grid'">
-                <el-icon><Grid /></el-icon>
-              </el-button>
-            </el-button-group>
-
-            <el-select
-              v-model="currentSort"
-              placeholder="排序"
-              class="sort-select"
-            >
-              <template #prefix>
-                <el-icon><Sort /></el-icon>
-              </template>
-              <el-option
-                v-for="item in sortOptions"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-
-            <el-input
-              v-model="searchKeyword"
-              placeholder="搜索文件名"
-              clearable
-              class="search-input"
-              :prefix-icon="Search"
-            />
-          </div>
-        </div>
+      <div class="toolbar">
+        <el-input
+          v-model="searchKeyword"
+          placeholder="搜索文件名或描述"
+          clearable
+          class="search-input"
+          :prefix-icon="Search"
+          @keyup.enter="handleSearch"
+          @clear="handleSearch"
+        />
+        <el-select v-model="typeFilter" placeholder="类型" class="type-select" @change="handleSearch">
+          <el-option label="全部" value="" />
+          <el-option label="视频" value="video" />
+          <el-option label="图片" value="image" />
+          <el-option label="音频" value="audio" />
+          <el-option label="文档" value="document" />
+        </el-select>
+        <el-select v-model="sortOption" class="sort-select" @change="handleSearch">
+          <el-option label="时间 新→旧" value="message_date-desc" />
+          <el-option label="时间 旧→新" value="message_date-asc" />
+          <el-option label="大小 大→小" value="file_size-desc" />
+          <el-option label="大小 小→大" value="file_size-asc" />
+          <el-option label="名称 A→Z" value="file_name-asc" />
+          <el-option label="名称 Z→A" value="file_name-desc" />
+        </el-select>
+        <el-radio-group v-model="viewMode">
+          <el-radio-button label="list"><el-icon><List /></el-icon></el-radio-button>
+          <el-radio-button label="grid"><el-icon><Grid /></el-icon></el-radio-button>
+        </el-radio-group>
       </div>
 
-      <!-- 列表视图 -->
+      <div class="breadcrumb-bar">
+        <el-button v-if="isInsideGroup" :icon="ArrowLeft" text @click="goRoot">返回根目录</el-button>
+        <el-breadcrumb separator="/">
+          <el-breadcrumb-item>
+            <span class="breadcrumb-link" @click="goRoot">TG网盘</span>
+          </el-breadcrumb-item>
+          <el-breadcrumb-item v-if="isInsideGroup">{{ currentFolderName }}</el-breadcrumb-item>
+        </el-breadcrumb>
+      </div>
+
       <el-table
         v-if="viewMode === 'list'"
-        :data="paginatedItems"
+        :data="items"
         v-loading="loading"
         style="width: 100%; margin-top: 20px"
-        @row-click="handleRowClick"
+        @row-click="handleOpen"
         :row-style="{ cursor: 'pointer' }"
       >
-        <el-table-column label="名称" min-width="200">
+        <el-table-column label="名称" min-width="260">
           <template #default="{ row }">
             <div class="file-name">
-              <el-icon :size="18" style="margin-right: 8px">
-                <Folder v-if="row.isDir" />
-                <Picture v-else-if="isImage(row.name)" />
-                <VideoPlay v-else-if="isVideo(row.name)" />
+              <el-icon :size="18">
+                <Folder v-if="isFolder(row)" />
+                <Picture v-else-if="isImage(row)" />
+                <VideoPlay v-else-if="isVideo(row)" />
+                <Headset v-else-if="isAudio(row)" />
                 <Document v-else />
               </el-icon>
-              {{ row.name }}
+              <span>{{ getFileName(row) }}</span>
+              <el-tag v-if="isFolder(row)" size="small" type="warning">{{ row.item_count || 0 }} 个文件</el-tag>
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="size" label="大小" width="120">
+        <el-table-column label="类型" width="120">
+          <template #default="{ row }">{{ getTypeLabel(row) }}</template>
+        </el-table-column>
+        <el-table-column label="大小" width="130">
+          <template #default="{ row }">{{ formatBytes(getDisplaySize(row)) }}</template>
+        </el-table-column>
+        <el-table-column label="内容" width="120">
           <template #default="{ row }">
-            {{ row.isDir ? '-' : formatBytes(row.size) }}
+            <span v-if="isFolder(row)">{{ row.item_count || 0 }} 个文件</span>
+            <span v-else>#{{ row.message_id }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="modTime" label="修改时间" width="180">
-          <template #default="{ row }">
-            {{ formatDate(row.modTime) }}
-          </template>
+        <el-table-column label="时间" width="180">
+          <template #default="{ row }">{{ formatDate(row.message_date) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="150" align="center">
+        <el-table-column label="操作" width="220" align="center">
           <template #default="{ row }">
             <el-button-group>
-              <el-button
-                v-if="!row.isDir" 
-                type="primary" 
-                link 
-                :icon="Download"
-                :loading="Boolean(downloadingPaths[row.path])"
-                @click.stop="handleDownload(row)"
-              />
-              <el-button 
-                type="danger" 
-                link 
-                :icon="Delete"
-                @click.stop="handleDelete(row)"
-              />
+              <el-button v-if="isFolder(row)" type="primary" link :icon="Folder" @click.stop="enterFolder(row)">
+                打开
+              </el-button>
+              <el-button v-else type="primary" link :icon="View" @click.stop="handlePreview(row)">
+                预览
+              </el-button>
+              <el-button v-if="isFile(row)" type="success" link :icon="Download" @click.stop="handleDownload(row)">
+                下载
+              </el-button>
+              <el-button type="danger" link :icon="Delete" @click.stop="handleDelete(row)" />
             </el-button-group>
           </template>
         </el-table-column>
       </el-table>
 
-      <!-- 网格视图 -->
-      <div v-else class="grid-view">
-        <div
-          v-for="item in paginatedItems"
-          :key="item.path"
-          class="grid-item"
-          @click="handleRowClick(item)"
-        >
+      <div v-else v-loading="loading" class="grid-view">
+        <div v-for="item in items" :key="getItemKey(item)" class="grid-item" @click="handleOpen(item)">
           <div class="grid-item-preview">
-            <el-icon v-if="item.isDir" :size="48" class="grid-icon">
-              <Folder />
-            </el-icon>
-            <el-image
-              v-else-if="isImage(item.name)"
-              :src="getThumbnailUrl(item)"
-              fit="cover"
-              class="grid-thumbnail"
-              lazy
-            >
-              <template #placeholder>
-                <div class="image-placeholder">
-                  <el-icon :size="48"><Picture /></el-icon>
-                </div>
-              </template>
-              <template #error>
-                <div class="image-placeholder">
-                  <el-icon :size="48"><Picture /></el-icon>
-                </div>
-              </template>
+            <el-image v-if="!isFolder(item) && isImage(item)" :src="getStreamUrl(item)" fit="cover" class="grid-thumbnail" lazy>
+              <template #error><el-icon :size="44"><Picture /></el-icon></template>
             </el-image>
-            <div v-else-if="isVideo(item.name)" class="grid-video">
-              <el-image
-                :src="getThumbnailUrl(item)"
-                fit="cover"
-                class="grid-thumbnail"
-                lazy
-              >
-                <template #placeholder>
-                  <div class="video-placeholder">
-                    <el-icon :size="48"><VideoPlay /></el-icon>
-                  </div>
-                </template>
-                <template #error>
-                  <div class="video-placeholder">
-                    <el-icon :size="48"><VideoPlay /></el-icon>
-                  </div>
-                </template>
-              </el-image>
-              <div class="video-badge">视频</div>
+            <div v-else class="grid-placeholder">
+              <el-icon :size="48">
+                <Folder v-if="isFolder(item)" />
+                <VideoPlay v-else-if="isVideo(item)" />
+                <Headset v-else-if="isAudio(item)" />
+                <Document v-else />
+              </el-icon>
             </div>
-            <el-icon v-else :size="48" class="grid-icon">
-              <Document />
-            </el-icon>
+            <el-tag class="type-badge" size="small">{{ getTypeLabel(item) }}</el-tag>
           </div>
-          <div class="grid-item-name" :title="item.name">{{ item.name }}</div>
-          <div class="grid-item-info">
-             <div v-if="!item.isDir" class="grid-item-size">{{ formatBytes(item.size) }}</div>
-             <div class="grid-item-actions">
-               <el-button 
-                 v-if="!item.isDir"
-                 circle 
-                 size="small" 
-                 :icon="Download"
-                 :loading="Boolean(downloadingPaths[item.path])"
-                 @click.stop="handleDownload(item)"
-               />
-               <el-button 
-                 circle 
-                 size="small" 
-                 type="danger" 
-                 :icon="Delete"
-                 @click.stop="handleDelete(item)"
-               />
-             </div>
+          <div class="grid-item-name" :title="getFileName(item)">{{ getFileName(item) }}</div>
+          <div class="grid-item-meta">
+            <span v-if="isFolder(item)">{{ item.item_count || 0 }} 个文件 · {{ formatBytes(getDisplaySize(item)) }}</span>
+            <span v-else>{{ formatBytes(getDisplaySize(item)) }} · #{{ item.message_id }}</span>
+          </div>
+          <div class="grid-item-actions">
+            <el-button v-if="isFolder(item)" circle size="small" type="primary" :icon="Folder" @click.stop="enterFolder(item)" title="打开" />
+            <el-button v-else circle size="small" type="primary" :icon="View" @click.stop="handlePreview(item)" title="预览" />
+            <el-button v-if="isFile(item)" circle size="small" type="success" :icon="Download" @click.stop="handleDownload(item)" title="下载" />
+            <el-button circle size="small" type="danger" :icon="Delete" @click.stop="handleDelete(item)" />
           </div>
         </div>
       </div>
 
-      <!-- 分页 -->
+      <el-empty v-if="!loading && items.length === 0" :description="isInsideGroup ? '此媒体组暂无文件' : 'TG 频道网盘暂无文件'" />
+
       <div class="pagination-container">
         <el-pagination
           v-model:current-page="currentPage"
           v-model:page-size="pageSize"
           :page-sizes="[20, 50, 100, 200]"
-          :total="filteredItems.length"
+          :total="total"
           layout="total, sizes, prev, pager, next, jumper"
           background
+          @current-change="loadItems"
+          @size-change="handlePageSizeChange"
         />
       </div>
-
-      <!-- 空状态 -->
-      <el-empty v-if="!loading && items.length === 0" description="此目录为空" />
     </el-card>
 
-    <!-- 图片预览 -->
     <el-image-viewer
       v-if="showPreview && previewType === 'image'"
       :url-list="[previewUrl]"
@@ -271,11 +181,10 @@
       hide-on-click-modal
     />
 
-    <!-- 视频播放 -->
     <el-dialog
       v-model="showPreview"
       v-if="previewType === 'video'"
-      :title="previewItem?.name"
+      :title="getFileName(previewItem)"
       width="80%"
       destroy-on-close
       @close="closePreview"
@@ -283,550 +192,345 @@
       class="video-dialog"
     >
       <div class="video-container">
-        <VideoPlayer 
-          v-if="showPreview && previewType === 'video' && previewUrl"
-          :src="previewUrl" 
-          :type="getVideoType(previewItem?.name)"
-          :remote="currentRemote"
-          :path="previewItem?.path"
-        />
+        <VideoPlayer v-if="previewUrl" :src="previewUrl" :type="getVideoType(previewItem)" />
       </div>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { HomeFilled, Document, Folder, Search, List, Grid, Picture, VideoPlay, Sort, Download, Delete, RefreshRight } from '@element-plus/icons-vue'
-import { getRcloneRemotes, browseDrive, getThumbnail, deleteFile, getDriveUsage, type RcloneRemote, type DriveItem, type DriveUsageResponse } from '@/api'
+import { ArrowLeft, Delete, Document, Download, Folder, Grid, Headset, List, Picture, RefreshRight, Search, VideoPlay, View } from '@element-plus/icons-vue'
+import {
+  browseTelegramDrive,
+  clearTelegramDrive,
+  deleteTelegramGroup,
+  deleteTelegramItem,
+  getTelegramUsage,
+  type TelegramDriveItem,
+  type TelegramUsageStats,
+} from '@/api'
 import VideoPlayer from '@/components/VideoPlayer.vue'
-import { buildAuthorizedApiUrl } from '@/utils/runtime'
+import { resolveServerUrl } from '@/utils/runtime'
 
-interface RemoteUsageState {
-  response?: DriveUsageResponse
-  loading: boolean
-}
-
-const availableRemotes = ref<RcloneRemote[]>([])
-const currentRemote = ref('')
-const currentPath = ref('/')
-const items = ref<DriveItem[]>([])
+const items = ref<TelegramDriveItem[]>([])
+const usageStats = ref<TelegramUsageStats | null>(null)
 const loading = ref(false)
-const remoteUsageStates = ref<Record<string, RemoteUsageState>>({})
-
-// 搜索和分页
 const searchKeyword = ref('')
+const typeFilter = ref('')
+const sortOption = ref('message_date-desc')
 const currentPage = ref(1)
 const pageSize = ref(20)
-
-// 视图模式
+const total = ref(0)
 const viewMode = ref<'list' | 'grid'>('list')
+const showPreview = ref(false)
+const previewItem = ref<TelegramDriveItem | null>(null)
+const previewType = ref<'image' | 'video' | 'unknown'>('unknown')
+const previewUrl = ref('')
+const currentMediaGroupId = ref('')
+const currentFolderName = ref('')
 
-// 排序状态
-const sortBy = ref<'name' | 'time'>('time')
-const sortDesc = ref(true) // 默认降序(最新的在前)
+const isInsideGroup = computed(() => Boolean(currentMediaGroupId.value))
 
-// 排序选项
-const sortOptions = [
-  { label: '时间 (新→旧)', value: 'time-desc' },
-  { label: '时间 (旧→新)', value: 'time-asc' },
-  { label: '名称 (A→Z)', value: 'name-asc' },
-  { label: '名称 (Z→A)', value: 'name-desc' },
-]
-
-const currentSort = computed({
-  get: () => `${sortBy.value}-${sortDesc.value ? 'desc' : 'asc'}`,
-  set: (val) => {
-    const [field, order] = val.split('-')
-    sortBy.value = field as 'name' | 'time'
-    sortDesc.value = order === 'desc'
+const sortParams = computed(() => {
+  const [sortBy, order] = sortOption.value.split('-')
+  return {
+    sort_by: sortBy || 'message_date',
+    sort_desc: order !== 'asc',
   }
 })
 
-const currentRemoteInfo = computed(() => {
-  return availableRemotes.value.find(remote => remote.name === currentRemote.value) || null
-})
-
-const currentRemoteState = computed(() => {
-  if (!currentRemote.value) return null
-  return remoteUsageStates.value[currentRemote.value] || null
-})
-
-const driveUsage = computed(() => currentRemoteState.value?.response || null)
-const loadingDriveUsage = computed(() => currentRemoteState.value?.loading || false)
-
-const usagePercent = computed(() => {
-  const total = driveUsage.value?.data?.total
-  const used = driveUsage.value?.data?.used
-  if (!total || !used || total <= 0) return 0
-  return Math.min(100, Number(((used / total) * 100).toFixed(1)))
-})
-
-const usageProgressColor = computed(() => {
-  if (usagePercent.value >= 90) return '#ef4444'
-  if (usagePercent.value >= 75) return '#f59e0b'
-  return '#10b981'
-})
-
-// 计算属性
-const pathSegments = computed(() => {
-  const path = currentPath.value
-  if (path === '/') return []
-  return path.split('/').filter(Boolean)
-})
-
-const filteredItems = computed(() => {
-  let result = items.value.slice()
-  
-  // 搜索过滤
-  if (searchKeyword.value) {
-    const keyword = searchKeyword.value.toLowerCase()
-    result = result.filter(item => item.name.toLowerCase().includes(keyword))
-  }
-  
-  // 排序:目录在前,文件在后, 然后根据选择的排序方式排序
-  result.sort((a, b) => {
-    // 始终让目录排在前面
-    if (a.isDir !== b.isDir) {
-      return a.isDir ? -1 : 1
-    }
-    
-    // 如果都是目录或都是文件，则应用排序规则
-    let comparison = 0
-    
-    if (sortBy.value === 'time') {
-      const timeA = a.modTime ? new Date(a.modTime).getTime() : 0
-      const timeB = b.modTime ? new Date(b.modTime).getTime() : 0
-      comparison = timeA - timeB
-    } else {
-      comparison = a.name.localeCompare(b.name)
-    }
-    
-    return sortDesc.value ? -comparison : comparison
-  })
-  
-  return result
-})
-
-const paginatedItems = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  const end = start + pageSize.value
-  return filteredItems.value.slice(start, end)
-})
-
-// 文件类型判断
-function isImage(filename: string): boolean {
-  const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico']
-  return imageExts.some(ext => filename.toLowerCase().endsWith(ext))
+function getFileName(item?: TelegramDriveItem | null): string {
+  if (!item) return ''
+  return item.file_name || `telegram_${item.message_id}`
 }
 
-function isVideo(filename: string): boolean {
-  const videoExts = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v']
-  return videoExts.some(ext => filename.toLowerCase().endsWith(ext))
-}
+function getDownloadFileName(item?: TelegramDriveItem | null): string {
+  if (!item) return ''
+  if (item.download_file_name) return item.download_file_name
 
-function getVideoType(filename: string | undefined): string {
-  if (!filename) return ''
-  const parts = filename.split('.')
-  if (parts.length < 2) return ''
-  const ext = parts.pop()?.toLowerCase()
-  
-  if (ext === 'mkv') return 'video/x-matroska' // video.js might need specific type for mkv if supported, or just let browser handle
-  // For common formats:
-  if (ext === 'mp4') return 'video/mp4'
-  if (ext === 'webm') return 'video/webm'
-  if (ext === 'ogg') return 'video/ogg'
-  return ''
-}
-
-// 缩略图URL响应式存储
-const thumbnailUrls = ref<Record<string, string>>({})
-// 缩略图加载队列
-const thumbnailQueue = ref<DriveItem[]>([])
-const isProcessingQueue = ref(false)
-
-// 获取缩略图URL - 返回响应式的URL
-function getThumbnailUrl(item: DriveItem): string {
-  const cacheKey = `${currentRemote.value}:${item.path}`
-  return thumbnailUrls.value[cacheKey] || ''
-}
-
-// 处理缩略图队列
-async function processThumbnailQueue() {
-  if (isProcessingQueue.value || thumbnailQueue.value.length === 0) return
-  
-  isProcessingQueue.value = true
-  
-  try {
-    while (thumbnailQueue.value.length > 0) {
-      // 取出第一个任务（已按时间排序）
-      const item = thumbnailQueue.value.shift()
-      if (!item) continue
-      
-      const cacheKey = `${currentRemote.value}:${item.path}`
-      
-      // 如果已有缓存，跳过
-      if (thumbnailUrls.value[cacheKey]) continue
-      
-      const remoteInfo = availableRemotes.value.find(r => r.name === currentRemote.value)
-      const remoteType = remoteInfo?.type || 'onedrive'
-      
-      try {
-        console.log('正在加载缩略图:', item.name)
-        const response = await getThumbnail(currentRemote.value, item.path, remoteType, currentPath.value, item.id || '')
-        
-        if (response.success && response.thumbnail_url) {
-          thumbnailUrls.value = {
-            ...thumbnailUrls.value,
-            [cacheKey]: response.thumbnail_url
-          }
+  if (item.stream_url) {
+    try {
+      const pathname = new URL(item.stream_url, window.location.origin).pathname
+      const encodedName = pathname.split('/').filter(Boolean).pop()
+      if (encodedName) {
+        return decodeURIComponent(encodedName)
+      }
+    } catch {
+      const encodedName = item.stream_url.split('?')[0]?.split('/').filter(Boolean).pop()
+      if (encodedName) {
+        try {
+          return decodeURIComponent(encodedName)
+        } catch {
+          return encodedName
         }
-      } catch (err) {
-        console.error('获取缩略图失败:', item.name, err)
       }
-      
-      // 稍微延迟一下，给浏览器喘息机会，也避免请求过于密集
-      await new Promise(resolve => setTimeout(resolve, 100))
     }
-  } finally {
-    isProcessingQueue.value = false
   }
+
+  return getFileName(item)
 }
 
-// 将当前页面的图片/视频添加到加载队列
-function queueThumbnails() {
-  if (viewMode.value !== 'grid') return
-  
-  const itemsToLoad = paginatedItems.value.filter(item => {
-    if (item.isDir) return false
-    if (!isImage(item.name) && !isVideo(item.name)) return false
-    
-    const cacheKey = `${currentRemote.value}:${item.path}`
-    return !thumbnailUrls.value[cacheKey]
-  })
-  
-  // 按修改时间降序排序（最新的优先）
-  itemsToLoad.sort((a, b) => {
-    let timeA = 0
-    let timeB = 0
-    
-    if (a.modTime) {
-      const t = new Date(a.modTime).getTime()
-      if (!isNaN(t)) timeA = t
-    }
-    
-    if (b.modTime) {
-      const t = new Date(b.modTime).getTime()
-      if (!isNaN(t)) timeB = t
-    }
-    
-    return timeB - timeA
-  })
-  
-  if (itemsToLoad.length > 0) {
-    console.log('Thumbnail queue sorted (desc). First:', itemsToLoad[0].name, itemsToLoad[0].modTime)
-    console.log('Last:', itemsToLoad[itemsToLoad.length-1].name, itemsToLoad[itemsToLoad.length-1].modTime)
-  }
-  
-  // 更新队列：保留不在新列表中的旧任务（可选），这里简单起见，直接用新页面的任务覆盖
-  // 或者追加到队首？用户说"优先日期加载最新"，通常是指当前视图的最新。
-  // 为了响应分页变化，我们应该优先加载当前可视区域的内容。
-  
-  // 策略：清空旧队列，只加载当前页面的任务，确保当前页面优先
-  thumbnailQueue.value = itemsToLoad
-  
-  processThumbnailQueue()
+function getItemKey(item: TelegramDriveItem): string {
+  return isFolder(item) ? `folder-${item.media_group_id}` : item.file_unique_id
 }
 
+function getStreamUrl(item: TelegramDriveItem): string {
+  return isFile(item) && item.stream_url ? resolveServerUrl(item.stream_url) : ''
+}
 
+function getDownloadUrl(item: TelegramDriveItem): string {
+  const url = getStreamUrl(item)
+  if (!url) return ''
+  const downloadUrl = new URL(url, window.location.origin)
+  downloadUrl.searchParams.set('download', '1')
+  return downloadUrl.toString()
+}
 
+function isFolder(item?: TelegramDriveItem | null): boolean {
+  return item?.entry_type === 'folder'
+}
 
-// 加载 remotes 列表
-async function loadRemotes() {
+function isFile(item?: TelegramDriveItem | null): boolean {
+  return item?.entry_type === 'file'
+}
+
+function getDisplaySize(item: TelegramDriveItem): number {
+  return item.total_size ?? item.file_size ?? 0
+}
+
+function isImage(item?: TelegramDriveItem | null): boolean {
+  return Boolean(item?.mime_type?.startsWith('image/'))
+}
+
+function isVideo(item?: TelegramDriveItem | null): boolean {
+  return Boolean(item?.mime_type?.startsWith('video/'))
+}
+
+function isAudio(item?: TelegramDriveItem | null): boolean {
+  return Boolean(item?.mime_type?.startsWith('audio/'))
+}
+
+function getTypeLabel(item: TelegramDriveItem): string {
+  if (isFolder(item)) return '媒体组文件夹'
+  if (isVideo(item)) return '视频'
+  if (isImage(item)) return '图片'
+  if (isAudio(item)) return '音频'
+  return '文档'
+}
+
+function getVideoType(item?: TelegramDriveItem | null): string {
+  return item?.mime_type || ''
+}
+
+function formatBytes(bytes?: number | null): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  return `${(bytes / Math.pow(1024, index)).toFixed(index === 0 ? 0 : 2)} ${units[index]}`
+}
+
+function formatDate(value?: string): string {
+  if (!value) return '-'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN')
+}
+
+async function loadUsage() {
   try {
-    const response = await getRcloneRemotes()
-    if (response.success && response.remotes) {
-      availableRemotes.value = response.remotes
-      if (response.remotes.length > 0 && !currentRemote.value) {
-        currentRemote.value = response.remotes[0].name
-      }
+    const response = await getTelegramUsage()
+    if (response.success && response.data) {
+      usageStats.value = response.data
     }
-  } catch (err) {
-    console.error('加载 remotes 失败:', err)
-    ElMessage.error('加载云存储列表失败')
+  } catch (error) {
+    console.error('加载 TG 网盘统计失败:', error)
   }
 }
 
-async function fetchRemoteUsage(remote: string, force = false, showError = false) {
-  if (!remote) return null
-
-  const currentState = remoteUsageStates.value[remote]
-  if (!force && currentState?.response) {
-    return currentState.response
-  }
-  if (currentState?.loading) {
-    return currentState.response || null
-  }
-
-  remoteUsageStates.value = {
-    ...remoteUsageStates.value,
-    [remote]: {
-      response: currentState?.response,
-      loading: true
-    }
-  }
-
-  try {
-    const response = await getDriveUsage(remote)
-    remoteUsageStates.value = {
-      ...remoteUsageStates.value,
-      [remote]: {
-        response,
-        loading: false
-      }
-    }
-    if (!response.success && showError) {
-      ElMessage.error(response.error || '获取网盘容量失败')
-    }
-    return response
-  } catch (err: any) {
-    console.error('加载网盘容量失败:', err)
-    const response: DriveUsageResponse = {
-      success: false,
-      supported: false,
-      remote,
-      error: err.message || '获取网盘容量失败'
-    }
-    remoteUsageStates.value = {
-      ...remoteUsageStates.value,
-      [remote]: {
-        response,
-        loading: false
-      }
-    }
-    if (showError) {
-      ElMessage.error(err.message || '获取网盘容量失败')
-    }
-    return response
-  }
-}
-
-async function preloadRemoteUsages() {
-  const tasks = availableRemotes.value.map(remote => fetchRemoteUsage(remote.name))
-  await Promise.allSettled(tasks)
-}
-
-async function loadDriveUsage(force = false, showError = false) {
-  if (!currentRemote.value) return
-  await fetchRemoteUsage(currentRemote.value, force, showError)
-}
-
-function getRemoteUsagePercent(remote: string): number | null {
-  const usage = remoteUsageStates.value[remote]?.response
-  const total = usage?.data?.total
-  const used = usage?.data?.used
-  if (!usage?.supported || !total || used === undefined || used === null || total <= 0) return null
-  return Math.min(100, (used / total) * 100)
-}
-
-function getRemoteUsageSummary(remote: string): string {
-  const state = remoteUsageStates.value[remote]
-  if (state?.loading) return '容量读取中...'
-  const usage = state?.response
-  if (!usage) return '等待加载容量'
-  if (!usage.success) return '容量读取失败'
-  if (!usage.supported || !usage.data) return '暂不支持容量统计'
-
-  const used = formatBytes(usage.data.used ?? 0)
-  const total = formatBytes(usage.data.total ?? 0)
-  return `${used} / ${total}`
-}
-
-// 浏览目录
-async function browse() {
-  if (!currentRemote.value) return
-
+async function loadItems() {
   loading.value = true
   try {
-    const response = await browseDrive(currentRemote.value, currentPath.value)
-    if (response.success && response.items) {
-      items.value = response.items
-      // 重置分页
-      currentPage.value = 1
+    const response = await browseTelegramDrive({
+      page: currentPage.value,
+      page_size: pageSize.value,
+      search: searchKeyword.value || undefined,
+      type: typeFilter.value || undefined,
+      media_group_id: currentMediaGroupId.value || undefined,
+      ...sortParams.value,
+    })
+
+    if (response.success) {
+      items.value = response.items || []
+      total.value = response.total || 0
     } else {
-      ElMessage.error(response.error || '获取文件列表失败')
       items.value = []
+      total.value = 0
+      ElMessage.error(response.error || '加载 TG 网盘失败')
     }
-  } catch (err: any) {
-    console.error('浏览失败:', err)
-    ElMessage.error(err.message || '获取文件列表失败')
+  } catch (error: any) {
+    console.error('加载 TG 网盘失败:', error)
     items.value = []
+    total.value = 0
+    ElMessage.error(error.message || '加载 TG 网盘失败')
   } finally {
     loading.value = false
   }
 }
 
-// Remote 改变
-function handleRemoteChange() {
-  currentPath.value = '/'
-  if (!remoteUsageStates.value[currentRemote.value]?.response) {
-    loadDriveUsage()
+async function refreshAll() {
+  await Promise.all([loadUsage(), loadItems()])
+}
+
+function handleSearch() {
+  currentPage.value = 1
+  loadItems()
+}
+
+function enterFolder(item: TelegramDriveItem) {
+  if (!item.media_group_id) return
+  currentMediaGroupId.value = item.media_group_id
+  currentFolderName.value = getFileName(item)
+  currentPage.value = 1
+  loadItems()
+}
+
+function goRoot() {
+  if (!isInsideGroup.value) return
+  currentMediaGroupId.value = ''
+  currentFolderName.value = ''
+  currentPage.value = 1
+  loadItems()
+}
+
+function handlePageSizeChange() {
+  currentPage.value = 1
+  loadItems()
+}
+
+function handleDownload(item: TelegramDriveItem) {
+  if (isFolder(item)) {
+    ElMessage.info('请进入媒体组后下载组内文件')
+    return
   }
-  browse()
+
+  const url = getDownloadUrl(item)
+  if (!url) {
+    ElMessage.warning('此文件暂无可用直链')
+    return
+  }
+
+  const link = document.createElement('a')
+  link.href = url
+  link.download = getDownloadFileName(item)
+  link.target = '_blank'
+  link.rel = 'noopener noreferrer'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
 }
 
-// 下载文件
-async function handleDownload(item: DriveItem) {
-  if (item.isDir) return
-  
-  const url = buildAuthorizedApiUrl('/api/rclone/file', {
-    remote: currentRemote.value,
-    path: item.path,
-    download: true,
-  })
-
-  window.open(url, '_blank')
+function handleOpen(item: TelegramDriveItem) {
+  if (isFolder(item)) {
+    enterFolder(item)
+    return
+  }
+  handlePreview(item)
 }
 
-// 删除文件
-function handleDelete(item: DriveItem) {
-  ElMessageBox.confirm(
-    `确定要删除 ${item.isDir ? '文件夹' : '文件'} "${item.name}" 吗？此操作不可恢复。`,
-    '确认删除',
-    {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-      type: 'warning'
-    }
-  ).then(async () => {
-    loading.value = true
-    try {
-      const response = await deleteFile(currentRemote.value, item.path, item.isDir)
-      if (response.success) {
-        ElMessage.success('删除成功')
-        // 刷新列表
-        browse()
-      } else {
-        ElMessage.error(response.error || '删除失败')
-      }
-    } catch (err: any) {
-      console.error('删除失败:', err)
-      ElMessage.error(err.message || '删除失败')
-    } finally {
-      loading.value = false
-    }
-  }).catch(() => {
-    // 取消删除
-  })
-}
+function handlePreview(item: TelegramDriveItem) {
+  const url = getStreamUrl(item)
+  if (!url) {
+    ElMessage.warning('此文件暂无可用直链')
+    return
+  }
 
-// 预览状态
-const showPreview = ref(false)
-const previewItem = ref<DriveItem | null>(null)
-const previewType = ref<'image' | 'video' | 'unknown'>('unknown')
-const previewUrl = ref('')
-const previewLoading = ref(false)
-const downloadingPaths = ref<Record<string, boolean>>({})
-let previewRequestToken = 0
-
-function preparePreviewSource(row: DriveItem): string {
-  return buildAuthorizedApiUrl('/api/rclone/file', {
-    remote: currentRemote.value,
-    path: row.path,
-  })
-}
-
-// 点击行
-function handleRowClick(row: DriveItem) {
-  if (row.isDir) {
-    // 进入目录
-    navigateToPath(row.path)
+  if (isImage(item)) {
+    previewType.value = 'image'
+  } else if (isVideo(item)) {
+    previewType.value = 'video'
   } else {
-    // 预览文件
-    if (isImage(row.name)) {
-      previewType.value = 'image'
-      previewItem.value = row
-      previewUrl.value = preparePreviewSource(row)
-      showPreview.value = true
-    } else if (isVideo(row.name)) {
-      previewType.value = 'video'
-      previewItem.value = row
-      previewUrl.value = preparePreviewSource(row)
-      showPreview.value = true
-    } else {
-      ElMessage.info('暂不支持预览此类型文件')
-    }
+    handleDownload(item)
+    return
   }
+
+  previewItem.value = item
+  previewUrl.value = url
+  showPreview.value = true
 }
 
-// 关闭预览
 function closePreview() {
-  previewRequestToken += 1
   showPreview.value = false
   previewItem.value = null
-  previewUrl.value = ''
   previewType.value = 'unknown'
-  previewLoading.value = false
+  previewUrl.value = ''
 }
 
-// 导航到路径
-function navigateToPath(path: string) {
-  currentPath.value = path || '/'
-  browse()
-}
+async function handleDelete(item: TelegramDriveItem) {
+  const shouldDeleteGroup = isFolder(item) || (!isInsideGroup.value && Boolean(item.media_group_id))
+  const targetName = shouldDeleteGroup ? `媒体组文件夹「${getFileName(item)}」` : `文件「${getFileName(item)}」`
 
-// 导航到面包屑某一段
-function navigateToSegment(index: number) {
-  const segments = pathSegments.value.slice(0, index + 1)
-  navigateToPath('/' + segments.join('/'))
-}
-
-// 格式化文件大小
-function formatBytes(bytes: number | undefined): string {
-  if (!bytes || bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
-}
-
-function formatCount(value: number | undefined | null): string {
-  if (value === undefined || value === null) return '-'
-  return new Intl.NumberFormat('zh-CN').format(value)
-}
-
-// 格式化日期
-function formatDate(dateStr: string | undefined): string {
-  if (!dateStr) return '-'
   try {
-    const date = new Date(dateStr)
-    return date.toLocaleString('zh-CN')
-  } catch {
-    return '-'
+    await ElMessageBox.confirm(`确定要删除 ${targetName} 吗？会同步删除频道消息和数据库记录。`, '确认删除', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+
+    loading.value = true
+    const response = shouldDeleteGroup && item.media_group_id
+      ? await deleteTelegramGroup(item.media_group_id)
+      : await deleteTelegramItem(item.message_id)
+
+    if (response.success) {
+      ElMessage.success(response.message || '删除成功')
+      if (shouldDeleteGroup && isInsideGroup.value) {
+        currentMediaGroupId.value = ''
+        currentFolderName.value = ''
+      }
+      await refreshAll()
+    } else {
+      ElMessage.error(response.error || '删除失败')
+    }
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('删除 TG 网盘文件失败:', error)
+      ElMessage.error(error.message || '删除失败')
+    }
+  } finally {
+    loading.value = false
   }
 }
 
-onMounted(async () => {
-  await loadRemotes()
-  if (currentRemote.value) {
-    void preloadRemoteUsages()
-    browse()
+async function handleClearAll() {
+  try {
+    await ElMessageBox.confirm('确定要清空整个 TG 频道网盘吗？此操作会删除所有频道消息和本地记录。', '清空 TG 网盘', {
+      confirmButtonText: '清空',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+
+    loading.value = true
+    const response = await clearTelegramDrive()
+    if (response.success) {
+      ElMessage.success(response.message || 'TG 网盘已清空')
+      await refreshAll()
+    } else {
+      ElMessage.error(response.error || '清空失败')
+    }
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('清空 TG 网盘失败:', error)
+      ElMessage.error(error.message || '清空失败')
+    }
+  } finally {
+    loading.value = false
   }
-})
+}
 
-// 监听视图模式变化
-watch(viewMode, (newMode) => {
-  if (newMode === 'grid') {
-    queueThumbnails()
-  }
-})
+watch(sortOption, handleSearch)
 
-// 监听分页数据变化
-watch(paginatedItems, () => {
-    queueThumbnails()
-}, { deep: true })
-
+onMounted(refreshAll)
 </script>
 
 <style scoped>
@@ -854,135 +558,125 @@ watch(paginatedItems, () => {
   color: #64748b;
 }
 
-.drive-header-tools {
+.drive-header-actions,
+.toolbar {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
 }
 
-.header-remote-select {
-  width: 220px;
+.stats-row {
+  margin-bottom: 20px;
 }
 
-.header-remote-select :deep(.el-select__wrapper) {
-  min-height: 38px;
-  border-radius: 10px;
+.toolbar {
+  padding: 16px;
   background: #f8fafc;
-  box-shadow: none;
-  border: 1px solid #dbeafe;
-}
-
-.header-usage {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 10px;
-  background: linear-gradient(135deg, #f8fafc 0%, #eef6ff 100%);
-  border: 1px solid #dbeafe;
-}
-
-.header-usage-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: #0f172a;
-}
-
-.header-usage-text {
-  font-size: 12px;
-  color: #64748b;
-  white-space: nowrap;
-}
-
-.drive-topbar {
-  margin-bottom: 12px;
-}
-
-.drive-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 10px 12px;
   border-radius: 12px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-}
-
-.drive-breadcrumb-card {
-  flex: 1;
-  min-width: 240px;
-}
-
-.drive-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.view-mode-toggle :deep(.el-button) {
-  border-radius: 10px;
-}
-
-.sort-select {
-  width: 152px;
 }
 
 .search-input {
-  width: 260px;
+  width: 280px;
 }
 
-.remote-option {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 2px 0;
+.type-select,
+.sort-select {
+  width: 150px;
 }
 
-.remote-option-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
 
-.remote-option-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: #0f172a;
-}
-
-.remote-option-meta {
+.breadcrumb-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 11px;
-  color: #64748b;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 10px 4px 0;
 }
 
-.remote-option-percent {
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: #dbeafe;
-  color: #1d4ed8;
-  font-weight: 600;
+.breadcrumb-link {
+  color: #409eff;
+  cursor: pointer;
+}
+
+.breadcrumb-link:hover {
+  text-decoration: underline;
 }
 
 .file-name {
   display: flex;
   align-items: center;
+  gap: 8px;
 }
 
-.el-breadcrumb :deep(.el-breadcrumb__item) {
+.grid-view {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+  min-height: 160px;
+}
+
+.grid-item {
+  position: relative;
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
   cursor: pointer;
+  transition: all 0.2s ease;
 }
 
-.el-breadcrumb :deep(.el-breadcrumb__inner):hover {
-  color: var(--el-color-primary);
+.grid-item:hover {
+  border-color: #409eff;
+  box-shadow: 0 8px 18px rgba(64, 158, 255, 0.14);
+  transform: translateY(-2px);
+}
+
+.grid-item-preview {
+  position: relative;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f1f5f9;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.grid-thumbnail {
+  width: 100%;
+  height: 100%;
+}
+
+.grid-placeholder {
+  color: #64748b;
+}
+
+.type-badge {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+}
+
+.grid-item-name {
+  margin-top: 10px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grid-item-meta {
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.grid-item-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 
 .pagination-container {
@@ -991,165 +685,33 @@ watch(paginatedItems, () => {
   margin-top: 20px;
 }
 
-/* 网格视图样式 */
-.grid-view {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 16px;
-  margin-top: 20px;
-  padding: 8px;
-}
-
-.grid-item {
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  padding: 12px;
-  cursor: pointer;
-  transition: all 0.3s;
-  background: white;
-}
-
-.grid-item:hover {
-  border-color: var(--el-color-primary);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.15);
-  transform: translateY(-2px);
-}
-
-.grid-item-preview {
-  width: 100%;
-  height: 140px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f5f7fa;
-  border-radius: 6px;
-  overflow: hidden;
-  position: relative;
-}
-
-.grid-icon {
-  color: #909399;
-}
-
-.grid-thumbnail {
-  width: 100%;
-  height: 100%;
-}
-
-.image-placeholder {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f5f7fa;
-}
-
-.video-placeholder {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-
-.video-placeholder .el-icon {
-  color: white;
-}
-
-.grid-video {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-}
-
-.grid-video .grid-thumbnail {
-  width: 100%;
-  height: 100%;
-}
-
-.grid-video .grid-icon {
-  color: white;
-}
-
-.video-badge {
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
-  background: rgba(0, 0, 0, 0.7);
-  color: white;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-}
-
-.grid-item-name {
-  margin-top: 8px;
-  font-size: 14px;
-  text-align: center;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.grid-item-info {
-  margin-top: 4px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  min-height: 24px;
-}
-
-.grid-item-size {
-  font-size: 12px;
-  color: #909399;
-}
-
-.grid-item-actions {
-  display: flex;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-
-.grid-item:hover .grid-item-actions {
-  opacity: 1;
-}
-
 .video-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 420px;
+  width: 100%;
+  min-height: 500px;
   background: #000;
-  border-radius: 4px;
-  overflow: hidden;
 }
 
-:deep(.drive-remote-popper .el-select-dropdown__item) {
-  height: auto;
-  min-height: 52px;
-  padding-top: 6px;
-  padding-bottom: 6px;
-  line-height: 1.4;
+.video-container :deep(.video-js) {
+  min-height: 500px;
 }
 
-@media (max-width: 960px) {
-  .drive-actions {
-    width: 100%;
+@media (max-width: 768px) {
+  .drive-page {
+    padding: 0;
   }
 
-  .header-remote-select {
-    width: 100%;
+  .toolbar > * {
+    width: 100% !important;
   }
 
-  .sort-select,
-  .search-input {
-    width: 100%;
+  .pagination-container {
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+
+  .video-container,
+  .video-container :deep(.video-js) {
+    min-height: 260px;
   }
 }
 </style>

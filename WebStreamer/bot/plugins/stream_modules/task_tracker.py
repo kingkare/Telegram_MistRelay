@@ -12,7 +12,7 @@ import asyncio
 logger = logging.getLogger(__name__)
 
 # 任务完成跟踪：跟踪每个下载任务的完成状态（包括上传和清理）
-# 格式: {gid: {'status': 'downloading'|'completed'|'uploaded'|'cleaned', 'completed_at': timestamp}}
+# 格式: {gid: {'status': 'downloading'|'completed'|'uploaded'|'cleaned'|'failed', 'completed_at': timestamp}}
 task_completion_tracker = {}
 task_completion_lock = asyncio.Lock() if asyncio else None
 
@@ -47,6 +47,11 @@ async def wait_for_tasks_completion(task_gids: list):
     max_wait_time = 3600 * 24  # 最大等待24小时（防止无限等待）
     wait_start = asyncio.get_event_loop().time()
     last_log_time = 0
+    try:
+        from configer import get_config_value
+        wait_for_cleanup = bool(get_config_value('UP_TELEGRAM', True))
+    except Exception:
+        wait_for_cleanup = True
     
     while len(completed_gids) < len(task_gids):
         # 检查是否超时
@@ -72,8 +77,9 @@ async def wait_for_tasks_completion(task_gids: list):
                     task_status = task_completion_tracker.get(gid, {})
                     status = task_status.get('status', 'downloading')
                     
-                    # 如果任务已完成、已上传或已清理，标记为完成
-                    if status in ['completed', 'uploaded', 'cleaned']:
+                    # 开启 TG 上传时，全流程完成必须等到上传后本地文件清理完成。
+                    # 未开启上传时，下载完成即可释放队列。
+                    if status == 'failed' or status == 'cleaned' or (not wait_for_cleanup and status == 'completed'):
                         completed_gids.add(gid)
                         continue
                 
@@ -90,35 +96,17 @@ async def wait_for_tasks_completion(task_gids: list):
                                 task_status = task_completion_tracker.get(gid, {})
                                 status = task_status.get('status', 'completed')
                                 
-                                # 如果状态是cleaned（已清理），标记为完成
-                                if status == 'cleaned':
+                                # 清理成功或上传失败都是队列等待的终态
+                                if status == 'failed':
                                     completed_gids.add(gid)
-                                # 如果状态是uploaded（已上传），检查是否需要等待清理
+                                elif status == 'cleaned':
+                                    completed_gids.add(gid)
+                                # 如果状态是uploaded（已上传），等待上传处理器完成本地清理（状态变为cleaned）
                                 elif status == 'uploaded':
-                                    # 动态获取配置（从数据库读取）
-                                    try:
-                                        from configer import get_config_value
-                                        auto_delete = get_config_value('AUTO_DELETE_AFTER_UPLOAD', True)
-                                        # 如果AUTO_DELETE_AFTER_UPLOAD为False，上传完成即视为完成
-                                        if not auto_delete:
-                                            completed_gids.add(gid)
-                                        # 如果AUTO_DELETE_AFTER_UPLOAD为True，需要等待清理（状态变为cleaned）
-                                    except Exception:
-                                        # 如果无法获取配置，假设需要等待清理
-                                        pass
-                                # 如果状态是completed（仅下载完成），检查是否启用了上传
-                                elif status == 'completed':
-                                    # 动态获取配置（从数据库读取）
-                                    try:
-                                        from configer import get_config_value
-                                        up_onedrive = get_config_value('UP_ONEDRIVE', False)
-                                        up_telegram = get_config_value('UP_TELEGRAM', False)
-                                        # 如果没有启用上传，下载完成即视为完成
-                                        if not up_onedrive and not up_telegram:
-                                            completed_gids.add(gid)
-                                    except Exception:
-                                        # 如果无法获取配置，假设需要等待上传
-                                        pass
+                                    pass
+                                # 如果状态是completed（仅下载完成），检查是否启用了 Telegram 上传
+                                elif status == 'completed' and not wait_for_cleanup:
+                                    completed_gids.add(gid)
                         elif aria2_task_status in ['error', 'removed']:
                             # 任务失败或被移除，标记为完成（不再等待）
                             completed_gids.add(gid)
@@ -129,7 +117,7 @@ async def wait_for_tasks_completion(task_gids: list):
                         # 检查任务完成跟踪器
                         async with task_completion_lock:
                             task_status = task_completion_tracker.get(gid, {})
-                            if task_status.get('status') == 'cleaned':
+                            if task_status.get('status') in ('cleaned', 'failed'):
                                 completed_gids.add(gid)
             except Exception as e:
                 logger.debug(f"检查任务 {gid} 完成状态时出错: {e}")

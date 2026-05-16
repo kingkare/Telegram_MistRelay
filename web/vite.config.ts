@@ -41,6 +41,12 @@ export default defineConfig({
         changeOrigin: true,
         secure: false,
         timeout: 30000 // 代理请求超时时间
+      },
+      '^/\\d+/': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+        secure: false,
+        timeout: 30000 // TG 流媒体直链代理
       }
     }
   },

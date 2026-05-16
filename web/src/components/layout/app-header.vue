@@ -112,7 +112,7 @@ const breadcrumb = computed(() => {
     '/tasks': '任务队列',
     '/settings': '系统设置',
     '/system': '系统管理',
-    '/drive': '网盘管理',
+    '/drive': 'TG频道网盘',
   }
   return routeMap[route.path]
 })
@@ -453,5 +453,31 @@ function handleCommand(command: string) {
 
 .logout-item:hover {
   background: linear-gradient(90deg, rgba(239, 68, 68, 0.08), rgba(220, 38, 38, 0.05));
+}
+
+@media (max-width: 768px) {
+  .header-content {
+    padding: 0 12px;
+    gap: 8px;
+  }
+
+  .breadcrumb {
+    display: none;
+  }
+
+  .connection-pill {
+    min-width: 0;
+    max-width: 44vw;
+    padding: 8px 10px;
+  }
+
+  .user-details,
+  .dropdown-icon {
+    display: none;
+  }
+
+  .user-info {
+    padding: 6px;
+  }
 }
 </style>

@@ -62,7 +62,7 @@ async def error_handler_middleware(request, handler):
 async def compression_middleware(request, handler):
     """添加 gzip 压缩支持"""
     response = await handler(request)
-    
+
     # 只压缩文本类型的响应
     if isinstance(response, web.FileResponse):
         content_type = response.content_type
@@ -71,7 +71,7 @@ async def compression_middleware(request, handler):
             accept_encoding = request.headers.get('Accept-Encoding', '')
             if 'gzip' in accept_encoding.lower():
                 response.enable_compression()
-    
+
     return response
 
 
@@ -80,9 +80,7 @@ _AUTH_WHITELIST = frozenset({
     "/api/status",
 })
 
-_AUTH_WHITELIST_PREFIXES = (
-    "/api/rclone/thumbnail/serve/",
-)
+_AUTH_WHITELIST_PREFIXES = ()
 
 
 def _apply_cors_headers(request: web.Request, response: web.StreamResponse) -> web.StreamResponse:
@@ -90,8 +88,8 @@ def _apply_cors_headers(request: web.Request, response: web.StreamResponse) -> w
 
     response.headers["Access-Control-Allow-Origin"] = origin or "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Accept, Origin, X-Requested-With"
-    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, Content-Length"
+    response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Accept, Origin, X-Requested-With, Range"
+    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, Content-Length, Content-Range, Accept-Ranges, X-MistRelay-Min-Threads"
     response.headers["Access-Control-Max-Age"] = "86400"
     response.headers["Vary"] = "Origin"
     return response
@@ -140,13 +138,13 @@ def web_server():
     # 屏蔽 CONNECT 探测带来的 access log 噪音(不影响其它请求日志)
     logging.getLogger("aiohttp.access").addFilter(_SuppressConnectAccessFilter())
     web_app = web.Application(client_max_size=30000000)
-    
+
     # 添加中间件(顺序很重要：先 CORS，再压缩、认证、错误处理)
     web_app.middlewares.append(cors_middleware)
     web_app.middlewares.append(compression_middleware)
     web_app.middlewares.append(auth_middleware)
     web_app.middlewares.append(error_handler_middleware)
-    
+
     web_app.add_routes(routes)
     logger.info("Added routes")
     return web_app

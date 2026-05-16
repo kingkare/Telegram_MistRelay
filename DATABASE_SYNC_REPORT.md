@@ -30,7 +30,7 @@
 - **外键**: `download_id` → `downloads.id` (ON DELETE CASCADE)
 - **关键字段**:
   - `status`: 上传状态 (pending/waiting_download/uploading/completed/failed/cancelled/paused)
-  - `upload_target`: 上传目标 (onedrive/telegram/gdrive)
+  - `upload_target`: 上传目标；新任务固定为 telegram，旧库可能保留 onedrive/gdrive
   - `uploaded_size`, `total_size`, `upload_speed`: 进度信息
   - `cleaned_at`: 清理时间
 
@@ -104,7 +104,7 @@
 ### 3.2 上传状态同步
 
 #### 3.2.1 上传处理器 (`aria2_client/upload_handler.py`)
-- OneDrive/Google Drive: rclone 进程监控
+- 历史第三方网盘记录：仅保留兼容展示
 - Telegram: 上传进度回调
 - 完成后调用 `mark_upload_completed()` 或 `mark_upload_failed()`
 - 清理后调用 `mark_upload_cleaned()` → 更新下载状态为 `completed`

@@ -14,6 +14,7 @@ import {
   clearAuthToken,
   getApiBaseUrl,
   getAuthToken,
+  isCurrentLoginRoute,
   redirectToLogin,
   resolveServerUrl,
 } from '@/utils/runtime'
@@ -40,8 +41,7 @@ api.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       clearAuthToken()
-      const isLoginRoute = window.location.pathname === '/login' || window.location.hash.startsWith('#/login')
-      if (!isLoginRoute) {
+      if (!isCurrentLoginRoute()) {
         redirectToLogin()
       }
     }
@@ -235,119 +235,89 @@ export function deleteUpload(uploadId: number): Promise<TaskControlResponse> {
   return api.delete<TaskControlResponse>(`/uploads/${uploadId}`).then(response => response.data)
 }
 
-// ==================== Rclone 配置管理 API ====================
 
-export interface RcloneConfigResponse {
+// ==================== Telegram 频道网盘 API ====================
+
+export interface TelegramDriveItem {
+  entry_type?: 'file' | 'folder'
+  file_unique_id: string
+  chat_id: number
+  message_id: number
+  file_name?: string
+  download_file_name?: string
+  mime_type?: string
+  file_size?: number
+  duration?: number
+  width?: number
+  height?: number
+  caption?: string
+  message_date?: string
+  media_group_id?: string
+  supports_streaming?: boolean
+  item_count?: number
+  total_size?: number
+  group_mime_types?: string[]
+  hash?: string
+  stream_url?: string
+}
+
+export interface TelegramBrowseResponse {
   success: boolean
-  content?: string
-  file_path?: string
-  exists?: boolean
-  message?: string
-  backup_path?: string
+  items: TelegramDriveItem[]
+  total: number
+  page: number
+  page_size: number
   error?: string
 }
 
-export function getRcloneConfig(): Promise<RcloneConfigResponse> {
-  return api.get<RcloneConfigResponse>('/rclone/config').then(response => response.data)
+export interface TelegramUsageStats {
+  total_count: number
+  total_size: number
+  videos: number
+  images: number
+  audios: number
+  documents: number
 }
 
-export function saveRcloneConfig(content: string): Promise<RcloneConfigResponse> {
-  return api.post<RcloneConfigResponse>('/rclone/config', { content }).then(response => response.data)
-}
-
-export interface RcloneRemote {
-  name: string
-  type: string
-}
-
-export interface RcloneRemotesResponse {
+export interface TelegramUsageResponse {
   success: boolean
-  remotes?: RcloneRemote[]
+  data?: TelegramUsageStats
   error?: string
 }
 
-export function getRcloneRemotes(): Promise<RcloneRemotesResponse> {
-  return api.get<RcloneRemotesResponse>('/rclone/remotes').then(response => response.data)
-}
-
-export interface DriveItem {
-  name: string
-  path: string
-  size?: number
-  mimeType?: string
-  modTime?: string
-  isDir: boolean
-  id?: string  // 云盘文件ID(如OneDrive的文件ID)
-}
-
-export interface DriveBrowseResponse {
-  success: boolean
-  remote?: string
-  path?: string
-  items?: DriveItem[]
-  error?: string
-}
-
-export function browseDrive(remote: string, path: string = '/'): Promise<DriveBrowseResponse> {
-  return api.get<DriveBrowseResponse>('/rclone/browse', {
-    params: { remote, path }
-  }).then(response => response.data)
-}
-
-export interface DriveUsageInfo {
-  total?: number | null
-  used?: number | null
-  free?: number | null
-  trashed?: number | null
-  other?: number | null
-  objects?: number | null
-}
-
-export interface DriveUsageResponse {
-  success: boolean
-  supported?: boolean
-  remote?: string
-  data?: DriveUsageInfo
-  error?: string
-}
-
-export function getDriveUsage(remote: string): Promise<DriveUsageResponse> {
-  return api.get<DriveUsageResponse>('/rclone/about', {
-    params: { remote }
-  }).then(response => response.data)
-}
-
-export interface ThumbnailResponse {
-  success: boolean
-  thumbnail_url?: string
-  error?: string
-}
-
-export function getThumbnail(remote: string, path: string, type: string, dir?: string, id?: string): Promise<ThumbnailResponse> {
-  return api.get<ThumbnailResponse>('/rclone/thumbnail', {
-    params: { remote, path, type, dir, id }
-  }).then(response => ({
-    ...response.data,
-    thumbnail_url: response.data.thumbnail_url
-      ? resolveServerUrl(response.data.thumbnail_url)
-      : response.data.thumbnail_url
-  }))
-}
-
-export interface DeleteFileResponse {
+export interface TelegramDeleteResponse {
   success: boolean
   message?: string
+  data?: Record<string, any>
   error?: string
 }
 
-export function deleteFile(remote: string, path: string, isDir: boolean = false): Promise<DeleteFileResponse> {
-  return api.delete<DeleteFileResponse>('/rclone/file', {
-    params: {
-      remote,
-      path,
-      is_dir: isDir
-    }
-  }).then(response => response.data)
+export function browseTelegramDrive(params: {
+  page?: number
+  page_size?: number
+  search?: string
+  type?: string
+  sort_by?: string
+  sort_desc?: boolean
+  media_group_id?: string
+} = {}): Promise<TelegramBrowseResponse> {
+  return api.get<TelegramBrowseResponse>('/telegram/browse', { params }).then(response => response.data)
+}
+
+export function getTelegramUsage(): Promise<TelegramUsageResponse> {
+  return api.get<TelegramUsageResponse>('/telegram/usage').then(response => response.data)
+}
+
+export function deleteTelegramItem(messageId: number): Promise<TelegramDeleteResponse> {
+  return api.delete<TelegramDeleteResponse>(`/telegram/item/${messageId}`).then(response => response.data)
+}
+
+export function deleteTelegramGroup(mediaGroupId: string): Promise<TelegramDeleteResponse> {
+  return api.delete<TelegramDeleteResponse>(`/telegram/group/${mediaGroupId}`).then(response => response.data)
+}
+
+export function clearTelegramDrive(): Promise<TelegramDeleteResponse> {
+  return api.delete<TelegramDeleteResponse>('/telegram/all').then(response => response.data)
 }
 
 // ==================== 日志管理 API ====================

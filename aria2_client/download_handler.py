@@ -345,59 +345,11 @@ class DownloadHandler:
                 
                 # 根据配置选择上传方式（动态获取配置值，支持热重载）
                 from configer import get_config_value
-                up_onedrive = get_config_value('UP_ONEDRIVE', False)
-                up_google_drive = get_config_value('UP_GOOGLE_DRIVE', False)
-                up_telegram = get_config_value('UP_TELEGRAM', False)
-                
-                logger.info(f"[上传选择] UP_ONEDRIVE={up_onedrive}, UP_GOOGLE_DRIVE={up_google_drive}, UP_TELEGRAM={up_telegram}")
-                
-                if up_onedrive:
-                    # 创建上传记录
-                    upload_id = None
-                    try:
-                        download_id = get_download_id_by_gid(gid)
-                        if download_id:
-                            # 预估远程路径（动态获取配置）
-                            from configer import get_config_value
-                            rclone_remote = get_config_value('RCLONE_REMOTE', 'onedrive')
-                            rclone_path = get_config_value('RCLONE_PATH', '/Downloads')
-                            file_name_display = os.path.basename(actual_path)
-                            remote_path = f"{rclone_remote}:{rclone_path}/{file_name_display}"
-                            upload_id = create_upload(download_id, 'onedrive', remote_path=remote_path)
-                            logger.info(f"创建上传记录成功，ID: {upload_id}")
-                    except Exception as e:
-                        logger.error(f"创建上传记录失败: {e}")
+                up_telegram = get_config_value('UP_TELEGRAM', True)
 
-                    # 使用rclone上传到OneDrive，异步非阻塞执行
-                    # 静默处理：不再传递msg参数，所有信息通过WebSocket推送
-                    asyncio.create_task(
-                        self.upload_handler.upload_to_onedrive(actual_path, None, gid, upload_id=upload_id)
-                    )
-                    logger.info(f"[上传] 已启动OneDrive上传任务(异步): {os.path.basename(actual_path)}")
-                elif up_google_drive:
-                    # 创建上传记录
-                    upload_id = None
-                    try:
-                        download_id = get_download_id_by_gid(gid)
-                        if download_id:
-                            # 预估远程路径（动态获取配置）
-                            from configer import get_config_value
-                            gdrive_remote = get_config_value('GOOGLE_DRIVE_REMOTE', 'gdrive')
-                            gdrive_path = get_config_value('GOOGLE_DRIVE_PATH', '/Downloads')
-                            file_name_display = os.path.basename(actual_path)
-                            remote_path = f"{gdrive_remote}:{gdrive_path}/{file_name_display}"
-                            upload_id = create_upload(download_id, 'gdrive', remote_path=remote_path)
-                            logger.info(f"创建上传记录成功，ID: {upload_id}")
-                    except Exception as e:
-                        logger.error(f"创建上传记录失败: {e}")
+                logger.info(f"[上传选择] UP_TELEGRAM={up_telegram}（第三方网盘已废弃）")
 
-                    # 使用rclone上传到Google Drive，异步非阻塞执行
-                    # 静默处理：不再传递msg参数，所有信息通过WebSocket推送
-                    asyncio.create_task(
-                        self.upload_handler.upload_to_google_drive(actual_path, None, gid, upload_id=upload_id)
-                    )
-                    logger.info(f"[上传] 已启动Google Drive上传任务(异步): {os.path.basename(actual_path)}")
-                elif up_telegram:
+                if up_telegram:
                     # 创建上传记录
                     upload_id = None
                     try:
@@ -413,6 +365,8 @@ class DownloadHandler:
                         self.upload_handler.upload_to_telegram_with_load_balance(actual_path, gid, upload_id=upload_id)
                     )
                     logger.info(f"[上传] 已启动Telegram上传任务(异步): {os.path.basename(actual_path)}")
+                else:
+                    logger.info(f"[上传] Telegram 上传未启用，跳过上传: {os.path.basename(actual_path)}")
     
     async def on_download_pause(self, result, tell_status_func):
         """

@@ -50,22 +50,6 @@ fi
 # 后台启动aria2c
 aria2c --conf-path="$CONFIG_DIR/aria2.conf" -D
 
-# 检查rclone配置
-if [ ! -f "/root/.config/rclone/rclone.conf" ]; then
-    echo "警告: 未找到rclone配置文件，请确保已上传rclone.conf到项目的rclone目录"
-    # 创建配置目录（如果不存在）
-    mkdir -p /root/.config/rclone
-else
-    echo "rclone配置文件已找到"
-    # 检查是否有可用的远程配置
-    if rclone listremotes &> /dev/null; then
-        echo "rclone远程配置已找到:"
-        rclone listremotes
-    else
-        echo "警告: rclone配置文件存在但未找到有效的远程配置，上传到OneDrive功能可能无法正常工作"
-    fi
-fi
-
 # 启动主应用
 echo "正在启动主应用..."
 python3 -u app.py

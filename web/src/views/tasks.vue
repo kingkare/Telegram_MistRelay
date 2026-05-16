@@ -76,7 +76,7 @@
           <el-timeline-item
             v-for="(item, index) in waitingItems"
             :key="item.queue_id"
-            :timestamp="`位置 ${index + 1}`"
+            :timestamp="`位置 ${Number(index) + 1}`"
             placement="top"
           >
             <el-card shadow="never" class="queue-item-card">
@@ -102,9 +102,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { useIntervalFn } from '@vueuse/core'
 import { getQueue } from '@/api'
-import TaskList from '@/components/tasks/task-list.vue'
 
-const activeTab = ref('processing')
 const autoRefresh = ref(true)
 const queueData = ref<any>(null)
 
@@ -122,9 +120,6 @@ function fetchQueue() {
     .catch(err => console.error('获取队列状态失败:', err))
 }
 
-function handleTabChange() {
-  // 切换标签页时可以执行额外操作
-}
 
 watch(autoRefresh, (enabled) => {
   if (enabled) {

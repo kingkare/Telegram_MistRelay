@@ -36,7 +36,7 @@ SQLite 数据库模块
   - retry_count      : 重试次数
   - local_path       : 本地最终文件路径
   - save_dir         : 本地保存目录
-  - remote_path      : 网盘路径（如 OneDrive/rclone）
+  - remote_path      : 历史远程路径（兼容旧第三方网盘记录）
   - upload_status    : 上传状态（pending/uploading/uploaded/failed 等）
   - created_at       : 创建时间（加入下载队列）
   - started_at       : 实际开始下载时间
@@ -169,7 +169,7 @@ def init_db():
                 retry_count      INTEGER DEFAULT 0,                 -- 重试次数
                 local_path       TEXT,                              -- 本地最终文件路径
                 save_dir         TEXT,                              -- 本地保存目录
-                remote_path      TEXT,                              -- 网盘路径（如 OneDrive/rclone）
+                remote_path      TEXT,                              -- 历史远程路径（兼容旧第三方网盘记录）
                 upload_status    TEXT,                              -- 上传状态：pending/uploading/uploaded/failed
                 created_at       TEXT NOT NULL,                     -- 创建时间（加入下载队列）
                 started_at       TEXT,                              -- 实际开始下载时间
@@ -192,7 +192,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS uploads (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT, -- 自增主键
                 download_id         INTEGER NOT NULL,                  -- 关联 downloads.id
-                upload_target       TEXT NOT NULL,                     -- 上传目标：onedrive/telegram/other
+                upload_target       TEXT NOT NULL,                     -- 上传目标：telegram；旧库可能包含 onedrive/gdrive
                 remote_path         TEXT,                              -- 远程路径
                 status              TEXT NOT NULL DEFAULT 'pending',   -- 上传状态：pending/waiting_download/uploading/completed/failed/cancelled/paused
                 failure_reason      TEXT,                              -- 失败原因分类：download_failed/code_error/network_error等
@@ -303,16 +303,47 @@ def save_tg_media(message, media=None) -> str:
     if media is None:
         raise ValueError("message does not contain supported media")
 
-    file_unique_id = media.file_unique_id
-    file_id = media.file_id
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        chat_id = getattr(message, "chat_id", None)
+    message_id = getattr(message, "id", None)
+    if message_id is None:
+        message_id = getattr(message, "message_id", None)
 
-    caption_entities = message.caption_entities or []
+    if chat_id is None or message_id is None:
+        raise ValueError("message does not contain a valid chat/message id")
+
+    file_unique_id = getattr(media, "file_unique_id", None)
+    file_id = getattr(media, "file_id", None)
+    if not file_unique_id:
+        file_unique_id = f"telethon:{chat_id}:{message_id}"
+    if not file_id:
+        file_id = file_unique_id
+
+    caption_entities = getattr(message, "caption_entities", None) or []
     try:
-        ce_json = json.dumps(
-            [e.__dict__ for e in caption_entities], ensure_ascii=False
-        )
+        ce_json = json.dumps([
+            e.__dict__ if hasattr(e, "__dict__") else dict(e)
+            for e in caption_entities
+        ], ensure_ascii=False)
     except Exception:
         ce_json = "[]"
+
+    from_user = getattr(message, "from_user", None)
+    sender_chat = getattr(message, "sender_chat", None)
+    message_date = getattr(message, "date", None)
+    if message_date is None:
+        message_date = getattr(message, "message_date", None)
+    if message_date is None:
+        message_date = _now_iso()
+    elif not isinstance(message_date, str):
+        message_date = _format_message_date(message_date)
+
+    file_info = getattr(message, "file", None)
+    file_name = getattr(media, "file_name", None) or getattr(file_info, "name", None)
+    mime_type = getattr(media, "mime_type", None) or getattr(file_info, "mime_type", None)
+    file_size = getattr(media, "file_size", None) or getattr(file_info, "size", None)
 
     # thumbs 可以以后再扩展，现在先占位为空列表
     thumbs_json = "[]"
@@ -355,22 +386,22 @@ def save_tg_media(message, media=None) -> str:
             """,
             (
                 file_unique_id,
-                message.chat.id,
-                message.id,
-                message.from_user.id if message.from_user else None,
-                message.sender_chat.id if message.sender_chat else None,
+                chat_id,
+                message_id,
+                getattr(from_user, "id", None),
+                getattr(sender_chat, "id", None),
                 file_id,
-                getattr(media, "file_name", None),
-                getattr(media, "mime_type", None),
-                getattr(media, "file_size", None),
+                file_name,
+                mime_type,
+                file_size,
                 getattr(media, "duration", None),
                 getattr(media, "width", None),
                 getattr(media, "height", None),
-                message.caption,
+                getattr(message, "caption", None),
                 ce_json,
-                _format_message_date(message.date) if getattr(message, "date", None) else _now_iso(),
-                message.media_group_id,
-                int(bool(getattr(message, "has_media_spoiler", False))),
+                message_date,
+                getattr(message, "media_group_id", None),
+                int(bool(getattr(message, "has_media_spoiler", False) or getattr(media, "has_media_spoiler", False))),
                 int(bool(getattr(media, "supports_streaming", False))),
                 thumbs_json,
             ),
@@ -869,37 +900,54 @@ def fetch_downloads_grouped(limit: int = 100):
         # 计算组统计信息
         total_files = len(downloads)
         
-        # 计算已完成数量：下载完成且所有上传任务都已完成（或没有上传任务）
+        def upload_statuses(download_record):
+            return [upload.get('status') for upload in download_record.get('uploads', [])]
+
+        def has_upload_failure(download_record):
+            return any(status in ['failed', 'cancelled'] for status in upload_statuses(download_record))
+
+        def has_upload_pending(download_record):
+            return any(status in ['pending', 'waiting_download'] for status in upload_statuses(download_record))
+
+        def has_upload_active(download_record):
+            return any(status == 'uploading' for status in upload_statuses(download_record))
+
+        def has_upload_cleanup_pending(download_record):
+            return any(
+                upload.get('status') == 'completed' and not upload.get('cleaned_at')
+                for upload in download_record.get('uploads', [])
+            )
+
         def is_truly_completed(download_record):
-            """判断一个下载记录是否真正完成（下载完成且所有上传都完成）"""
+            """判断一个下载记录是否真正完成（下载完成且上传已完成并清理）"""
             if download_record.get('status') != 'completed':
                 return False
-            
-            # 检查上传任务
+
             uploads = download_record.get('uploads', [])
             if not uploads:
-                # 没有上传任务，下载完成即完成
                 return True
-            
-            # 检查所有上传任务是否都已完成或失败
+
             for upload in uploads:
-                upload_status = upload.get('status')
-                # 如果有正在上传、等待下载或待处理的上传任务，不算完成
-                if upload_status in ['uploading', 'pending', 'waiting_download']:
+                if upload.get('status') != 'completed':
                     return False
-            
-            # 所有上传任务都已完成或失败
+                if not upload.get('cleaned_at'):
+                    return False
+
             return True
         
         completed = sum(1 for d in downloads if is_truly_completed(d))
-        downloading = sum(1 for d in downloads if d.get('status') == 'downloading')
-        failed = sum(1 for d in downloads if d.get('status') == 'failed')
-        pending = sum(1 for d in downloads if d.get('status') == 'pending')
+        downloading = sum(1 for d in downloads if d.get('status') == 'downloading' or has_upload_active(d))
+        failed = sum(1 for d in downloads if d.get('status') == 'failed' or has_upload_failure(d))
+        pending = sum(1 for d in downloads if d.get('status') == 'pending' or has_upload_pending(d) or has_upload_cleanup_pending(d))
         # 统计跳过的文件（状态为failed且错误信息包含"跳过"）
         skipped = sum(1 for d in downloads if d.get('status') == 'failed' and d.get('error_message', '').find('跳过') != -1)
         
         total_size = sum(d.get('total_length') or d.get('file_size') or 0 for d in downloads)
-        completed_size = sum(d.get('completed_length') or 0 for d in downloads)
+        completed_size = sum(
+            (d.get('total_length') or d.get('file_size') or d.get('completed_length') or 0)
+            for d in downloads
+            if is_truly_completed(d)
+        )
         
         # 对组内的下载记录按创建时间正序排序（保持稳定排序）
         # 使用ID作为次要排序键，确保排序稳定
@@ -1039,17 +1087,7 @@ def init_config_from_yaml():
             'BOT_TOKEN': ('string', 'telegram', 'Telegram Bot Token'),
             'ADMIN_ID': ('int', 'telegram', 'Telegram管理员ID'),
             'FORWARD_ID': ('string', 'telegram', '转发ID'),
-            'UP_TELEGRAM': ('bool', 'telegram', '是否上传到Telegram'),
-            
-            # Rclone配置
-            'UP_ONEDRIVE': ('bool', 'rclone', '是否启用rclone上传到OneDrive'),
-            'RCLONE_REMOTE': ('string', 'rclone', 'rclone远程名称'),
-            'RCLONE_PATH': ('string', 'rclone', 'OneDrive目标路径'),
-            'AUTO_DELETE_AFTER_UPLOAD': ('bool', 'rclone', '上传后自动删除本地文件'),
-            # 谷歌网盘配置
-            'UP_GOOGLE_DRIVE': ('bool', 'rclone', '是否上传到Google Drive'),
-            'GOOGLE_DRIVE_REMOTE': ('string', 'rclone', 'Google Drive Rclone远程名称（默认gdrive），需与rclone.conf中的配置名称一致'),
-            'GOOGLE_DRIVE_PATH': ('string', 'rclone', 'Google Drive上传路径（默认/Downloads）'),
+            'UP_TELEGRAM': ('bool', 'telegram', '是否上传到Telegram频道网盘'),
             
             # 下载配置
             'SAVE_PATH': ('string', 'download', '下载保存路径'),
@@ -1103,13 +1141,13 @@ def init_config_from_yaml():
 def create_upload(download_id: int, upload_target: str, remote_path: str = None, max_retries: int = 3) -> int:
     """
     创建一条上传记录，返回 uploads.id。
-    
+
     Args:
         download_id: 关联的下载任务 ID
-        upload_target: 上传目标（onedrive/telegram/other）
+        upload_target: 上传目标；新任务固定为 telegram，旧库可能包含 onedrive/gdrive
         remote_path: 远程路径（可选）
         max_retries: 最大重试次数（默认3次）
-    
+
     Returns:
         上传记录的 ID
     """
@@ -1560,7 +1598,7 @@ def get_download_statistics():
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         
-        # 获取所有下载记录，包含消息分组信息
+        # 获取所有下载记录，包含消息分组和上传状态信息
         cur.execute(
             """
             SELECT
@@ -1570,18 +1608,43 @@ def get_download_statistics():
                 d.completed_length,
                 m.media_group_id,
                 m.chat_id,
-                m.message_id
+                m.message_id,
+                u.id AS upload_id,
+                u.status AS upload_status,
+                u.cleaned_at AS upload_cleaned_at
             FROM downloads AS d
             LEFT JOIN tg_media AS m ON d.file_unique_id = m.file_unique_id
+            LEFT JOIN uploads AS u ON u.download_id = d.id
             """
         )
         rows = cur.fetchall()
+
+        downloads_by_id = {}
+        for row in rows:
+            row_dict = dict(row)
+            download_id = row_dict['id']
+            if download_id not in downloads_by_id:
+                downloads_by_id[download_id] = {
+                    'id': row_dict['id'],
+                    'status': row_dict['status'],
+                    'total_length': row_dict['total_length'],
+                    'completed_length': row_dict['completed_length'],
+                    'media_group_id': row_dict['media_group_id'],
+                    'chat_id': row_dict['chat_id'],
+                    'message_id': row_dict['message_id'],
+                    'uploads': [],
+                }
+            if row_dict.get('upload_id'):
+                downloads_by_id[download_id]['uploads'].append({
+                    'id': row_dict['upload_id'],
+                    'status': row_dict.get('upload_status'),
+                    'cleaned_at': row_dict.get('upload_cleaned_at'),
+                })
         
         # 按消息分组
         message_groups: dict[str, list] = {}
         
-        for row in rows:
-            row_dict = dict(row)
+        for row_dict in downloads_by_id.values():
             # 确定分组键：优先使用 media_group_id，否则使用 chat_id+message_id
             if row_dict.get('media_group_id'):
                 group_key = f"group_{row_dict['media_group_id']}"
@@ -1605,27 +1668,51 @@ def get_download_statistics():
         completed_size = 0
         
         for group_key, downloads in message_groups.items():
-            # 获取该消息下所有文件的状态
-            statuses = [d.get('status') for d in downloads]
+            def upload_statuses(download_record):
+                return [upload.get('status') for upload in download_record.get('uploads', [])]
+
+            def has_upload_failure(download_record):
+                return any(status in ['failed', 'cancelled'] for status in upload_statuses(download_record))
+
+            def has_upload_pending(download_record):
+                return any(status in ['pending', 'waiting_download'] for status in upload_statuses(download_record))
+
+            def has_upload_active(download_record):
+                return any(status == 'uploading' for status in upload_statuses(download_record))
+
+            def has_upload_cleanup_pending(download_record):
+                return any(
+                    upload.get('status') == 'completed' and not upload.get('cleaned_at')
+                    for upload in download_record.get('uploads', [])
+                )
+
+            def download_completed(download_record):
+                if download_record.get('status') != 'completed':
+                    return False
+                uploads = download_record.get('uploads', [])
+                if not uploads:
+                    return True
+                return all(upload.get('status') == 'completed' and upload.get('cleaned_at') for upload in uploads)
+
+            def completed_bytes(download_record):
+                if not download_completed(download_record):
+                    return 0
+                return download_record.get('total_length') or download_record.get('completed_length') or 0
             
-            # 计算消息状态（优先级：downloading > failed > pending > completed）
-            # 如果消息下有任何一个文件正在下载，则消息状态为 downloading
-            # 如果消息下有任何一个文件失败，则消息状态为 failed
-            # 如果消息下有任何一个文件等待中，则消息状态为 pending
-            # 否则，如果所有文件都已完成，则消息状态为 completed
-            if any(s == 'downloading' for s in statuses):
+            # 计算消息状态（优先级：downloading/uploading > failed > pending > completed）
+            if any(d.get('status') == 'downloading' or has_upload_active(d) for d in downloads):
                 downloading_messages += 1
-            elif any(s == 'failed' for s in statuses):
+            elif any(d.get('status') == 'failed' or has_upload_failure(d) for d in downloads):
                 failed_messages += 1
-            elif any(s == 'pending' for s in statuses):
+            elif any(d.get('status') == 'pending' or has_upload_pending(d) or has_upload_cleanup_pending(d) for d in downloads):
                 pending_messages += 1
-            elif all(s == 'completed' for s in statuses):
+            elif all(download_completed(d) for d in downloads):
                 completed_messages += 1
             
             # 累计文件大小
             for d in downloads:
                 total_size += d.get('total_length') or 0
-                completed_size += d.get('completed_length') or 0
+                completed_size += completed_bytes(d)
         
         stats = {
             'total': total_messages,
@@ -1920,15 +2007,17 @@ def migrate_upload_data():
             if cur.fetchone()['count'] > 0:
                 continue  # 已迁移，跳过
             
-            # 创建上传记录（假设目标是 onedrive）
+            upload_target = 'telegram' if str(remote_path or '').startswith('telegram://') else 'onedrive'
+
+            # 创建上传记录：TG 索引记录迁移为 telegram，其余保留为历史第三方网盘记录
             cur.execute(
                 """
                 INSERT INTO uploads (
                     download_id, upload_target, remote_path, status,
                     created_at, updated_at
-                ) VALUES (?, 'onedrive', ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (download_id, remote_path, new_status, created_at, created_at)
+                (download_id, upload_target, remote_path, new_status, created_at, created_at)
             )
             migrated_count += 1
         
@@ -1961,20 +2050,12 @@ def browse_tg_media(
     mime_filter: str = None,
     sort_by: str = 'message_date',
     sort_desc: bool = True,
+    media_group_id: str = None,
 ) -> dict:
     """
     分页浏览 tg_media 表中的媒体文件。
 
-    Args:
-        page: 页码（从1开始）
-        page_size: 每页数量
-        search: 搜索关键词（匹配 file_name 或 caption）
-        mime_filter: MIME 类型过滤（video/image/audio/document）
-        sort_by: 排序字段（message_date / file_size / file_name）
-        sort_desc: 是否降序
-
-    Returns:
-        { items: [...], total: int, page: int, page_size: int }
+    默认将 media_group_id 聚合成虚拟文件夹；传入 media_group_id 时返回组内真实文件。
     """
     allowed_sort = {'message_date', 'file_size', 'file_name'}
     if sort_by not in allowed_sort:
@@ -1982,6 +2063,10 @@ def browse_tg_media(
 
     conditions = []
     params: list = []
+
+    if media_group_id:
+        conditions.append("media_group_id = ?")
+        params.append(media_group_id)
 
     if search:
         conditions.append("(file_name LIKE ? OR caption LIKE ?)")
@@ -2005,40 +2090,110 @@ def browse_tg_media(
                 params.append(mime_map[mime_filter])
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    order_dir = "DESC" if sort_desc else "ASC"
     offset = (page - 1) * page_size
 
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
-        cur.execute(f"SELECT COUNT(*) as cnt FROM tg_media {where}", tuple(params))
-        total = cur.fetchone()['cnt']
-
         cur.execute(
             f"""
             SELECT
-                file_unique_id, chat_id, message_id,
+                file_unique_id, chat_id, message_id, file_id,
                 file_name, mime_type, file_size,
                 duration, width, height,
                 caption, message_date,
                 media_group_id, supports_streaming
             FROM tg_media
             {where}
-            ORDER BY {sort_by} {order_dir}
-            LIMIT ? OFFSET ?
             """,
-            (*params, page_size, offset),
+            tuple(params),
         )
-        rows = cur.fetchall()
-        items = [dict(r) for r in rows]
+        rows = [dict(r) for r in cur.fetchall()]
+
+    if media_group_id:
+        items = rows
+        for item in items:
+            item['entry_type'] = 'file'
+        items.sort(key=lambda item: _tg_media_sort_value(item, sort_by), reverse=sort_desc)
+        total = len(items)
+        return {
+            'items': items[offset:offset + page_size],
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'grouped': False,
+            'media_group_id': media_group_id,
+        }
+
+    entries: list[dict] = []
+    groups: dict[str, list[dict]] = {}
+
+    for row in rows:
+        group_id = row.get('media_group_id')
+        if group_id:
+            groups.setdefault(group_id, []).append(row)
+        else:
+            row['entry_type'] = 'file'
+            entries.append(row)
+
+    for group_id, group_items in groups.items():
+        group_items.sort(key=lambda item: item.get('message_date') or '', reverse=True)
+        representative = next((item for item in group_items if item.get('file_name')), group_items[0])
+        total_size = sum(int(item.get('file_size') or 0) for item in group_items)
+        latest_date = max((item.get('message_date') or '' for item in group_items), default='')
+        display_name = _tg_media_folder_name(representative.get('file_name'), group_id)
+        mime_types = {item.get('mime_type') or '' for item in group_items}
+
+        folder = {
+            **representative,
+            'entry_type': 'folder',
+            'media_group_id': group_id,
+            'file_name': display_name,
+            'message_date': latest_date,
+            'file_size': total_size,
+            'total_size': total_size,
+            'item_count': len(group_items),
+            'mime_type': 'application/x-mistrelay-media-group',
+            'group_mime_types': sorted(mime for mime in mime_types if mime),
+        }
+        entries.append(folder)
+
+    entries.sort(key=lambda item: _tg_media_sort_value(item, sort_by), reverse=sort_desc)
+    total = len(entries)
 
     return {
-        'items': items,
+        'items': entries[offset:offset + page_size],
         'total': total,
         'page': page,
         'page_size': page_size,
+        'grouped': True,
     }
+
+
+
+def _tg_media_folder_name(file_name: str | None, group_id: str) -> str:
+    name = (file_name or '').strip()
+    if not name:
+        return f"媒体组 {group_id}"
+
+    path_name = name.rsplit('/', 1)[-1].rsplit('\\', 1)[-1]
+    if path_name in ('', '.', '..'):
+        return name
+
+    dot_index = path_name.rfind('.')
+    if dot_index <= 0:
+        return name
+
+    stem = path_name[:dot_index].strip()
+    return stem or name
+
+def _tg_media_sort_value(item: dict, sort_by: str):
+    if sort_by == 'file_size':
+        return int(item.get('total_size') or item.get('file_size') or 0)
+    if sort_by == 'file_name':
+        return (item.get('file_name') or '').lower()
+    return item.get('message_date') or ''
 
 
 def get_tg_media_stats() -> dict:

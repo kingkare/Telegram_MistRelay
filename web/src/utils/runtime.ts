@@ -1,19 +1,68 @@
 const SERVER_BASE_URL_KEY = 'mistrelay.serverBaseUrl'
 const TOKEN_KEY = 'token'
 
+function getHostnameForProtocolDefault(value: string): string {
+  try {
+    return new URL(`http://${value}`).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+function shouldDefaultToHttp(value: string): boolean {
+  const hostname = getHostnameForProtocolDefault(value)
+  if (!hostname) return false
+
+  if (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname === '0.0.0.0' ||
+    hostname === '::1' ||
+    hostname === 'host.docker.internal' ||
+    hostname.endsWith('.local')
+  ) {
+    return true
+  }
+
+  const octets = hostname.split('.').map(part => Number(part))
+  if (octets.length !== 4 || octets.some(part => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false
+  }
+
+  const [first, second] = octets
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    (first === 169 && second === 254)
+  )
+}
+
 export function normalizeServerBaseUrl(value: string): string {
   const trimmed = value.trim()
   if (!trimmed) return ''
 
   const withProtocol = /^https?:\/\//i.test(trimmed) || trimmed.startsWith('/')
     ? trimmed
-    : `https://${trimmed}`
+    : `${shouldDefaultToHttp(trimmed) ? 'http' : 'https'}://${trimmed}`
 
   return withProtocol.replace(/\/+$/, '')
 }
 
 export function shouldUseHashHistory(): boolean {
   return import.meta.env.VITE_USE_HASH_ROUTER === 'true'
+}
+
+function getAppBasePath(): string {
+  const base = (import.meta.env.BASE_URL || '/').trim()
+  if (!base || base === '/') return ''
+  return `/${base.replace(/^\/+|\/+$/g, '')}`
+}
+
+function normalizePathname(pathname: string): string {
+  const normalized = pathname.replace(/\/+$/, '')
+  return normalized || '/'
 }
 
 export function getDefaultServerBaseUrl(): string {
@@ -99,7 +148,20 @@ export function buildAuthorizedApiUrl(
 }
 
 export function getLoginRouteUrl(): string {
-  return shouldUseHashHistory() ? '/#/login' : '/login'
+  const basePath = getAppBasePath()
+  if (shouldUseHashHistory()) {
+    return `${basePath}/#/login`
+  }
+  return `${basePath}/login`
+}
+
+export function isCurrentLoginRoute(): boolean {
+  if (window.location.hash.startsWith('#/login')) {
+    return true
+  }
+
+  const basePath = getAppBasePath()
+  return normalizePathname(window.location.pathname) === normalizePathname(`${basePath}/login`)
 }
 
 export function redirectToLogin(): void {

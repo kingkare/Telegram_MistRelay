@@ -31,14 +31,9 @@
         <template #title>任务中心</template>
       </el-menu-item>
       
-      <el-menu-item index="/tasks" class="menu-item">
-        <el-icon><List /></el-icon>
-        <template #title>任务队列</template>
-      </el-menu-item>
-      
       <el-menu-item index="/drive" class="menu-item">
         <el-icon><Folder /></el-icon>
-        <template #title>我的网盘</template>
+        <template #title>TG网盘</template>
       </el-menu-item>
       
       <el-menu-item index="/settings" class="menu-item">
@@ -46,10 +41,6 @@
         <template #title>系统设置</template>
       </el-menu-item>
       
-      <el-menu-item index="/system" class="menu-item">
-        <el-icon><Tools /></el-icon>
-        <template #title>系统管理</template>
-      </el-menu-item>
     </el-menu>
     
     <div class="sidebar-footer">
@@ -65,16 +56,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   Cpu,
   Odometer,
   Download,
-  List,
   Folder,
   Setting,
-  Tools,
   Expand,
   Fold
 } from '@element-plus/icons-vue'
@@ -88,10 +77,41 @@ const emit = defineEmits<{
   collapseChange: [collapsed: boolean]
 }>()
 
-function toggleCollapse() {
-  isCollapse.value = !isCollapse.value
+const mobileBreakpoint = 768
+let isMobileViewport = false
+
+function setCollapse(nextValue: boolean) {
+  if (isCollapse.value === nextValue) return
+  isCollapse.value = nextValue
   emit('collapseChange', isCollapse.value)
 }
+
+function syncCollapseWithViewport() {
+  const nextIsMobile = window.innerWidth <= mobileBreakpoint
+  if (nextIsMobile === isMobileViewport) return
+  isMobileViewport = nextIsMobile
+  if (nextIsMobile) {
+    setCollapse(true)
+  } else {
+    setCollapse(false)
+  }
+}
+
+function toggleCollapse() {
+  setCollapse(!isCollapse.value)
+}
+
+onMounted(() => {
+  isMobileViewport = window.innerWidth <= mobileBreakpoint
+  if (isMobileViewport) {
+    setCollapse(true)
+  }
+  window.addEventListener('resize', syncCollapseWithViewport)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', syncCollapseWithViewport)
+})
 </script>
 
 <style scoped>

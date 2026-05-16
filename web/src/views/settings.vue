@@ -40,7 +40,7 @@
             <el-form-item label="服务器地址">
               <el-input
                 v-model="clientServerUrl"
-                placeholder="https://mistrelay.example.com"
+                placeholder="127.0.0.1:8080 或 https://mistrelay.example.com"
                 clearable
               />
               <div class="el-form-item__help">
@@ -110,153 +110,6 @@
         </el-card>
       </el-tab-pane>
 
-      <!-- Rclone配置 -->
-      <el-tab-pane label="Rclone配置" name="rclone">
-        <el-card shadow="hover">
-          <template #header>
-            <div class="card-header">
-              <span>Rclone上传配置</span>
-              <el-button type="primary" @click="saveConfig('rclone')" :loading="saving">
-                保存配置
-              </el-button>
-            </div>
-          </template>
-          <el-alert
-            type="info"
-            :closable="false"
-            style="margin-bottom: 20px"
-          >
-            <template #title>
-              <div style="font-size: 13px">
-                <strong>提示：</strong>Rclone配置保存后会立即生效，下次上传时会自动从数据库读取最新配置，无需重启服务。
-              </div>
-            </template>
-          </el-alert>
-          <el-form :model="configs.rclone" label-width="180px">
-            <el-divider content-position="left">OneDrive配置</el-divider>
-            <el-form-item label="启用OneDrive上传">
-              <el-switch v-model="configs.rclone.UP_ONEDRIVE" />
-            </el-form-item>
-            <el-form-item label="Rclone远程名称" v-if="configs.rclone.UP_ONEDRIVE">
-              <el-select 
-                v-model="configs.rclone.RCLONE_REMOTE" 
-                placeholder="选择 OneDrive Remote"
-                filterable
-                allow-create
-                default-first-option
-              >
-                <el-option
-                  v-for="remote in availableRemotes.filter(r => r.type === 'onedrive')"
-                  :key="remote.name"
-                  :label="`${remote.name} (${remote.type})`"
-                  :value="remote.name"
-                >
-                  <span style="float: left">{{ remote.name }}</span>
-                  <span style="float: right; color: #8492a6; font-size: 12px">{{ remote.type }}</span>
-                </el-option>
-              </el-select>
-              <div class="el-form-item__help">OneDrive的rclone远程名称(自动过滤 type=onedrive 的 remote)</div>
-            </el-form-item>
-            <el-form-item label="OneDrive路径" v-if="configs.rclone.UP_ONEDRIVE">
-              <el-input v-model="configs.rclone.RCLONE_PATH" />
-              <div class="el-form-item__help">OneDrive上的目标路径（默认：/Downloads）</div>
-            </el-form-item>
-            
-            <el-divider content-position="left">Google Drive配置</el-divider>
-            <el-form-item label="启用Google Drive上传">
-              <el-switch v-model="configs.rclone.UP_GOOGLE_DRIVE" />
-            </el-form-item>
-            <el-alert
-              v-if="configs.rclone.UP_GOOGLE_DRIVE"
-              type="info"
-              :closable="false"
-              style="margin-bottom: 20px"
-            >
-              <template #title>
-                <div style="font-size: 13px">
-                  <strong>提示：</strong>Google Drive 上传使用 rclone，需要在 rclone 配置文件中配置 OAuth2 token。
-                  <br />请确保已在 <code>rclone.conf</code> 中配置了名为 <code>{{ configs.rclone.GOOGLE_DRIVE_REMOTE || 'gdrive' }}</code> 的远程配置。
-                </div>
-              </template>
-            </el-alert>
-            <el-form-item label="Google Drive远程名称" v-if="configs.rclone.UP_GOOGLE_DRIVE">
-              <el-select 
-                v-model="configs.rclone.GOOGLE_DRIVE_REMOTE" 
-                placeholder="选择 Google Drive Remote"
-                filterable
-                allow-create
-                default-first-option
-              >
-                <el-option
-                  v-for="remote in availableRemotes.filter(r => r.type === 'drive')"
-                  :key="remote.name"
-                  :label="`${remote.name} (${remote.type})`"
-                  :value="remote.name"
-                >
-                  <span style="float: left">{{ remote.name }}</span>
-                  <span style="float: right; color: #8492a6; font-size: 12px">{{ remote.type }}</span>
-                </el-option>
-              </el-select>
-              <div class="el-form-item__help">Google Drive的rclone远程名称(自动过滤 type=drive 的 remote)</div>
-            </el-form-item>
-            <el-form-item label="Google Drive路径" v-if="configs.rclone.UP_GOOGLE_DRIVE">
-              <el-input v-model="configs.rclone.GOOGLE_DRIVE_PATH" />
-              <div class="el-form-item__help">Google Drive上的目标路径（默认：/Downloads）</div>
-            </el-form-item>
-            
-            <el-divider content-position="left">通用设置</el-divider>
-            <el-form-item label="上传后删除本地文件">
-              <el-switch v-model="configs.rclone.AUTO_DELETE_AFTER_UPLOAD" />
-              <div class="el-form-item__help">上传成功后自动删除本地文件以节省磁盘空间</div>
-            </el-form-item>
-            
-            <el-divider content-position="left">Rclone 配置文件管理</el-divider>
-            <el-alert
-              type="info"
-              :closable="false"
-              style="margin-bottom: 20px"
-            >
-              <template #title>
-                <div style="font-size: 13px">
-                  <strong>提示:</strong>直接编辑 rclone.conf 文件内容,保存时会自动备份原文件。配置采用 INI 格式,每个远程存储以 <code>[remote_name]</code> 开始。
-                </div>
-              </template>
-            </el-alert>
-            <el-form-item label="配置文件路径">
-              <el-input v-model="rcloneConfigPath" readonly />
-            </el-form-item>
-            <el-form-item label="配置文件内容">
-              <el-input
-                v-model="rcloneConfigContent"
-                type="textarea"
-                :rows="15"
-                placeholder="rclone.conf 配置文件内容将在此显示..."
-                style="font-family: 'Courier New', monospace; font-size: 12px;"
-              />
-              <div class="el-form-item__help">
-                支持添加多个远程存储配置,修改后立即生效无需重启服务
-              </div>
-            </el-form-item>
-            <el-form-item>
-              <el-button 
-                type="primary" 
-                @click="saveRcloneConfigFile" 
-                :loading="savingRcloneConfig"
-                :disabled="!rcloneConfigContent"
-              >
-                保存配置文件
-              </el-button>
-              <el-button @click="loadRcloneConfigFile" :loading="loadingRcloneConfig">
-                重新加载
-              </el-button>
-              <span v-if="rcloneConfigLastSaved" style="margin-left: 10px; color: #909399; font-size: 12px;">
-                {{ rcloneConfigLastSaved }}
-              </span>
-            </el-form-item>
-          </el-form>
-        </el-card>
-      </el-tab-pane>
-
       <!-- 下载配置 -->
       <el-tab-pane label="下载配置" name="download">
         <el-card shadow="hover">
@@ -296,15 +149,15 @@
                 启用后，小于指定大小的媒体文件将不会被下载
               </div>
             </el-form-item>
-            <el-form-item 
-              label="最小文件大小（MB）" 
+            <el-form-item
+              label="最小文件大小（MB）"
               v-if="configs.download.SKIP_SMALL_FILES"
             >
-              <el-input-number 
-                v-model="configs.download.MIN_FILE_SIZE_MB" 
-                :min="1" 
-                :max="10000" 
-                style="width: 100%" 
+              <el-input-number
+                v-model="configs.download.MIN_FILE_SIZE_MB"
+                :min="1"
+                :max="10000"
+                style="width: 100%"
               />
               <div class="el-form-item__help">
                 小于此大小的文件将被跳过下载（默认：100MB）
@@ -417,22 +270,282 @@
         </el-card>
       </el-tab-pane>
 
+
+      <el-tab-pane label="容器管理" name="container">
+        <el-row :gutter="20">
+          <el-col :xs="24" :lg="12">
+            <el-card shadow="hover" class="mb-6">
+              <template #header>
+                <div class="flex justify-between items-center">
+                  <span>Docker容器状态</span>
+                  <el-button
+                    :icon="Refresh"
+                    circle
+                    size="small"
+                    @click="fetchDockerStatus"
+                    :loading="loadingStatus"
+                  />
+                </div>
+              </template>
+
+              <el-skeleton v-if="loadingStatus" :rows="5" animated />
+
+              <div v-else-if="dockerStatus">
+                <el-descriptions :column="1" border size="small">
+                  <el-descriptions-item label="运行环境">
+                    <el-tag :type="dockerStatus.in_docker ? 'success' : 'info'" size="small">
+                      {{ dockerStatus.in_docker ? 'Docker容器内' : '非Docker环境' }}
+                    </el-tag>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="容器名称">
+                    {{ dockerStatus.container_name || '-' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="运行状态">
+                    <el-tag
+                      :type="getStatusType(dockerStatus.status)"
+                      size="small"
+                    >
+                      {{ dockerStatus.status || '-' }}
+                    </el-tag>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="镜像名称">
+                    {{ dockerStatus.image || '-' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="创建时间">
+                    {{ formatDate(dockerStatus.created) }}
+                  </el-descriptions-item>
+                </el-descriptions>
+
+                <div v-if="dockerStatus.error" class="mt-4">
+                  <el-alert
+                    :title="dockerStatus.error"
+                    type="warning"
+                    :closable="false"
+                  />
+                </div>
+              </div>
+
+              <el-empty v-else description="无法获取容器状态" />
+            </el-card>
+          </el-col>
+
+          <el-col :xs="24" :lg="12">
+            <el-card shadow="hover" class="mb-6">
+              <template #header>
+                <span>容器控制</span>
+              </template>
+
+              <div class="control-actions">
+                <el-button
+                  type="primary"
+                  :icon="RefreshRight"
+                  @click="handleRestart"
+                  :loading="restarting"
+                  :disabled="!dockerStatus?.in_docker"
+                  block
+                  size="large"
+                >
+                  重启容器（热重载）
+                </el-button>
+
+                <el-alert
+                  v-if="!dockerStatus?.in_docker"
+                  title="当前不在Docker容器内运行，无法执行容器操作"
+                  type="info"
+                  :closable="false"
+                  class="mt-4"
+                />
+
+                <div v-if="restartMessage" class="mt-4">
+                  <el-alert
+                    :title="restartMessage"
+                    :type="restartSuccess ? 'success' : 'error'"
+                    :closable="true"
+                    @close="restartMessage = ''"
+                  />
+                </div>
+              </div>
+            </el-card>
+          </el-col>
+        </el-row>
+
+        <el-card shadow="hover">
+          <template #header>
+            <div class="flex justify-between items-center">
+              <span>容器日志</span>
+              <div class="flex gap-2">
+                <el-select
+                  v-model="dockerLogLines"
+                  @change="handleDockerLogLinesChange"
+                  style="width: 120px"
+                  size="small"
+                  :disabled="wsConnected"
+                >
+                  <el-option label="50 行" :value="50" />
+                  <el-option label="100 行" :value="100" />
+                  <el-option label="200 行" :value="200" />
+                  <el-option label="500 行" :value="500" />
+                </el-select>
+                <el-button
+                  v-if="!wsConnected"
+                  :icon="VideoPlay"
+                  circle
+                  size="small"
+                  @click="startLogStream"
+                  :loading="connecting"
+                  title="开始实时日志"
+                />
+                <el-button
+                  v-else
+                  :icon="VideoPause"
+                  circle
+                  size="small"
+                  @click="stopLogStream"
+                  title="停止实时日志"
+                />
+                <el-button
+                  :icon="Refresh"
+                  circle
+                  size="small"
+                  @click="fetchDockerLogs"
+                  :loading="loadingDockerLogs"
+                  :disabled="wsConnected"
+                  title="刷新日志"
+                />
+                <el-button
+                  :icon="Delete"
+                  circle
+                  size="small"
+                  @click="clearDockerLogs"
+                  title="清空日志"
+                />
+              </div>
+            </div>
+          </template>
+
+          <el-skeleton v-if="loadingDockerLogs && !wsConnected" :rows="10" animated />
+
+          <div v-else class="logs-container" ref="dockerLogsContainerRef">
+            <pre class="logs-content">{{ dockerLogs }}</pre>
+          </div>
+
+          <el-empty v-if="!dockerLogs && !wsConnected" description="无法获取容器日志" />
+        </el-card>
+      </el-tab-pane>
+
+      <el-tab-pane label="系统日志" name="app-logs">
+        <el-card shadow="hover" class="mb-4">
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <el-select v-model="selectedFile" placeholder="当前日志" clearable style="width: 220px" size="default" @change="fetchAppLogs">
+                <el-option v-for="f in logFiles" :key="f.name" :label="`${f.name} (${formatSize(f.size)})`" :value="f.name" />
+              </el-select>
+
+              <el-select v-model="levelFilter" placeholder="全部级别" clearable style="width: 130px" size="default" @change="fetchAppLogs">
+                <el-option label="ERROR" value="ERROR" />
+                <el-option label="WARNING" value="WARNING" />
+                <el-option label="INFO" value="INFO" />
+                <el-option label="DEBUG" value="DEBUG" />
+              </el-select>
+
+              <el-input v-model="keyword" placeholder="关键词搜索" clearable style="width: 200px" size="default" @keyup.enter="fetchAppLogs" @clear="fetchAppLogs">
+                <template #prefix>
+                  <el-icon><Search /></el-icon>
+                </template>
+              </el-input>
+
+              <el-select v-model="tailCount" style="width: 120px" size="default" @change="fetchAppLogs">
+                <el-option label="最新 100 行" :value="100" />
+                <el-option label="最新 200 行" :value="200" />
+                <el-option label="最新 500 行" :value="500" />
+                <el-option label="最新 1000 行" :value="1000" />
+              </el-select>
+            </div>
+
+            <div class="toolbar-right">
+              <el-button :icon="Refresh" circle size="default" @click="fetchAppLogs" :loading="loadingAppLogs" title="刷新" />
+              <el-button :icon="Download" circle size="default" @click="handleDownload" :disabled="!currentFileName" title="下载日志文件" />
+              <el-button :icon="Delete" circle size="default" @click="clearAppLogDisplay" title="清空显示" />
+            </div>
+          </div>
+        </el-card>
+
+        <el-card shadow="hover" class="mb-4" v-if="logFiles.length > 0">
+          <template #header>
+            <div class="flex justify-between items-center">
+              <span>日志文件 ({{ logFiles.length }})</span>
+              <el-button text size="small" @click="showFileList = !showFileList">
+                {{ showFileList ? '收起' : '展开' }}
+              </el-button>
+            </div>
+          </template>
+          <div v-if="showFileList">
+            <el-table :data="logFiles" size="small" stripe>
+              <el-table-column prop="name" label="文件名" />
+              <el-table-column label="大小" width="120">
+                <template #default="{ row }">{{ formatSize(row.size) }}</template>
+              </el-table-column>
+              <el-table-column prop="modified" label="最后修改" width="180" />
+              <el-table-column label="操作" width="100">
+                <template #default="{ row }">
+                  <el-button text size="small" type="primary" @click="viewFile(row.name)">查看</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </el-card>
+
+        <el-card shadow="hover">
+          <template #header>
+            <div class="flex justify-between items-center">
+              <span>
+                日志内容
+                <el-tag size="small" type="info" class="ml-2" v-if="appLogLines.length">{{ appLogLines.length }} 行</el-tag>
+              </span>
+              <el-switch v-model="autoScroll" active-text="自动滚动" inactive-text="" size="small" />
+            </div>
+          </template>
+
+          <el-skeleton v-if="loadingAppLogs" :rows="12" animated />
+
+          <div v-else-if="appLogLines.length > 0" class="logs-container app-logs-container" ref="appLogsContainerRef">
+            <div v-for="(line, idx) in appLogLines" :key="idx" :class="['log-line', getLineClass(line)]">
+              <span class="line-no">{{ idx + 1 }}</span>
+              <span class="line-content">{{ line }}</span>
+            </div>
+          </div>
+
+          <el-empty v-else description="暂无日志数据" />
+        </el-card>
+      </el-tab-pane>
+
     </el-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getConfig, updateConfig, reloadConfig, getRcloneConfig, saveRcloneConfig, getRcloneRemotes, type RcloneRemote } from '@/api'
+import { getConfig, updateConfig, reloadConfig, getDockerStatus, restartDocker, getDockerLogs, getLogFiles, getLogContent, getLogDownloadUrl, type LogFile } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { checkServerConnection } from '@/utils/connection'
 import { getServerBaseUrl, isValidServerBaseUrl, setServerBaseUrl } from '@/utils/runtime'
-import { useRouter } from 'vue-router'
+import { Refresh, RefreshRight, VideoPlay, VideoPause, Delete, Download, Search } from '@element-plus/icons-vue'
+import type { DockerStatus } from '@/types/api'
+import { formatDate } from '@/utils/formatters'
+import { buildWsUrl } from '@/utils/websocket'
+import { useRoute, useRouter } from 'vue-router'
 
+const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
-const activeTab = ref('client')
+
+type SettingsTab = 'client' | 'telegram' | 'download' | 'aria2' | 'stream' | 'container' | 'app-logs'
+const validTabs: SettingsTab[] = ['client', 'telegram', 'download', 'aria2', 'stream', 'container', 'app-logs']
+const initialTab = typeof route.query.tab === 'string' && validTabs.includes(route.query.tab as SettingsTab)
+  ? route.query.tab as SettingsTab
+  : 'client'
+const activeTab = ref<SettingsTab>(initialTab)
 const saving = ref(false)
 const reloading = ref(false)
 const clientServerUrl = ref(getServerBaseUrl())
@@ -440,16 +553,7 @@ const testingConnection = ref(false)
 const savingClientConnection = ref(false)
 const connectionState = ref<'idle' | 'success' | 'error'>('idle')
 const connectionStatusText = ref('')
-// Rclone 配置文件管理相关状态
-const rcloneConfigContent = ref('')
-const rcloneConfigPath = ref('/root/.config/rclone/rclone.conf')
-const loadingRcloneConfig = ref(false)
-const savingRcloneConfig = ref(false)
-const rcloneConfigLastSaved = ref('')
-
-// Rclone remotes 列表
-const availableRemotes = ref<RcloneRemote[]>([])
-const configCategories = ['telegram', 'rclone', 'download', 'aria2', 'stream'] as const
+const configCategories = ['telegram', 'download', 'aria2', 'stream'] as const
 type ConfigCategory = typeof configCategories[number]
 
 const effectiveServerUrlLabel = computed(() => clientServerUrl.value || '同源 /api')
@@ -472,15 +576,6 @@ const configs = ref({
     ADMIN_ID: 0,
     FORWARD_ID: '',
     UP_TELEGRAM: false
-  },
-  rclone: {
-    UP_ONEDRIVE: false,
-    RCLONE_REMOTE: 'onedrive',
-    RCLONE_PATH: '/Downloads',
-    UP_GOOGLE_DRIVE: false,
-    GOOGLE_DRIVE_REMOTE: 'gdrive',
-    GOOGLE_DRIVE_PATH: '/Downloads',
-    AUTO_DELETE_AFTER_UPLOAD: true
   },
   download: {
     SAVE_PATH: '/root/mistrelay_downloads',
@@ -610,8 +705,8 @@ async function fetchConfigs() {
       const response = await getConfig(category)
       if (response.success && response.data) {
         // 合并配置，保留默认值
-        configs.value[category] = {
-          ...configs.value[category],
+        ;(configs.value as Record<ConfigCategory, Record<string, any>>)[category] = {
+          ...(configs.value[category] as Record<string, any>),
           ...response.data
         }
       }
@@ -627,12 +722,12 @@ async function saveConfig(category: ConfigCategory) {
     ElMessage.warning('配置正在重载中，请稍候...')
     return
   }
-  
+
   saving.value = true
   try {
     const categoryConfig = configs.value[category]
     const response = await updateConfig(categoryConfig)
-    
+
     if (response.success) {
       if (response.needs_restart) {
         ElMessage.warning({
@@ -666,10 +761,10 @@ async function handleReloadConfig() {
         type: 'info'
       }
     )
-    
+
     // 开始重载，锁定页面
     reloading.value = true
-    
+
     try {
       const response = await reloadConfig()
       if (response.success) {
@@ -694,98 +789,333 @@ async function handleReloadConfig() {
   }
 }
 
-// Rclone 配置文件管理函数
-async function loadRcloneConfigFile() {
-  loadingRcloneConfig.value = true
+const dockerStatus = ref<DockerStatus | null>(null)
+const dockerLogs = ref<string>('')
+const loadingStatus = ref(false)
+const loadingDockerLogs = ref(false)
+const restarting = ref(false)
+const restartMessage = ref('')
+const restartSuccess = ref(false)
+const dockerLogLines = ref(100)
+const wsConnected = ref(false)
+const connecting = ref(false)
+const ws = ref<WebSocket | null>(null)
+const dockerLogsContainerRef = ref<HTMLElement | null>(null)
+
+const logFiles = ref<LogFile[]>([])
+const appLogLines = ref<string[]>([])
+const loadingAppLogs = ref(false)
+const showFileList = ref(false)
+const autoScroll = ref(true)
+const appLogsContainerRef = ref<HTMLElement | null>(null)
+const selectedFile = ref<string>('')
+const levelFilter = ref<string>('')
+const keyword = ref<string>('')
+const tailCount = ref<number>(200)
+const currentFileName = ref<string>('')
+
+function fetchDockerStatus() {
+  loadingStatus.value = true
+  getDockerStatus()
+    .then(data => {
+      dockerStatus.value = data
+    })
+    .catch(err => {
+      console.error('获取Docker状态失败:', err)
+      ElMessage.error('获取Docker状态失败')
+    })
+    .finally(() => {
+      loadingStatus.value = false
+    })
+}
+
+function stopLogStream() {
+  if (ws.value) {
+    ws.value.close()
+    ws.value = null
+  }
+  wsConnected.value = false
+  connecting.value = false
+}
+
+function startLogStream() {
+  if (ws.value) {
+    stopLogStream()
+  }
+
+  connecting.value = true
+  const url = buildWsUrl('/api/system/docker/logs/ws', { tail: String(dockerLogLines.value) })
+
   try {
-    const response = await getRcloneConfig()
-    if (response.success) {
-      rcloneConfigContent.value = response.content || ''
-      rcloneConfigPath.value = response.file_path || '/root/.config/rclone/rclone.conf'
-      if (!response.exists) {
-        ElMessage.info(response.message || '配置文件不存在')
-      } else {
-        ElMessage.success('配置文件加载成功')
-      }
-      rcloneConfigLastSaved.value = ''
-    } else {
-      ElMessage.error(response.error || '加载配置文件失败')
+    ws.value = new WebSocket(url)
+
+    ws.value.onopen = () => {
+      wsConnected.value = true
+      connecting.value = false
+      // 清空现有日志，准备接收流式日志
+      dockerLogs.value = ''
     }
-  } catch (err: any) {
-    console.error('加载 Rclone 配置失败:', err)
-    ElMessage.error(err.message || '加载配置文件失败')
-  } finally {
-    loadingRcloneConfig.value = false
+
+    ws.value.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+
+        if (data.type === 'history') {
+          dockerLogs.value = data.logs || ''
+        } else if (data.type === 'log' || data.type === 'line') { // line passed from backend is 'line', but let's handle 'log' too just in case
+          // Append new log line
+          dockerLogs.value += (dockerLogs.value ? '\n' : '') + (data.line || '')
+          // Auto scroll to bottom
+          nextTick(() => {
+            if (dockerLogsContainerRef.value) {
+              dockerLogsContainerRef.value.scrollTop = dockerLogsContainerRef.value.scrollHeight
+            }
+          })
+        } else if (data.type === 'error') {
+          ElMessage.error(data.message || '日志流错误')
+        }
+      } catch (e) {
+        console.error('解析WebSocket消息失败:', e)
+      }
+    }
+
+    ws.value.onerror = (error) => {
+      console.error('WebSocket错误:', error)
+      ElMessage.error('日志流连接错误')
+      connecting.value = false
+      wsConnected.value = false
+    }
+
+    ws.value.onclose = () => {
+      wsConnected.value = false
+      connecting.value = false
+    }
+  } catch (e) {
+    console.error('建立WebSocket连接失败:', e)
+    ElMessage.error('无法建立日志流连接')
+    connecting.value = false
   }
 }
 
-async function saveRcloneConfigFile() {
-  if (!rcloneConfigContent.value.trim()) {
-    ElMessage.warning('配置内容不能为空')
+function handleDockerLogLinesChange() {
+  if (wsConnected.value) {
+    // 如果正在流式传输，重新连接以应用新的行数设置
+    startLogStream()
+  } else {
+    // 否则只是获取静态日志
+    fetchDockerLogs()
+  }
+}
+
+function fetchDockerLogs() {
+  loadingDockerLogs.value = true
+  getDockerLogs(dockerLogLines.value)
+    .then(data => {
+      if (data.success && data.logs) {
+        dockerLogs.value = data.logs
+      } else {
+        dockerLogs.value = ''
+        ElMessage.warning(data.error || '无法获取日志')
+      }
+    })
+    .catch(err => {
+      console.error('获取Docker日志失败:', err)
+      ElMessage.error('获取Docker日志失败')
+      dockerLogs.value = ''
+    })
+    .finally(() => {
+      loadingDockerLogs.value = false
+    })
+}
+
+function clearDockerLogs() {
+  dockerLogs.value = ''
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB'
+}
+
+function getLineClass(line: string): string {
+  if (line.includes('| ERROR')) return 'log-error'
+  if (line.includes('| WARNING')) return 'log-warn'
+  if (line.includes('| DEBUG')) return 'log-debug'
+  return ''
+}
+
+function scrollAppLogsToBottom() {
+  if (!autoScroll.value) return
+  nextTick(() => {
+    if (appLogsContainerRef.value) {
+      appLogsContainerRef.value.scrollTop = appLogsContainerRef.value.scrollHeight
+    }
+  })
+}
+
+async function fetchFileList() {
+  try {
+    const res = await getLogFiles()
+    if (res.success) {
+      logFiles.value = res.files
+      if (res.files.length > 0 && !currentFileName.value) {
+        currentFileName.value = res.files[0].name
+      }
+    }
+  } catch (e: any) {
+    console.error('获取日志文件列表失败:', e)
+  }
+}
+
+async function fetchAppLogs() {
+  loadingAppLogs.value = true
+  try {
+    const res = await getLogContent({
+      file: selectedFile.value || undefined,
+      tail: tailCount.value,
+      level: levelFilter.value || undefined,
+      keyword: keyword.value || undefined,
+    })
+    if (res.success) {
+      appLogLines.value = res.lines
+      currentFileName.value = selectedFile.value || (logFiles.value.length > 0 ? logFiles.value[0].name : '')
+    } else {
+      ElMessage.error(res.error || '获取日志失败')
+    }
+  } catch (e: any) {
+    console.error('获取日志内容失败:', e)
+    ElMessage.error('获取日志内容失败')
+  } finally {
+    loadingAppLogs.value = false
+  }
+}
+
+function viewFile(name: string) {
+  selectedFile.value = name
+  fetchAppLogs()
+}
+
+function handleDownload() {
+  if (!currentFileName.value) return
+  window.open(getLogDownloadUrl(currentFileName.value), '_blank')
+}
+
+function clearAppLogDisplay() {
+  appLogLines.value = []
+}
+
+function handleRestart() {
+  if (!dockerStatus.value?.in_docker) {
+    ElMessage.warning('当前不在Docker容器内运行')
     return
   }
-  
-  try {
-    await ElMessageBox.confirm(
-      '确定要保存 Rclone 配置文件吗?原文件将被备份为 rclone.conf.bak',
-      '确认保存',
-      {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        type: 'warning'
-      }
-    )
-    
-    savingRcloneConfig.value = true
-    
-    try {
-      const response = await saveRcloneConfig(rcloneConfigContent.value)
-      if (response.success) {
-        ElMessage.success(response.message || '配置文件保存成功')
-        const now = new Date()
-        rcloneConfigLastSaved.value = `最后保存: ${now.toLocaleString()}`
-        // 重新加载配置以确保同步
-        await loadRcloneConfigFile()
-        // 刷新 remotes 列表
-        await loadRcloneRemotes()
-      } else {
-        ElMessage.error(response.error || '保存配置文件失败')
-      }
-    } catch (err: any) {
-      console.error('保存 Rclone 配置失败:', err)
-      ElMessage.error(err.message || '保存配置文件失败')
-    } finally {
-      savingRcloneConfig.value = false
+
+  ElMessageBox.confirm(
+    '确定要重启Docker容器吗？重启后服务会短暂中断。',
+    '确认重启',
+    {
+      confirmButtonText: '确定重启',
+      cancelButtonText: '取消',
+      type: 'warning',
+      dangerouslyUseHTMLString: false
     }
-  } catch (err: any) {
-    if (err !== 'cancel') {
-      console.error('保存配置失败:', err)
-    }
+  ).then(() => {
+    restarting.value = true
+    restartMessage.value = ''
+
+    restartDocker()
+      .then(data => {
+        if (data.success) {
+          restartSuccess.value = true
+          restartMessage.value = data.message || '容器重启成功'
+          ElMessage.success(restartMessage.value)
+          // 延迟刷新状态
+          setTimeout(() => {
+            fetchDockerStatus()
+            fetchDockerLogs()
+          }, 2000)
+        } else {
+          restartSuccess.value = false
+          restartMessage.value = data.error || '重启失败'
+          ElMessage.error(restartMessage.value)
+        }
+      })
+      .catch(err => {
+        restartSuccess.value = false
+        restartMessage.value = err.message || '重启操作失败'
+        ElMessage.error(restartMessage.value)
+        console.error('重启Docker容器失败:', err)
+      })
+      .finally(() => {
+        restarting.value = false
+      })
+  }).catch(() => {
+    // 用户取消
+  })
+}
+
+function getStatusType(status?: string): 'success' | 'warning' | 'danger' | 'info' {
+  if (!status) return 'info'
+  const lowerStatus = status.toLowerCase()
+  if (lowerStatus.includes('running') || lowerStatus.includes('up')) {
+    return 'success'
+  }
+  if (lowerStatus.includes('restarting') || lowerStatus.includes('paused')) {
+    return 'warning'
+  }
+  if (lowerStatus.includes('stopped') || lowerStatus.includes('exited')) {
+    return 'danger'
+  }
+  return 'info'
+}
+
+
+function syncSettingsTabFromRoute() {
+  if (typeof route.query.tab === 'string' && validTabs.includes(route.query.tab as SettingsTab)) {
+    activeTab.value = route.query.tab as SettingsTab
+  } else if (!route.query.tab) {
+    activeTab.value = 'client'
   }
 }
 
-// 加载 Rclone Remotes 列表
-async function loadRcloneRemotes() {
-  try {
-    const response = await getRcloneRemotes()
-    if (response.success && response.remotes) {
-      availableRemotes.value = response.remotes
-    } else {
-      availableRemotes.value = []
-    }
-  } catch (err: any) {
-    console.error('加载 Rclone remotes 失败:', err)
-    availableRemotes.value = []
+function updateSettingsTabQuery(tab: SettingsTab) {
+  const nextQuery = { ...route.query }
+  if (tab === 'client') {
+    delete nextQuery.tab
+  } else {
+    nextQuery.tab = tab
+  }
+  router.replace({ path: '/settings', query: nextQuery })
+}
+
+function loadSystemTabData(tab: SettingsTab) {
+  if (tab === 'container') {
+    fetchDockerStatus()
+    fetchDockerLogs()
+  }
+  if (tab === 'app-logs' && logFiles.value.length === 0 && !loadingAppLogs.value) {
+    fetchFileList().then(() => fetchAppLogs())
   }
 }
+
+watch(() => route.query.tab, syncSettingsTabFromRoute)
+watch(activeTab, (tab) => {
+  updateSettingsTabQuery(tab)
+  loadSystemTabData(tab)
+})
+watch(appLogLines, () => {
+  scrollAppLogsToBottom()
+})
 
 onMounted(() => {
   fetchConfigs()
   void testConnection(false)
-  // 自动加载 Rclone 配置文件
-  loadRcloneConfigFile()
-  // 自动加载 Rclone remotes 列表
-  loadRcloneRemotes()
+  loadSystemTabData(activeTab.value)
+})
+
+onUnmounted(() => {
+  stopLogStream()
 })
 </script>
 
@@ -829,4 +1159,116 @@ onMounted(() => {
 .el-form-item__help {
   @apply text-xs text-gray-500 mt-1;
 }
+
+.control-actions {
+  @apply space-y-4;
+}
+
+.settings-page .system-tabs {
+  @apply rounded-xl bg-white p-4;
+}
+
+.settings-page .system-tabs:deep(.el-tabs__header) {
+  margin-bottom: 20px;
+}
+
+.settings-page .system-tabs:deep(.el-tabs__nav-wrap::after) {
+  background-color: rgba(226, 232, 240, 0.9);
+}
+
+.toolbar {
+  @apply flex flex-wrap justify-between items-center gap-3;
+}
+
+.toolbar-left {
+  @apply flex flex-wrap items-center gap-2;
+}
+
+.toolbar-right {
+  @apply flex items-center gap-1;
+}
+
+.logs-container {
+  @apply bg-gray-900 rounded-lg p-4 overflow-auto;
+  max-height: 600px;
+  font-family: 'Courier New', monospace;
+  position: relative;
+}
+
+.app-logs-container {
+  @apply p-0;
+  max-height: 65vh;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.logs-content {
+  @apply text-gray-100 text-sm whitespace-pre-wrap;
+  margin: 0;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.log-line {
+  @apply flex px-3 py-0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  transition: background-color 0.15s;
+}
+
+.log-line:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.log-error {
+  background-color: rgba(239, 68, 68, 0.12);
+}
+
+.log-warn {
+  background-color: rgba(245, 158, 11, 0.10);
+}
+
+.log-debug {
+  @apply text-gray-500;
+}
+
+.line-no {
+  @apply text-gray-600 select-none pr-3 text-right flex-shrink-0;
+  min-width: 40px;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  margin-right: 12px;
+}
+
+.line-content {
+  @apply text-gray-200 whitespace-pre-wrap break-all;
+}
+
+.log-error .line-content {
+  @apply text-red-400;
+}
+
+.log-warn .line-content {
+  @apply text-yellow-400;
+}
+
+.logs-container::-webkit-scrollbar {
+  width: 8px;
+}
+
+.logs-container::-webkit-scrollbar-track {
+  @apply bg-gray-800 rounded;
+}
+
+.logs-container::-webkit-scrollbar-thumb {
+  @apply bg-gray-600 rounded;
+}
+
+.logs-container::-webkit-scrollbar-thumb:hover {
+  @apply bg-gray-500;
+}
+
+:deep(.el-descriptions__label) {
+  @apply font-medium;
+}
+
 </style>
