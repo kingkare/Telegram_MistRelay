@@ -1,0 +1,308 @@
+.pc-client {
+  --pc-color-bg: #f7faf8;
+  --pc-color-surface: #ffffff;
+  --pc-color-surface-soft: #eef7f4;
+  --pc-color-border: #d8e7df;
+  --pc-color-border-strong: #b5d1c6;
+  --pc-color-text: #203039;
+  --pc-color-text-muted: #63727a;
+  --pc-color-primary: #2f9e8f;
+  --pc-color-primary-strong: #1d756c;
+  --pc-color-accent: #ff8a7a;
+  --pc-color-accent-soft: #ffe7e1;
+  --pc-color-warning: #d69b2d;
+  --pc-color-success: #3eaa63;
+  --pc-color-danger: #d94b4b;
+  --pc-color-focus: rgba(47, 158, 143, 0.26);
+  --pc-shadow-sm: 0 1px 2px rgba(32, 48, 57, 0.06);
+  --pc-shadow-md: 0 8px 24px rgba(32, 48, 57, 0.08);
+  --pc-radius-sm: 4px;
+  --pc-radius-md: 8px;
+  --pc-sidebar-width: 184px;
+  --pc-header-height: 56px;
+  color: var(--pc-color-text);
+  background: var(--pc-color-bg);
+  min-height: 100vh;
+  font-family: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.pc-client *,
+.pc-client *::before,
+.pc-client *::after {
+  box-sizing: border-box;
+}
+
+.pc-shell {
+  display: grid;
+  grid-template-columns: var(--pc-sidebar-width) minmax(0, 1fr);
+  min-height: 100vh;
+  background: var(--pc-color-bg);
+}
+
+.pc-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 12px;
+  border-right: 1px solid var(--pc-color-border);
+  background: #fbfdfb;
+}
+
+.pc-sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: var(--pc-radius-md);
+  color: var(--pc-color-text-muted);
+  text-decoration: none;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.pc-sidebar-link:hover,
+.pc-sidebar-link.is-active {
+  background: var(--pc-color-surface-soft);
+  color: var(--pc-color-primary-strong);
+}
+
+.pc-main {
+  display: grid;
+  grid-template-rows: var(--pc-header-height) minmax(0, 1fr);
+  min-width: 0;
+}
+
+.pc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--pc-header-height);
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--pc-color-border);
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(14px);
+}
+
+.pc-content {
+  min-width: 0;
+  padding: 18px;
+  overflow: auto;
+}
+
+.pc-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--pc-color-border-strong);
+  border-radius: var(--pc-radius-md);
+  background: var(--pc-color-surface);
+  color: var(--pc-color-text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.pc-button:hover {
+  border-color: var(--pc-color-primary);
+  background: var(--pc-color-surface-soft);
+}
+
+.pc-button:focus-visible {
+  outline: 3px solid var(--pc-color-focus);
+  outline-offset: 2px;
+}
+
+.pc-button-primary {
+  border-color: var(--pc-color-primary);
+  background: var(--pc-color-primary);
+  color: #ffffff;
+}
+
+.pc-button-primary:hover {
+  border-color: var(--pc-color-primary-strong);
+  background: var(--pc-color-primary-strong);
+}
+
+.pc-card {
+  border: 1px solid var(--pc-color-border);
+  border-radius: var(--pc-radius-md);
+  background: var(--pc-color-surface);
+  box-shadow: var(--pc-shadow-sm);
+}
+
+.pc-media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(164px, 1fr));
+  gap: 14px;
+}
+
+.pc-media-card {
+  display: grid;
+  grid-template-rows: auto minmax(44px, auto);
+  overflow: hidden;
+}
+
+.pc-media-cover {
+  aspect-ratio: 4 / 3;
+  background:
+    linear-gradient(135deg, rgba(47, 158, 143, 0.16), rgba(255, 138, 122, 0.18)),
+    var(--pc-color-surface-soft);
+  border-bottom: 1px solid var(--pc-color-border);
+}
+
+.pc-media-body {
+  min-width: 0;
+  padding: 10px;
+}
+
+.pc-media-title {
+  overflow: hidden;
+  color: var(--pc-color-text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc-media-meta {
+  margin-top: 4px;
+  color: var(--pc-color-text-muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.pc-list {
+  display: grid;
+  border: 1px solid var(--pc-color-border);
+  border-radius: var(--pc-radius-md);
+  background: var(--pc-color-surface);
+  overflow: hidden;
+}
+
+.pc-list-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 120px 156px 96px;
+  gap: 12px;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--pc-color-border);
+}
+
+.pc-list-row:last-child {
+  border-bottom: 0;
+}
+
+.pc-empty-state {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  min-height: 280px;
+  padding: 28px;
+  border: 1px dashed var(--pc-color-border-strong);
+  border-radius: var(--pc-radius-md);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(238, 247, 244, 0.72)),
+    var(--pc-color-bg);
+  text-align: center;
+}
+
+.pc-empty-illustration {
+  width: min(180px, 42vw);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 58% 34%, rgba(255, 138, 122, 0.44) 0 12%, transparent 13%),
+    radial-gradient(circle at 42% 42%, rgba(47, 158, 143, 0.34) 0 18%, transparent 19%),
+    linear-gradient(145deg, rgba(255, 231, 225, 0.9), rgba(238, 247, 244, 0.9));
+  box-shadow: var(--pc-shadow-md);
+}
+
+.pc-anime-asset {
+  overflow: hidden;
+  border-radius: var(--pc-radius-md);
+  background-color: var(--pc-color-surface-soft);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.pc-anime-login-hero {
+  aspect-ratio: 16 / 9;
+  background-image:
+    url("../assets/pc-theme/anime/login-hero.webp"),
+    radial-gradient(circle at 78% 48%, rgba(47, 158, 143, 0.16), transparent 34%),
+    radial-gradient(circle at 20% 78%, rgba(255, 138, 122, 0.18), transparent 28%),
+    linear-gradient(135deg, #f7faf8, #eef7f4);
+}
+
+.pc-anime-empty-drive,
+.pc-anime-connection-error,
+.pc-anime-download-complete {
+  aspect-ratio: 4 / 3;
+}
+
+.pc-anime-empty-drive {
+  background-image:
+    url("../assets/pc-theme/anime/empty-drive.webp"),
+    radial-gradient(circle at 50% 52%, rgba(47, 158, 143, 0.14), transparent 42%),
+    linear-gradient(180deg, #ffffff, #eef7f4);
+}
+
+.pc-anime-connection-error {
+  background-image:
+    url("../assets/pc-theme/anime/connection-error.webp"),
+    radial-gradient(circle at 50% 48%, rgba(255, 138, 122, 0.18), transparent 42%),
+    linear-gradient(180deg, #fff8f6, #ffe7e1);
+}
+
+.pc-anime-download-complete {
+  background-image:
+    url("../assets/pc-theme/anime/download-complete.webp"),
+    radial-gradient(circle at 50% 48%, rgba(47, 158, 143, 0.16), transparent 42%),
+    linear-gradient(180deg, #ffffff, #eef7f4);
+}
+
+.pc-route-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  color: var(--pc-color-text-muted);
+  background: var(--pc-color-bg);
+  font-size: 16px;
+}
+
+.pc-page-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: min(420px, calc(100vh - var(--pc-header-height) - 36px));
+  border: 1px dashed var(--pc-color-border-strong);
+  border-radius: var(--pc-radius-md);
+  background: var(--pc-color-surface);
+  color: var(--pc-color-text-muted);
+  font-size: 15px;
+}
+
+@media (max-width: 900px) {
+  .pc-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .pc-sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--pc-color-border);
+  }
+
+  .pc-list-row {
+    grid-template-columns: minmax(160px, 1fr) 96px;
+  }
+}

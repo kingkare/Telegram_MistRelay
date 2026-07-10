@@ -1,4 +1,5 @@
 import axios from 'axios'
+import type { AxiosError, InternalAxiosRequestConfig } from 'axios'
 import type {
   ServerStatus,
   DownloadsResponse,
@@ -8,16 +9,67 @@ import type {
   ConfigResponse,
   ConfigUpdateResponse,
   SystemResourcesResponse,
+  TelegramBrowseParams,
+  TelegramBrowseResponse,
+  TelegramDeleteResponse,
+  TelegramUsageResponse,
   UploadRecord
 } from '@/types/api'
 import {
-  clearAuthToken,
+  clearAuthTokens,
   getApiBaseUrl,
   getAuthToken,
+  getRefreshToken,
   isCurrentLoginRoute,
   redirectToLogin,
   resolveServerUrl,
+  setAuthToken,
+  setRefreshToken,
 } from '@/utils/runtime'
+import { notifyPc } from '@/utils/pcNotifications'
+
+export type {
+  TelegramBrowseParams,
+  TelegramBrowseResponse,
+  TelegramDeleteResponse,
+  TelegramDriveFile,
+  TelegramDriveFolder,
+  TelegramDriveItem,
+  TelegramUsageResponse,
+  TelegramUsageStats,
+} from '@/types/api'
+
+export {
+  isTelegramDriveFile,
+  isTelegramDriveFolder,
+} from '@/types/api'
+
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    _retry?: boolean
+    skipAuthRefresh?: boolean
+  }
+
+  export interface InternalAxiosRequestConfig {
+    _retry?: boolean
+    skipAuthRefresh?: boolean
+  }
+}
+
+interface AuthRefreshResponse {
+  success: boolean
+  token?: string
+  refresh_token?: string
+  expires_in?: number
+  error?: string
+}
+
+type RetryableRequestConfig = InternalAxiosRequestConfig & {
+  _retry?: boolean
+  skipAuthRefresh?: boolean
+}
+
+let refreshPromise: Promise<string> | null = null
 
 export const api = axios.create({
   timeout: 60000,
@@ -36,11 +88,73 @@ api.interceptors.request.use((config) => {
   return config
 })
 
+export async function refreshAuthTokens(): Promise<string> {
+  const refreshToken = getRefreshToken()
+  if (!refreshToken) {
+    throw new Error('缺少 refresh token')
+  }
+
+  if (!refreshPromise) {
+    refreshPromise = api.post<AuthRefreshResponse>(
+      '/auth/refresh',
+      { refresh_token: refreshToken },
+      { skipAuthRefresh: true },
+    ).then((response) => {
+      const payload = response.data
+      if (!payload.success || !payload.token || !payload.refresh_token) {
+        throw new Error(payload.error || '刷新登录失败')
+      }
+
+      setAuthToken(payload.token)
+      setRefreshToken(payload.refresh_token)
+      return payload.token
+    }).finally(() => {
+      refreshPromise = null
+    })
+  }
+
+  return refreshPromise
+}
+
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error: AxiosError) => {
+    const originalRequest = error.config as RetryableRequestConfig | undefined
+
+    if (
+      error.response?.status === 401 &&
+      originalRequest &&
+      !originalRequest.skipAuthRefresh &&
+      !originalRequest._retry
+    ) {
+      originalRequest._retry = true
+
+      try {
+        const token = await refreshAuthTokens()
+        originalRequest.headers.Authorization = `Bearer ${token}`
+        return api(originalRequest)
+      } catch {
+        void notifyPc({
+          key: 'auth-expired',
+          title: '登录已过期',
+          body: '请重新登录 MistRelay',
+          cooldownMs: 60000,
+        })
+        clearAuthTokens()
+        if (!isCurrentLoginRoute()) {
+          redirectToLogin()
+        }
+      }
+    }
+
     if (error.response?.status === 401) {
-      clearAuthToken()
+      void notifyPc({
+        key: 'auth-expired',
+        title: '登录已过期',
+        body: '请重新登录 MistRelay',
+        cooldownMs: 60000,
+      })
+      clearAuthTokens()
       if (!isCurrentLoginRoute()) {
         redirectToLogin()
       }
@@ -238,69 +352,7 @@ export function deleteUpload(uploadId: number): Promise<TaskControlResponse> {
 
 // ==================== Telegram 频道网盘 API ====================
 
-export interface TelegramDriveItem {
-  entry_type?: 'file' | 'folder'
-  file_unique_id: string
-  chat_id: number
-  message_id: number
-  file_name?: string
-  download_file_name?: string
-  mime_type?: string
-  file_size?: number
-  duration?: number
-  width?: number
-  height?: number
-  caption?: string
-  message_date?: string
-  media_group_id?: string
-  supports_streaming?: boolean
-  item_count?: number
-  total_size?: number
-  group_mime_types?: string[]
-  hash?: string
-  stream_url?: string
-}
-
-export interface TelegramBrowseResponse {
-  success: boolean
-  items: TelegramDriveItem[]
-  total: number
-  page: number
-  page_size: number
-  error?: string
-}
-
-export interface TelegramUsageStats {
-  total_count: number
-  total_size: number
-  videos: number
-  images: number
-  audios: number
-  documents: number
-}
-
-export interface TelegramUsageResponse {
-  success: boolean
-  data?: TelegramUsageStats
-  error?: string
-}
-
-export interface TelegramDeleteResponse {
-  success: boolean
-  message?: string
-  data?: Record<string, any>
-  error?: string
-}
-
-export function browseTelegramDrive(params: {
-  page?: number
-  page_size?: number
-  search?: string
-  type?: string
-  sort_by?: string
-  sort_desc?: boolean
-  media_group_id?: string
-} = {}): Promise<TelegramBrowseResponse> {
+export function browseTelegramDrive(params: TelegramBrowseParams = {}): Promise<TelegramBrowseResponse> {
   return api.get<TelegramBrowseResponse>('/telegram/browse', { params }).then(response => response.data)
 }
 

@@ -1,6 +1,6 @@
 <template>
   <div id="app">
-    <router-view v-if="route.meta.public" />
+    <router-view v-if="route.meta.public || route.meta.pc" />
     <AppLayout v-else />
   </div>
 </template>

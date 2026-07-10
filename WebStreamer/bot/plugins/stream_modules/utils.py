@@ -137,16 +137,10 @@ async def wait_for_download_slot(max_wait_time=60):
 
 def should_download_file(message: Message) -> bool:
     """
-    判断文件是否应该下载
-    返回 True 表示应该下载，False 表示只转发不下载
-    现在所有媒体文件都会下载，包括图片和贴纸
+    兼容旧导出：TG 网盘媒体不再自动下载到本地。
+
+    返回 False 表示只保存到 TG 网盘并生成直链。
     """
-    # 检查是否有任何媒体文件
-    if (message.photo or message.video or message.animation or message.video_note or 
-        message.document or message.audio or message.voice or message.sticker):
-        return True
-    
-    # 默认不下载（如果没有媒体文件）
     return False
 
 

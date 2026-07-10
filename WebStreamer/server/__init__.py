@@ -77,6 +77,8 @@ async def compression_middleware(request, handler):
 
 _AUTH_WHITELIST = frozenset({
     "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/refresh",
     "/api/status",
 })
 
@@ -148,4 +150,3 @@ def web_server():
     web_app.add_routes(routes)
     logger.info("Added routes")
     return web_app
-

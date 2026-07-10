@@ -96,7 +96,7 @@ UP_TELEGRAM = result.get('UP_TELEGRAM', True)
 RPC_SECRET = result.get('RPC_SECRET') or ''
 RPC_URL = result.get('RPC_URL') or 'localhost:6800/jsonrpc'
 
-# 直链功能配置（默认启用，作为TG媒体文件下载的前置功能）
+# 直链功能配置（默认启用，作为TG网盘媒体访问的前置功能）
 ENABLE_STREAM = result.get('ENABLE_STREAM', True)  # 默认启用
 BIN_CHANNEL = result.get('BIN_CHANNEL')
 STREAM_PORT = result.get('STREAM_PORT', 8080)
@@ -109,14 +109,20 @@ STREAM_KEEP_ALIVE = result.get('STREAM_KEEP_ALIVE', False)
 STREAM_PING_INTERVAL = result.get('STREAM_PING_INTERVAL', 1200)
 STREAM_USE_SESSION_FILE = result.get('STREAM_USE_SESSION_FILE', False)
 STREAM_ALLOWED_USERS = result.get('STREAM_ALLOWED_USERS', '')
-# 是否自动将直链添加到aria2下载（默认启用）
-STREAM_AUTO_DOWNLOAD = result.get('STREAM_AUTO_DOWNLOAD', True)
-# 是否发送直链信息给用户（默认不启用，设置为 True 后才会发送直链信息给用户，关闭后仍会生成直链并添加到下载队列）
+# 是否自动将直链添加到aria2下载（历史兼容，默认关闭；TG网盘媒体不会本地下载）
+STREAM_AUTO_DOWNLOAD = result.get('STREAM_AUTO_DOWNLOAD', False)
+# 是否发送直链信息给用户（默认不启用，设置为 True 后才会发送直链信息给用户）
 SEND_STREAM_LINK = result.get('SEND_STREAM_LINK', False)
 # 是否跳过小于指定大小的媒体文件（默认False）
 SKIP_SMALL_FILES = result.get('SKIP_SMALL_FILES', False)
 # 最小文件大小（MB），小于此大小的文件将被跳过（默认100MB）
 MIN_FILE_SIZE_MB = result.get('MIN_FILE_SIZE_MB', 100)
+# 是否启用下载目录自动清理（默认启用）
+DOWNLOAD_CLEANUP_ENABLED = result.get('DOWNLOAD_CLEANUP_ENABLED', True)
+# 下载目录文件保留小时数（默认24小时）
+DOWNLOAD_RETENTION_HOURS = result.get('DOWNLOAD_RETENTION_HOURS', 24)
+# 下载目录清理间隔秒数（默认每小时检查一次）
+DOWNLOAD_CLEANUP_INTERVAL_SECONDS = result.get('DOWNLOAD_CLEANUP_INTERVAL_SECONDS', 3600)
 # 消息队列最大并发处理数量（默认5，限制同时处理的消息数量）
 MAX_CONCURRENT_MESSAGES = result.get('MAX_CONCURRENT_MESSAGES', 5)
 # aria2最大并发下载数（默认5，限制同时下载的任务数量）

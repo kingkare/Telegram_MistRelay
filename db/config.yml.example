@@ -13,6 +13,10 @@ UP_TELEGRAM: true
 
 #下载保存路径
 SAVE_PATH: /root/mistrelay_downloads
+# 下载目录自动清理: 默认启用,清理超过 24 小时的本地下载文件
+DOWNLOAD_CLEANUP_ENABLED: true
+DOWNLOAD_RETENTION_HOURS: 24
+DOWNLOAD_CLEANUP_INTERVAL_SECONDS: 3600
 
 #代理ip 不需要则留空
 PROXY_IP:
@@ -47,9 +51,9 @@ STREAM_PING_INTERVAL: 1200
 STREAM_USE_SESSION_FILE: false
 # 允许使用直链的用户列表(用逗号分隔,留空则允许所有人)
 STREAM_ALLOWED_USERS: 
-# 是否自动将直链添加到aria2下载队列(默认启用,仅管理员)
-STREAM_AUTO_DOWNLOAD: true
-# 是否发送直链信息给用户(默认不启用,设置为 true 后才会发送直链信息给用户,关闭后仍会生成直链并添加到下载队列)
+# 是否自动将直链添加到aria2下载队列(历史兼容,默认关闭;TG网盘媒体不会本地下载)
+STREAM_AUTO_DOWNLOAD: false
+# 是否发送直链信息给用户(默认不启用,设置为 true 后才会发送直链信息给用户)
 SEND_STREAM_LINK: false 
 # 是否跳过小于指定大小的媒体文件(默认false)
 SKIP_SMALL_FILES: false

@@ -830,6 +830,9 @@ curl "$BASE_URL/api/config?category=telegram" \
 | `PROXY_PORT` | `string` | `download` | 代理端口 | 否 |
 | `SKIP_SMALL_FILES` | `bool` | `download` | 是否跳过小文件 | 否 |
 | `MIN_FILE_SIZE_MB` | `int` | `download` | 最小文件大小 MB | 否 |
+| `DOWNLOAD_CLEANUP_ENABLED` | `bool` | `download` | 是否启用下载目录自动清理 | 否 |
+| `DOWNLOAD_RETENTION_HOURS` | `int` | `download` | 下载文件保留小时数 | 否 |
+| `DOWNLOAD_CLEANUP_INTERVAL_SECONDS` | `int` | `download` | 下载目录清理间隔秒数 | 否 |
 | `RPC_SECRET` | `string` | `aria2` | Aria2 RPC 密钥 | 否 |
 | `RPC_URL` | `string` | `aria2` | Aria2 RPC URL | 否 |
 | `MAX_CONCURRENT_UPLOADS` | `int` | `upload` | 最大并发上传数 | 否 |
@@ -845,7 +848,7 @@ curl "$BASE_URL/api/config?category=telegram" \
 | `STREAM_PING_INTERVAL` | `int` | `stream` | Ping 间隔秒数 | 否 |
 | `STREAM_USE_SESSION_FILE` | `bool` | `stream` | 是否使用 session 文件 | 是 |
 | `STREAM_ALLOWED_USERS` | `string` | `stream` | 允许使用直链的用户列表 | 否 |
-| `STREAM_AUTO_DOWNLOAD` | `bool` | `stream` | 是否自动加入下载队列 | 否 |
+| `STREAM_AUTO_DOWNLOAD` | `bool` | `stream` | 历史兼容：是否自动加入下载队列 | 否 |
 | `SEND_STREAM_LINK` | `bool` | `stream` | 是否发送直链消息 | 否 |
 | `MULTI_BOT_TOKENS` | `list` | `stream` | 多机器人 token 列表 | 是 |
 

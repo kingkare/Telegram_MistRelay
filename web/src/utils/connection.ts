@@ -1,4 +1,5 @@
 import { getServerBaseUrl, normalizeServerBaseUrl, toAbsoluteServerUrl } from '@/utils/runtime'
+import { notifyPc } from '@/utils/pcNotifications'
 
 export interface ConnectionCheckResult {
   ok: boolean
@@ -30,6 +31,12 @@ export async function checkServerConnection(serverBaseUrl?: string): Promise<Con
     const payload = await response.json().catch(() => null)
 
     if (!response.ok) {
+      void notifyPc({
+        key: `connection-failed:${normalizedServerBaseUrl || 'default'}`,
+        title: '连接失败',
+        body: payload?.error || `服务返回 ${response.status}`,
+        cooldownMs: 30000,
+      })
       return {
         ok: false,
         serverBaseUrl: normalizedServerBaseUrl,
@@ -52,6 +59,13 @@ export async function checkServerConnection(serverBaseUrl?: string): Promise<Con
     const message = error instanceof DOMException && error.name === 'AbortError'
       ? '连接超时，请检查服务器地址或网络'
       : '无法连接到服务器'
+
+    void notifyPc({
+      key: `connection-failed:${normalizedServerBaseUrl || 'default'}`,
+      title: '连接失败',
+      body: message,
+      cooldownMs: 30000,
+    })
 
     return {
       ok: false,

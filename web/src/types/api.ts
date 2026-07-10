@@ -145,3 +145,96 @@ export interface SystemResourcesResponse {
   data?: SystemResources
   error?: string
 }
+
+export type TelegramDriveEntryType = 'file' | 'folder'
+
+export interface TelegramDriveBase {
+  entry_type?: TelegramDriveEntryType
+  file_name?: string
+  mime_type?: string
+  file_size?: number
+  duration?: number
+  width?: number
+  height?: number
+  caption?: string
+  message_date?: string
+  media_group_id?: string
+  supports_streaming?: boolean
+  thumbnail_url?: string
+  stream_url?: string
+  hash?: string
+}
+
+export interface TelegramDriveFile extends TelegramDriveBase {
+  entry_type: 'file'
+  file_unique_id: string
+  chat_id: number
+  message_id: number
+  download_file_name?: string
+}
+
+export interface TelegramDriveFolder extends TelegramDriveBase {
+  entry_type: 'folder'
+  media_group_id: string
+  file_unique_id?: string
+  chat_id?: number
+  message_id?: number
+  item_count: number
+  total_size?: number
+  group_mime_types?: string[]
+}
+
+export type TelegramDriveItem = TelegramDriveFile | TelegramDriveFolder
+
+export interface TelegramBrowseParams {
+  page?: number
+  page_size?: number
+  search?: string
+  type?: string
+  sort_by?: string
+  sort_desc?: boolean
+  media_group_id?: string
+}
+
+export interface TelegramBrowseResponse {
+  success: boolean
+  items: TelegramDriveItem[]
+  total: number
+  page: number
+  page_size: number
+  error?: string
+}
+
+export interface TelegramUsageStats {
+  total_count: number
+  total_size: number
+  videos: number
+  images: number
+  audios: number
+  documents: number
+}
+
+export interface TelegramUsageResponse {
+  success: boolean
+  data?: TelegramUsageStats
+  error?: string
+}
+
+export interface TelegramDeleteResponse {
+  success: boolean
+  message?: string
+  data?: Record<string, any>
+  error?: string
+}
+
+export function isTelegramDriveFile(
+  item?: TelegramDriveItem | null,
+): item is TelegramDriveFile {
+  return item?.entry_type === 'file'
+}
+
+export function isTelegramDriveFolder(
+  item?: TelegramDriveItem | null,
+): item is TelegramDriveFolder {
+  return item?.entry_type === 'folder'
+}

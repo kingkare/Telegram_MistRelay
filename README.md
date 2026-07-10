@@ -1,252 +1,343 @@
 # MistRelay
 
-基于 Telegram 机器人的 aria2 下载控制系统，专注 Telegram 频道网盘，并集成文件直链功能。
+MistRelay 是一个基于 Telegram Bot 的 aria2 下载控制与 Telegram 频道网盘系统。它把 HTTP/磁力/种子下载、Telegram 频道归档、文件直链、任务记录和 Web 管理界面整合到一个 Docker 服务里。
 
-## ✨ 功能特点
+当前主线能力已经从“第三方网盘 + 自动下载 Telegram 媒体”收敛为：
 
-### 核心功能
-- **Telegram 控制**: 基于电报机器人控制 aria2，支持任务管理。
-- **自动上传**: 下载完成后自动上传到 Telegram 频道网盘。
-- **数据完整性保障**: 
-  - 下载文件大小校验（与 aria2 报告对比）。
-  - 校验失败自动重试（最多3次）。
-  - 确保数据安全，防止数据丢失。
-- **文件直链**: 整合 [TG-FileStreamBot](https://github.com/rong6/TG-FileStreamBot)，为 Telegram 文件生成可访问的直链。
-- **下载管理**:
-  - 支持 HTTP/HTTPS、磁力链接、种子文件下载。
-  - 支持批量添加任务。
-  - 支持自定义下载目录。
-  - 实时进度显示（Bot 消息 & Web 界面）。
-  - 任务重试/删除/自动重连。
-  - **智能文件过滤**: 支持跳过小于指定大小的媒体文件（可配置最小文件大小）。
-- **Web 管理界面**: 
-  - 集成 AriaNg 和自定义系统管理页面。
-  - 实时日志流（WebSocket）支持，无需刷新即可查看容器日志。
-  - 下载记录管理，支持查看跳过文件状态。
-  - **任务中心**: 统一管理下载和上传任务，支持实时状态更新。
-  - **数据一致性保证**: WebSocket 实时同步，确保前后端数据一致。
-- **部署友好**: Docker 一键部署，集成 aria2、Telegram 频道网盘和前端。
-- **性能优化**: 
-  - 上传操作完全异步化，不阻塞 API 响应。
-  - 支持配置热重载，无需重启服务。
+- HTTP/HTTPS、磁力链接、种子文件继续由 aria2 下载。
+- 下载完成后可上传到 Telegram 频道网盘。
+- 直接发送给 Bot 的 Telegram 媒体会保存到 `BIN_CHANNEL`，写入 TG 网盘索引，并生成直链。
+- Telegram 媒体不会再自动加入 aria2 队列，也不会下载回本地。
+- rclone/OneDrive/Google Drive 相关接口已废弃，仅保留历史兼容响应。
 
-## 📚 客户端文档
+## 功能概览
 
-- PC 客户端适配 TG 网盘：`docs/pc-client-tg-drive.md`
+### Telegram Bot
 
-## 🚀 快速开始
+- 管理 aria2 下载任务：添加 HTTP/HTTPS 链接、磁力链接、种子文件。
+- 查看正在下载、等待中、已完成/停止的任务。
+- 暂停、恢复、删除任务，清空已完成任务。
+- 设置默认下载路径。
+- 接收 Telegram 文档、视频、音频、图片、媒体组并保存到 TG 频道网盘。
 
-### 1. 配置文件设置
+### TG 频道网盘
 
-下载项目到本地：
+- 使用 Telegram 频道作为文件存储与索引来源。
+- 媒体入库后记录 `chat_id`、`message_id`、文件名、大小、MIME、媒体组等元数据。
+- Web 端支持浏览、搜索、预览、删除 TG 网盘文件。
+- 同一 Telegram 媒体组会在 Web 端聚合为文件夹，进入后可查看组内真实文件。
+
+### 文件直链
+
+- 集成 TG-FileStreamBot 风格的直链服务。
+- 支持完整链接和短链接。
+- 支持多 Bot 客户端负载均衡，降低单 Bot 直链读取压力。
+- 可通过 `STREAM_ALLOWED_USERS` 限制哪些 Telegram 用户能使用直链入库能力。
+
+### Web 管理界面
+
+- Vue 3 + Vite + Element Plus 前端。
+- JWT 登录，默认首次初始化会创建 `admin / admin123`，上线后必须立即修改密码。
+- 仪表盘、下载任务、上传任务、TG 网盘、系统状态、日志、配置页面。
+- Docker 容器状态、日志查看和重启能力依赖 Docker socket 挂载。
+
+### 数据与同步
+
+- SQLite 持久化下载、上传、TG 媒体索引和系统配置。
+- WAL 模式提升并发读写稳定性。
+- WebSocket 推送任务状态和系统日志。
+- 下载完成后进行基础一致性记录，上传完成后更新 TG 网盘索引。
+
+## 快速开始
+
+### 1. 准备 Telegram 参数
+
+需要准备：
+
+- `API_ID` / `API_HASH`: Telegram API 凭据。
+- `BOT_TOKEN`: BotFather 创建的 Bot Token。
+- `ADMIN_ID`: 管理员 Telegram 用户 ID。
+- `BIN_CHANNEL`: 用作 TG 频道网盘的频道 ID，通常以 `-100` 开头。
+
+Bot 需要加入 `BIN_CHANNEL`，并至少具备发送、读取和删除消息所需权限。
+
+### 2. 创建配置文件
+
+克隆项目：
 
 ```bash
 git clone https://github.com/Lapis0x0/MistRelay.git
 cd MistRelay
 ```
 
-重命名 `db/config.example.yml` 为 `config.yml` 并设置参数（详细配置见文件内注释）：
-
-```yaml
-API_ID: xxxx                      # Telegram API ID
-API_HASH: xxxxxxxx                # Telegram API Hash
-BOT_TOKEN: xxxx:xxxxxxxxxxxx      # Telegram Bot Token
-ADMIN_ID: management_id           # 管理员 Telegram ID
-BIN_CHANNEL: -100xxxxxxxxxx       # Telegram 频道网盘存储频道 ID
-UP_TELEGRAM: true                 # 下载完成后上传到 TG 频道网盘
-
-# 下载配置
-SKIP_SMALL_FILES: false          # 是否跳过小于指定大小的媒体文件
-MIN_FILE_SIZE_MB: 100            # 最小文件大小（MB），小于此大小的文件将被跳过
-
-# ... 其他配置 ...
-```
-
-### 2. 配置 Telegram 频道网盘
-
-配置 `BIN_CHANNEL` 为用于存储文件的 Telegram 频道 ID，并确保 Bot 是该频道管理员。建议使用以 `-100` 开头的频道 ID，并开启 `UP_TELEGRAM: true`。
-
-第三方网盘（rclone/OneDrive/Google Drive）已废弃；历史上传记录可继续展示，但新任务只维护 Telegram 频道网盘流程。
-
-### 3. Docker 部署 (生产环境)
-
-MistRelay 使用 Docker Compose 进行一键部署，集成了前后端和所有依赖。
+复制配置示例：
 
 ```bash
-# 构建并启动服务
-docker compose up -d --build
+cp db/config.yml.example db/config.yml
+```
 
-# 查看日志
+最小配置示例：
+
+```yaml
+API_ID: your_api_id
+API_HASH: your_api_hash
+BOT_TOKEN: your_bot_token
+ADMIN_ID: your_telegram_user_id
+BIN_CHANNEL: -100xxxxxxxxxx
+
+UP_TELEGRAM: true
+SAVE_PATH: /root/downloads
+DOWNLOAD_CLEANUP_ENABLED: true
+DOWNLOAD_RETENTION_HOURS: 24
+DOWNLOAD_CLEANUP_INTERVAL_SECONDS: 3600
+
+RPC_SECRET: change_me_to_a_long_random_secret
+RPC_URL: localhost:6800/jsonrpc
+
+ENABLE_STREAM: true
+STREAM_PORT: 8080
+STREAM_BIND_ADDRESS: 0.0.0.0
+STREAM_FQDN: your-domain.example
+STREAM_AUTO_DOWNLOAD: false
+SEND_STREAM_LINK: false
+```
+
+常用配置说明：
+
+| 配置项 | 说明 |
+| --- | --- |
+| `UP_TELEGRAM` | 下载完成后是否上传到 Telegram 频道网盘。 |
+| `BIN_CHANNEL` | TG 频道网盘存储频道，直链和上传流程都依赖它。 |
+| `STREAM_FQDN` | 生成直链时使用的域名或公网 IP。 |
+| `STREAM_ALLOWED_USERS` | 允许使用直链入库的 Telegram 用户 ID/用户名，逗号分隔，留空表示不限制。 |
+| `STREAM_AUTO_DOWNLOAD` | 历史兼容开关；当前 TG 网盘媒体不会自动加入 aria2。 |
+| `SEND_STREAM_LINK` | 是否把生成的直链主动回复给 Telegram 用户。 |
+| `DOWNLOAD_CLEANUP_ENABLED` | 是否启用下载目录自动清理，默认启用。 |
+| `DOWNLOAD_RETENTION_HOURS` | 本地下载文件保留小时数，默认 `24`。 |
+| `DOWNLOAD_CLEANUP_INTERVAL_SECONDS` | 清理任务检查间隔，默认 `3600` 秒。 |
+| `SKIP_SMALL_FILES` / `MIN_FILE_SIZE_MB` | 下载链路的小文件过滤配置。 |
+| `MAX_CONCURRENT_MESSAGES` | Telegram 媒体消息队列的最大并发处理数。 |
+| `MULTI_BOT_TOKENS` | 额外 Bot Token 列表，用于直链读取负载均衡。 |
+
+### 3. Docker 部署
+
+```bash
+docker compose up -d --build
 docker compose logs -f --tail=100
 ```
 
-**端口说明**:
-- **Web 界面**: `http://your-server:8080` (端口映射可在 `docker-compose.yml` 中修改)
-- **API 接口**: `http://your-server:8080/api/*`
+默认使用 host 网络，服务监听 `8080`：
 
-### 4. 访问服务
-
-启动后，访问 `http://your-server:8080` 即可使用 Web 管理界面。
-- **AriaNg**: 用于管理 Aria2 下载任务。
-- **系统管理**: `http://your-server:8080/system` 用于管理 Docker 容器状态。
-
-## 📖 使用指南
-
-### Telegram Bot 命令
-- `/start` - 开始使用
-- `/help` - 查看帮助
-- `/info` - 查看系统信息
-- `/web` - 获取 Web 控制台地址
-- `/path [目录]` - 设置下载目录
-
-### 菜单功能
-- **正在下载/等待/已完成**: 查看各状态的任务列表。
-- **重试/删除**: 管理选中任务。
-
-### 文件直链功能
-默认启用（可配置）。
-1. **使用**: 发送或转发文件给 Bot。
-2. **结果**: Bot 会返回文件的直链地址（支持文档、视频、音频等）。
-3. **自动下载**: 
-   - 若开启 `STREAM_AUTO_DOWNLOAD: true`，管理员发送的文件会自动加入 Aria2 下载队列。
-   - 需配置 `BIN_CHANNEL` 以确保直链和 TG 频道网盘存储正常。
-
-### 快捷提示
-- **TG 频道网盘**: 上传完成后可在 Web 的“TG网盘”页面浏览、预览和删除频道文件。
-- **媒体组文件夹**: 同一 Telegram 媒体组会在 TG 网盘根目录显示为文件夹，进入后查看组内真实文件。
-- **跳过小文件**: 
-  - 配置 `SKIP_SMALL_FILES: true` 启用跳过小文件功能。
-  - 配置 `MIN_FILE_SIZE_MB: 100` 设置最小文件大小（默认 100MB）。
-  - 小于指定大小的文件会被静默跳过，不会下载和上传。
-  - 可在下载页面查看被跳过的文件状态。
-
-## 🛠 系统管理模块
-
-系统管理模块 (`/system`) 提供 Docker 容器的实时监控与控制。
-
-### 功能
-- **状态查看**: 实时查看容器运行状态、镜像信息。
-- **热重载**: 支持通过 Web 界面一键重启容器 (Restart Container)。
-- **日志查看**: 
-  - 支持 HTTP 方式获取历史日志（支持筛选行数：50/100/200/500）。
-  - **WebSocket 实时日志流**: 点击播放按钮开启实时日志流，自动推送最新日志，无需手动刷新。
-  - 支持清空日志显示。
-
-### 配置要求
-系统管理模块依赖于 Docker Socket 挂载 (已在 `docker-compose.yml` 默认配置):
-```yaml
-volumes:
-  - /var/run/docker.sock:/var/run/docker.sock
+```text
+http://your-server:8080
 ```
 
-## 💻 开发者指南
+首次登录：
 
-如果您想参与开发或进行二次开发，请参考以下信息。
+```text
+username: admin
+password: admin123
+```
 
-### 架构概述
-- **后端**: Python + aiohttp (Port 8080)
-- **Web 前端**: Vue3 + Vite + Element Plus (Dev Port 5173)
+登录后先修改密码，再继续配置服务。
 
-### 开发模式启动
-使用 `start-dev.sh` 脚本可一键启动前后端分离的开发环境：
+### 4. 运行后的目录
+
+默认 Docker Compose 挂载：
+
+| 宿主机路径 | 容器路径 | 用途 |
+| --- | --- | --- |
+| `./db` | `/app/db` | 数据库、配置、Telegram session、日志。 |
+| `./downloads` | `/root/downloads` | aria2 下载目录。 |
+| `./cache/thumbnails` | `/app/cache/thumbnails` | 缩略图缓存。 |
+| `/var/run/docker.sock` | `/var/run/docker.sock` | Web 系统管理模块读取/控制容器。 |
+
+## 使用方式
+
+### Telegram 命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `/start` | 显示欢迎信息和菜单。 |
+| `/help` | 查看帮助。 |
+| `/menu` | 管理员菜单。 |
+| `/info` | 查看 aria2 全局信息。 |
+| `/web` | 获取 AriaNg 在线控制地址。 |
+| `/path [目录]` | 设置 aria2 默认下载目录。 |
+
+### 下载任务
+
+- 给 Bot 发送 HTTP/HTTPS 链接，会添加到 aria2。
+- 给 Bot 发送 `magnet:` 链接，会添加到 aria2。
+- 给 Bot 发送 `.torrent` 文件，会下载种子并添加到 aria2。
+- 下载完成后，如果 `UP_TELEGRAM: true`，会上传到 `BIN_CHANNEL` 并写入数据库。
+
+### TG 频道网盘
+
+- 给 Bot 发送或转发 Telegram 媒体文件。
+- 服务会把媒体转发到 `BIN_CHANNEL`。
+- 服务会保存媒体元数据到 SQLite。
+- Web 端的 TG 网盘页面可以浏览、预览、搜索和删除这些文件。
+
+注意：这条链路不再创建 aria2 下载任务。`STREAM_AUTO_DOWNLOAD` 仅保留为历史配置项，当前逻辑不会因为它为 `true` 就把 TG 媒体下载回本地。
+
+### 直链访问
+
+直链 URL 由 `STREAM_FQDN`、`STREAM_PORT`、`STREAM_HAS_SSL`、`STREAM_NO_PORT` 和消息 hash 拼接生成。
+
+如果播放器、下载器或客户端不能携带 `Authorization` 头，可以在部分 API/播放地址中使用 `?token=<jwt>`。PC 客户端适配细节见：
+
+```text
+docs/pc-client-tg-drive.md
+```
+
+## Web 页面
+
+主要页面：
+
+- `Dashboard`: 概览、任务状态和系统资源。
+- `Downloads`: 下载记录、重试、删除、统计。
+- `Tasks`: 队列和任务中心。
+- `Drive`: TG 频道网盘浏览与预览。
+- `System`: Docker 状态、资源监控、容器日志。
+- `Logs`: 应用日志查看和下载。
+- `Settings`: 服务配置、客户端连接、密码修改入口。
+
+API 文档见：
+
+```text
+docs/backend-api.md
+```
+
+## 开发
+
+### 后端
+
+后端主要入口：
+
+- `app.py`: Telegram Bot、aria2 client、WebStreamer 启动入口。
+- `WebStreamer/server/stream_routes.py`: aiohttp API 和前端静态文件路由。
+- `db.py`: SQLite schema、迁移和数据访问。
+- `aria2_client/`: aria2 RPC、下载事件、上传事件处理。
+- `WebStreamer/bot/plugins/stream_modules/`: Telegram 媒体入库、队列、限流和直链辅助逻辑。
+
+Python 语法检查：
 
 ```bash
-./start-dev.sh
+python3 -m compileall -q app.py auth.py configer.py db.py util.py log_config.py monitor.py async_aria2_client.py thumbnail_generator.py aria2_client WebStreamer
 ```
 
-此模式下：
-- 前端支持 HMR (热重载)。
-- API 请求会自动代理到后端容器。
-- 访问 `http://localhost:5173` 进行开发。
+### 前端
 
-### 生产构建原理
-Dockerfile 使用多阶段构建：
-1. `node` 阶段构建前端静态资源 (`dist` 目录)。
-2. `python` 阶段通过 aiohttp 提供 API 服务，并将 `/` 路由指向前端 `index.html`。
+```bash
+cd web
+npm install
+npm run dev
+npm run type-check
+npm run build
+```
 
-## 📝 更新日志
+前端开发服务器默认：
 
-### [1.3.0] - 2026-01-28 (数据一致性优化)
-- **🔧 数据一致性增强**:
-  - 修复 WebSocket 下载更新缺少上传信息的问题。
-  - 优化前端数据同步逻辑，确保上传下载记录数据一致。
-  - WebSocket 推送现在包含完整的上传信息，前端可正确判断完成状态。
-  - 改进任务中心的数据更新机制，实时同步关联数据。
-- **🗑️ 功能简化**:
-  - 移除下载和上传任务的暂停/恢复功能，简化操作流程。
-  - 保留重试和删除功能，确保核心功能正常使用。
-- **📊 数据同步机制**:
-  - 数据库查询正确关联所有相关表（downloads、uploads、tg_media）。
-  - WebSocket 推送包含完整关联数据，确保前端显示准确。
-  - 前端自动同步更新关联数据，保持数据一致性。
+```text
+http://localhost:5173
+```
 
-### [1.2.0] - 2026-01-26 (功能增强与性能优化)
-- **🎯 智能文件过滤**:
-  - 新增跳过小文件功能，可配置最小文件大小（默认 100MB）。
-  - 在添加下载任务前检查文件大小，避免不必要的下载。
-  - 下载页面显示跳过状态和统计信息。
-  - 静默处理，不发送通知消息。
-- **⚡ 性能优化**:
-  - 上传操作完全异步化，使用 `asyncio.create_subprocess_exec` 替代阻塞的 `subprocess.Popen`。
-  - API 响应不再被上传操作阻塞，提升系统响应速度。
-  - 支持配置热重载，修改配置后无需重启服务。
-- **📊 Web 管理界面增强**:
-  - 新增 WebSocket 实时日志流功能，无需刷新即可查看最新日志。
-  - 支持开始/停止实时日志流。
-  - 支持清空日志显示。
-  - 下载页面适配显示跳过文件状态。
-- **🔧 代码优化**:
-  - 修复 `asyncio.subprocess.Process` 的 `poll()` 方法错误。
-  - 优化异步日志读取，避免阻塞事件循环。
+Vite 会把 `/api` 和直链路径代理到 `http://localhost:8080`。
 
-### [1.1.0] - 2026-01-26 (数据完整性增强)
-- **🔒 数据安全**:
-  - 新增下载文件大小校验（与 aria2 totalLength 对比）。
-  - 新增自动重试机制（校验失败时自动重试最多3次）。
-- **🛡️ 防护机制**:
-  - 校验失败时保留本地文件，防止数据丢失。
-  - 智能降级策略（MD5 不可用时降级为大小校验）。
-  - 详细的错误日志和用户通知。
+### 开发脚本
 
-### [1.0.0] - 2026-01-22 (首个发行版)
-- **🎉 发布**: 整合了 [MistRelay](https://github.com/Lapis0x0/MistRelay) 和 [TG-FileStreamBot](https://github.com/rong6/TG-FileStreamBot)。
-- **✨ 新增**:
-  - 完整的 Aria2 + Telegram 频道网盘自动化流程。
-  - 统一的 Web UI。
-  - Docker 容器集成与系统管理功能。
-  - 消息美化与实时进度展示。
+`dev-scripts/` 下保留了开发辅助脚本：
 
-## 🔍 数据一致性保证
+- `dev-scripts/start-dev.sh`
+- `dev-scripts/watch-backend.sh`
+- `dev-scripts/build-frontend.sh`
 
-MistRelay 采用多层数据同步机制，确保任务中心的上传下载记录数据一致性：
+具体用法见 `dev-scripts/README.md`。
 
-### 数据库层面
-- **外键约束**: 使用 SQLite 外键约束保证数据完整性
-- **事务管理**: 所有数据库操作使用事务，确保原子性
-- **WAL 模式**: 启用 Write-Ahead Logging，提升并发性能
+## 部署与安全注意事项
 
-### 应用层面
-- **WebSocket 实时推送**: 每次数据库更新后立即推送状态变更
-- **轮询同步**: 定期同步 aria2 状态与数据库，确保一致性
-- **关联数据查询**: 使用 LEFT JOIN 正确关联 downloads、uploads、tg_media 表
+当前默认 Docker Compose 偏向“单机自用、快速部署”：
 
-### 前端层面
-- **实时更新**: WebSocket 接收更新后同步更新关联数据
-- **状态判断**: 基于完整数据（包括上传状态）判断任务完成状态
-- **统计计算**: 基于实际状态重新计算组统计信息
+- `network_mode: host` 会让容器直接使用宿主机网络。
+- `privileged: true` 会扩大容器权限。
+- 挂载 `/var/run/docker.sock` 后，Web 系统管理模块具备控制 Docker 的能力。
+- aria2 RPC 默认由启动脚本生成配置，务必设置强 `RPC_SECRET`。
 
-详细的数据同步机制请参考 `DATABASE_SYNC_REPORT.md` 和 `DATA_CONSISTENCY_CHECK.md`。
+建议：
 
-## 🗓 未来计划
-- [ ] 支持文件重命名
-- [ ] 优化菜单交互 (更清晰的键盘布局)
-- [ ] 引入大模型 (LLM) 自动整理文件列表
-- [ ] 更多云存储服务支持
-- [ ] 文件预览与搜索功能
+- 只把 Web 入口暴露给可信网络，或放在反向代理后面。
+- 上线后立即修改默认管理员密码。
+- 不要把 `db/*.session`、`db/*.session.bak-*`、真实 `db/config.yml` 提交到仓库。
+- 如果不需要 Web 控制 Docker，移除 Docker socket 挂载并关闭相关页面入口。
+- 生产环境建议使用 HTTPS，并正确设置 `STREAM_HAS_SSL` / `STREAM_FQDN`。
 
-## 🙏 致谢
-本项目整合了以下优秀的开源项目：
-- [TG-FileStreamBot](https://github.com/rong6/TG-FileStreamBot) - 文件直链生成
-- [MistRelay](https://github.com/Lapis0x0/MistRelay) - Aria2 下载控制
+## 数据一致性
+
+MistRelay 的核心数据表：
+
+- `tg_media`: Telegram 媒体索引。
+- `downloads`: aria2 下载记录。
+- `uploads`: 上传任务记录。
+- `config_settings`: Web 可编辑配置。
+- `users`: Web 登录用户。
+
+一致性机制：
+
+- SQLite WAL 模式。
+- 事务封装数据库写入。
+- aria2 事件和轮询同步下载状态。
+- 上传完成后写入 TG 媒体索引。
+- WebSocket 推送任务和日志状态。
+
+更多背景资料：
+
+```text
+DATABASE_SYNC_REPORT.md
+DATA_CONSISTENCY_CHECK.md
+```
+
+## 常见问题
+
+### TG 网盘页面没有文件
+
+检查：
+
+- `BIN_CHANNEL` 是否配置正确。
+- Bot 是否是频道管理员。
+- 发送给 Bot 的媒体是否成功转发到频道。
+- 后端日志里是否有 `记录频道媒体到数据库失败`。
+
+### 直链打不开
+
+检查：
+
+- `STREAM_FQDN` 是否是浏览器可访问的域名或公网 IP。
+- `STREAM_PORT` 是否开放。
+- `STREAM_HAS_SSL` / `STREAM_NO_PORT` 是否和实际反向代理一致。
+- Bot 是否仍能访问 `BIN_CHANNEL` 中的原始消息。
+
+### Web 配置保存后没有立即生效
+
+部分配置在模块导入或客户端初始化时读取，需要重启服务才会完全生效，例如 Telegram 凭据、频道、端口、FQDN、多 Bot Token 等。保存配置后如果页面提示需要重启，请通过 Docker 或系统页面重启容器。
+
+### 第三方网盘还能用吗
+
+不再维护。`/api/rclone/*` 接口会返回废弃提示。新上传和新索引都走 Telegram 频道网盘。
+
+## 路线图
+
+- [ ] 收紧文件管理 API 的可访问根目录。
+- [ ] 为默认管理员增加首次登录强制改密流程。
+- [ ] 优化 TG 网盘搜索、重命名和批量操作。
+- [ ] 优化移动端 Web 体验。
+- [ ] 增加后端自动化测试覆盖。
+
+## 致谢
+
+本项目参考和整合了以下项目的思路或能力：
+
+- [TG-FileStreamBot](https://github.com/rong6/TG-FileStreamBot)
+- [MistRelay](https://github.com/Lapis0x0/MistRelay)
 - [HouCoder/tele-aria2](https://github.com/HouCoder/tele-aria2)
 - [jw-star/aria2bot](https://github.com/jw-star/aria2bot)

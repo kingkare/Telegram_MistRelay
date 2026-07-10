@@ -59,7 +59,7 @@ WORKDIR /app
 
 # Copy the rest of the application files
 # 前端已通过多阶段构建集成到镜像中
-COPY app.py async_aria2_client.py configer.py db.py util.py monitor.py log_config.py auth.py requirements.txt start.sh ./
+COPY app.py async_aria2_client.py configer.py db.py util.py monitor.py log_config.py auth.py download_cleanup.py requirements.txt start.sh ./
 COPY thumbnail_generator.py ./
 COPY aria2_client/ ./aria2_client/
 COPY WebStreamer/ ./WebStreamer/

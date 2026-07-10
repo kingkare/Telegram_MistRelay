@@ -12,6 +12,7 @@ import subprocess
 import json
 import asyncio
 import sqlite3
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -185,21 +186,112 @@ async def auth_login_handler(request: web.Request):
         if not username or not password:
             return web.json_response({"success": False, "error": "用户名和密码不能为空"}, status=400)
 
-        from db import get_user_by_username
-        from auth import verify_password, create_token
+        from db import create_auth_session, get_user_by_username
+        from auth import (
+            TOKEN_EXPIRE_SECONDS,
+            create_refresh_token,
+            create_token,
+            get_refresh_token_expires_at,
+            hash_refresh_token,
+            verify_password,
+        )
         user = get_user_by_username(username)
         if not user or not verify_password(password, user["password_hash"]):
             return web.json_response({"success": False, "error": "用户名或密码错误"}, status=401)
 
         token = create_token(user["id"], user["username"])
+        refresh_token = create_refresh_token()
+        device_id = body.get("device_id")
+        session_name = body.get("session_name")
+        if isinstance(device_id, str):
+            device_id = device_id.strip() or None
+        else:
+            device_id = None
+        if isinstance(session_name, str):
+            session_name = session_name.strip() or None
+        else:
+            session_name = None
+        create_auth_session(
+            user["id"],
+            hash_refresh_token(refresh_token),
+            get_refresh_token_expires_at(),
+            device_id=device_id,
+            session_name=session_name,
+        )
         return web.json_response({
             "success": True,
             "token": token,
+            "refresh_token": refresh_token,
+            "expires_in": TOKEN_EXPIRE_SECONDS,
             "user": {"id": user["id"], "username": user["username"], "role": user["role"]},
         })
     except Exception as e:
         logger.error(f"登录失败: {e}", exc_info=True)
         return web.json_response({"success": False, "error": "登录失败"}, status=500)
+
+
+@routes.post("/api/auth/refresh")
+async def auth_refresh_handler(request: web.Request):
+    """轮换 refresh token，并签发新的 access token。"""
+    try:
+        body = await request.json()
+        refresh_token = body.get("refresh_token", "")
+        if not isinstance(refresh_token, str) or not refresh_token:
+            return web.json_response({"success": False, "error": "refresh_token 不能为空"}, status=400)
+
+        from db import get_user_by_id, revoke_auth_session, rotate_auth_session
+        from auth import (
+            TOKEN_EXPIRE_SECONDS,
+            create_refresh_token,
+            create_token,
+            get_refresh_token_expires_at,
+            hash_refresh_token,
+        )
+
+        new_refresh_token = create_refresh_token()
+        session = rotate_auth_session(
+            hash_refresh_token(refresh_token),
+            hash_refresh_token(new_refresh_token),
+            get_refresh_token_expires_at(),
+        )
+        if not session:
+            return web.json_response({"success": False, "error": "登录已过期，请重新登录"}, status=401)
+
+        user = get_user_by_id(session["user_id"])
+        if not user:
+            revoke_auth_session(session_id=session["id"], reason="user_missing")
+            return web.json_response({"success": False, "error": "用户不存在"}, status=401)
+
+        token = create_token(user["id"], user["username"])
+        return web.json_response({
+            "success": True,
+            "token": token,
+            "refresh_token": new_refresh_token,
+            "expires_in": TOKEN_EXPIRE_SECONDS,
+            "user": user,
+        })
+    except Exception as e:
+        logger.error(f"刷新登录失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": "刷新登录失败"}, status=500)
+
+
+@routes.post("/api/auth/logout")
+async def auth_logout_handler(request: web.Request):
+    """退出桌面客户端长期会话。"""
+    try:
+        body = await request.json()
+        refresh_token = body.get("refresh_token", "")
+        if not isinstance(refresh_token, str) or not refresh_token:
+            return web.json_response({"success": False, "error": "refresh_token 不能为空"}, status=400)
+
+        from db import revoke_auth_session
+        from auth import hash_refresh_token
+
+        revoke_auth_session(hash_refresh_token(refresh_token), reason="logout")
+        return web.json_response({"success": True})
+    except Exception as e:
+        logger.error(f"退出登录失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": "退出登录失败"}, status=500)
 
 
 @routes.get("/api/auth/me", allow_head=True)
@@ -230,13 +322,14 @@ async def auth_change_password_handler(request: web.Request):
         if len(new_password) < 6:
             return web.json_response({"success": False, "error": "新密码长度不能少于6位"}, status=400)
 
-        from db import get_user_by_username, update_user_password
+        from db import get_user_by_username, revoke_user_sessions, update_user_password
         from auth import verify_password, hash_password
         db_user = get_user_by_username(user["sub"])
         if not db_user or not verify_password(old_password, db_user["password_hash"]):
             return web.json_response({"success": False, "error": "旧密码错误"}, status=400)
 
         update_user_password(db_user["id"], hash_password(new_password))
+        revoke_user_sessions(db_user["id"], reason="password_changed")
         return web.json_response({"success": True, "message": "密码修改成功"})
     except Exception as e:
         logger.error(f"修改密码失败: {e}", exc_info=True)
@@ -947,6 +1040,9 @@ async def update_config_handler(request: web.Request):
             'PROXY_PORT': ('string', 'download', '代理端口'),
             'SKIP_SMALL_FILES': ('bool', 'download', '是否跳过小于指定大小的媒体文件'),
             'MIN_FILE_SIZE_MB': ('int', 'download', '最小文件大小（MB），小于此大小的文件将被跳过'),
+            'DOWNLOAD_CLEANUP_ENABLED': ('bool', 'download', '是否启用下载目录自动清理'),
+            'DOWNLOAD_RETENTION_HOURS': ('int', 'download', '下载文件保留小时数'),
+            'DOWNLOAD_CLEANUP_INTERVAL_SECONDS': ('int', 'download', '下载目录清理间隔秒数'),
             'RPC_SECRET': ('string', 'aria2', 'Aria2 RPC密钥'),
             'RPC_URL': ('string', 'aria2', 'Aria2 RPC URL'),
             'MAX_CONCURRENT_UPLOADS': ('int', 'upload', '最大并发上传数（默认10）'),
@@ -962,7 +1058,7 @@ async def update_config_handler(request: web.Request):
             'STREAM_PING_INTERVAL': ('int', 'stream', 'Ping间隔（秒）'),
             'STREAM_USE_SESSION_FILE': ('bool', 'stream', '是否使用会话文件'),
             'STREAM_ALLOWED_USERS': ('string', 'stream', '允许使用直链的用户列表'),
-            'STREAM_AUTO_DOWNLOAD': ('bool', 'stream', '是否自动添加到下载队列'),
+            'STREAM_AUTO_DOWNLOAD': ('bool', 'stream', '历史兼容：是否自动添加到下载队列'),
             'SEND_STREAM_LINK': ('bool', 'stream', '是否发送直链信息给用户'),
             'MULTI_BOT_TOKENS': ('list', 'stream', '多机器人Token列表'),
         }
@@ -1354,20 +1450,32 @@ async def queue_api_handler(request: web.Request):
 
 # ==================== 下载任务控制 API ====================
 
+def is_tg_stream_download_record(download_record: dict) -> bool:
+    """Return True for old records created from this service's TG stream URLs."""
+    source_url = str(download_record.get('source_url') or '')
+    if not source_url:
+        return False
+
+    current_stream_base = str(getattr(Var, 'URL', '') or '')
+    if current_stream_base and source_url.startswith(current_stream_base):
+        return True
+
+    if not download_record.get('file_unique_id'):
+        return False
+
+    # Older records may keep a stream URL generated with a previous domain/FQDN.
+    return bool(
+        re.match(r"^https?://[^/]+/\d+/.+\?hash=", source_url)
+        or re.match(r"^https?://[^/]+/[A-Za-z0-9_-]{5,64}\d+$", source_url)
+    )
+
+
 @routes.post("/api/downloads/{gid}/retry")
 async def retry_download_handler(request: web.Request):
     """重试下载任务（重新提交到aria2）"""
     try:
         gid = request.match_info["gid"]
-        
-        client = get_aria2_client()
-        if not client:
-            logger.error("Aria2客户端未初始化，这不应该发生！请检查服务启动流程")
-            return web.json_response({
-                "success": False,
-                "error": "Aria2客户端未初始化，请检查服务是否正常启动"
-            }, status=503)
-        
+
         # 获取下载记录
         download_id = get_download_id_by_gid(gid)
         if not download_id:
@@ -1389,6 +1497,21 @@ async def retry_download_handler(request: web.Request):
                 "success": False,
                 "error": "无法获取下载源URL，无法重试"
             }, status=400)
+
+        if is_tg_stream_download_record(download_record):
+            return web.json_response({
+                "success": False,
+                "error": "TG网盘文件不再重新提交到aria2，请在TG网盘页面直接播放或下载",
+                "tg_drive": True
+            })
+
+        client = get_aria2_client()
+        if not client:
+            logger.error("Aria2客户端未初始化，这不应该发生！请检查服务启动流程")
+            return web.json_response({
+                "success": False,
+                "error": "Aria2客户端未初始化，请检查服务是否正常启动"
+            }, status=503)
         
         try:
             # 尝试移除旧任务（如果还在aria2中）
@@ -1964,6 +2087,125 @@ def build_telegram_stream_url(item: dict, hash_len: int) -> str | None:
     return f"/{mid}/{safe_name}?hash={secure_hash}"
 
 
+def build_telegram_thumbnail_url(item: dict) -> str | None:
+    message_id = item.get("message_id")
+    if not message_id:
+        return None
+
+    entry_type = item.get("entry_type")
+    mime_type = (item.get("mime_type") or "").lower()
+    group_mime_types = [
+        str(value).lower()
+        for value in (item.get("group_mime_types") or [])
+        if value
+    ]
+
+    if entry_type == "folder":
+        if any(value.startswith(("image/", "video/")) for value in group_mime_types):
+            return f"/api/telegram/thumbnail/{message_id}"
+        return None
+
+    if mime_type.startswith(("image/", "video/")):
+        return f"/api/telegram/thumbnail/{message_id}"
+
+    return None
+
+
+def is_thumbnail_supported_mime(mime_type: str | None) -> bool:
+    mime = (mime_type or "").lower()
+    return mime.startswith(("image/", "video/"))
+
+
+def get_thumbnail_response(path: Path, *, cache_hit: bool = False) -> web.FileResponse:
+    headers = {
+        "Content-Type": "image/webp",
+        "Cache-Control": "public, max-age=86400",
+        "X-MistRelay-Thumbnail-Cache": "hit" if cache_hit else "miss",
+    }
+    return web.FileResponse(path, headers=headers)
+
+
+def get_thumbnail_fallback_path(kind: str = "default") -> Path:
+    from PIL import Image, ImageDraw
+    from thumbnail_generator import get_thumbnail_generator
+
+    generator = get_thumbnail_generator()
+    fallback_dir = generator.cache_dir / "telegram"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    fallback_path = fallback_dir / f"fallback-{kind}.webp"
+    if fallback_path.exists():
+        return fallback_path
+
+    img = Image.new("RGB", (400, 300), "#f7faf8")
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((48, 38, 352, 262), fill="#eef7f4")
+    draw.rounded_rectangle((92, 82, 308, 212), radius=16, fill="#ffffff", outline="#d8e7df", width=2)
+    draw.ellipse((174, 118, 226, 170), fill="#ffe3d9", outline="#203039", width=2)
+    draw.polygon([(160, 124), (188, 92), (232, 122), (214, 112), (194, 126)], fill="#2f9e8f")
+    draw.ellipse((186, 138, 192, 144), fill="#203039")
+    draw.ellipse((208, 138, 214, 144), fill="#203039")
+    draw.arc((190, 146, 212, 160), start=0, end=180, fill="#ff8a7a", width=2)
+    draw.rounded_rectangle((176, 168, 224, 224), radius=12, fill="#ffffff", outline="#203039", width=2)
+    img.save(fallback_path, "WEBP", quality=82, method=4)
+    return fallback_path
+
+
+async def download_telegram_media_sample(message_id: int, output_path: Path, max_bytes: int) -> None:
+    if max_bytes <= 0:
+        raise RuntimeError("invalid thumbnail source size")
+
+    attempted_indices = set()
+    while True:
+        index = select_stream_bot(prefer_channel=False, exclude_indices=attempted_indices)
+        if index is None:
+            raise RuntimeError("No valid clients available")
+        if index not in multi_clients:
+            attempted_indices.add(index)
+            continue
+
+        client = multi_clients[index]
+        streamer = get_byte_streamer(client)
+        try:
+            file_id = await streamer.get_file_properties(message_id, force_refresh=True)
+            await streamer.generate_media_session(client, file_id)
+            mark_bot_success(index)
+            break
+        except Exception as error:
+            attempted_indices.add(index)
+            mark_bot_failure(index, error)
+            if len(attempted_indices) >= max(1, len(multi_clients)):
+                raise
+
+    chunk_size = 1024 * 1024
+    bytes_to_fetch = min(max_bytes, int(getattr(file_id, "file_size", 0) or 0))
+    if bytes_to_fetch <= 0:
+        raise RuntimeError("empty thumbnail source")
+
+    body = streamer.yield_file(
+        file_id,
+        index,
+        0,
+        0,
+        (bytes_to_fetch - 1) % chunk_size + 1,
+        max(1, math.ceil(bytes_to_fetch / chunk_size)),
+        chunk_size,
+    )
+
+    written = 0
+    with output_path.open("wb") as output:
+        async for chunk in body:
+            if not chunk:
+                continue
+            remaining = bytes_to_fetch - written
+            output.write(chunk[:remaining])
+            written += min(len(chunk), remaining)
+            if written >= bytes_to_fetch:
+                break
+
+    if written <= 0:
+        raise RuntimeError("thumbnail source download produced no data")
+
+
 def get_channel_deletion_clients() -> list[tuple[int, object]]:
     """按负载升序返回可访问频道的 bot 客户端。"""
     candidate_indices = [
@@ -2122,34 +2364,6 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
                 raise
 
     file_size = file_id.file_size
-
-    if range_header:
-        from_bytes, until_bytes = range_header.replace("bytes=", "").split("-")
-        from_bytes = int(from_bytes)
-        until_bytes = int(until_bytes) if until_bytes else file_size - 1
-    else:
-        from_bytes = request.http_range.start or 0
-        until_bytes = (request.http_range.stop or file_size) - 1
-
-    if (until_bytes > file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-        return web.Response(
-            status=416,
-            body="416: Range not satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"},
-        )
-
-    chunk_size = 1024 * 1024
-    until_bytes = min(until_bytes, file_size - 1)
-
-    offset = from_bytes - (from_bytes % chunk_size)
-    first_part_cut = from_bytes - offset
-    last_part_cut = until_bytes % chunk_size + 1
-
-    req_length = until_bytes - from_bytes + 1
-    part_count = math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size)
-    body = tg_connect.yield_file(
-        file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size
-    )
     mime_type = file_id.mime_type
     file_name = get_download_file_name({
         "file_name": getattr(file_id, "file_name", ""),
@@ -2167,17 +2381,69 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
     if not force_download and ("video/" in mime_type or "audio/" in mime_type or "/html" in mime_type):
         disposition = "inline"
 
+    def range_not_satisfiable_response():
+        return web.Response(
+            status=416,
+            body=b"" if request.method == "HEAD" else b"416: Range not satisfiable",
+            headers={
+                "Content-Range": f"bytes */{file_size}",
+                "Content-Length": "0",
+                "Content-Disposition": build_content_disposition(disposition, file_name),
+                "Accept-Ranges": "bytes",
+            },
+        )
+
+    if range_header:
+        try:
+            unit, byte_range = str(range_header).strip().split("=", 1)
+            if unit.lower() != "bytes" or "," in byte_range:
+                raise ValueError("unsupported range")
+            from_part, until_part = byte_range.split("-", 1)
+            if from_part:
+                from_bytes = int(from_part)
+                until_bytes = int(until_part) if until_part else file_size - 1
+            else:
+                suffix_length = int(until_part)
+                if suffix_length <= 0:
+                    raise ValueError("invalid suffix range")
+                from_bytes = max(file_size - suffix_length, 0)
+                until_bytes = file_size - 1
+        except (TypeError, ValueError):
+            return range_not_satisfiable_response()
+    else:
+        from_bytes = 0
+        until_bytes = file_size - 1
+
+    if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
+        return range_not_satisfiable_response()
+
+    chunk_size = 1024 * 1024
+    req_length = until_bytes - from_bytes + 1
+    response_headers = {
+        "Content-Type": f"{mime_type}",
+        "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+        "Content-Length": str(req_length),
+        "Content-Disposition": build_content_disposition(disposition, file_name),
+        "Accept-Ranges": "bytes",
+        "X-MistRelay-Min-Threads": str(max(2, get_available_channel_bot_count())),
+    }
+    status = 206 if range_header else 200
+
+    if request.method == "HEAD":
+        return web.Response(status=status, headers=response_headers)
+
+    offset = from_bytes - (from_bytes % chunk_size)
+    first_part_cut = from_bytes - offset
+    last_part_cut = until_bytes % chunk_size + 1
+    part_count = math.ceil((until_bytes + 1 - offset) / chunk_size)
+    body = tg_connect.yield_file(
+        file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size
+    )
+
     return web.Response(
-        status=206 if range_header else 200,
+        status=status,
         body=body,
-        headers={
-            "Content-Type": f"{mime_type}",
-            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-            "Content-Length": str(req_length),
-            "Content-Disposition": build_content_disposition(disposition, file_name),
-            "Accept-Ranges": "bytes",
-            "X-MistRelay-Min-Threads": str(max(2, get_available_channel_bot_count())),
-        },
+        headers=response_headers,
     )
 
 # ==================== Telegram 频道浏览 API ====================
@@ -2208,6 +2474,10 @@ async def telegram_browse_handler(request: web.Request):
 
         hash_len = Var.HASH_LENGTH
         for item in result['items']:
+            thumbnail_url = build_telegram_thumbnail_url(item)
+            if thumbnail_url:
+                item['thumbnail_url'] = thumbnail_url
+
             if item.get('entry_type') == 'file':
                 item['download_file_name'] = get_download_file_name(item)
                 uid = item.get('file_unique_id', '')
@@ -2233,6 +2503,72 @@ async def telegram_usage_handler(request: web.Request):
     except Exception as e:
         logger.error(f"Telegram usage API error: {e}", exc_info=True)
         return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.get("/api/telegram/thumbnail/{message_id}", allow_head=True)
+async def telegram_thumbnail_handler(request: web.Request):
+    """按需生成 TG 媒体 WebP 缩略图。"""
+    try:
+        message_id = int(request.match_info["message_id"])
+    except (KeyError, ValueError):
+        return web.json_response({"success": False, "error": "无效的 message_id"}, status=400)
+
+    record = get_tg_media_record_by_message_id(message_id)
+    if not record:
+        return web.json_response({"success": False, "error": "Telegram 文件记录不存在"}, status=404)
+
+    mime_type = record.get("mime_type") or ""
+    if not is_thumbnail_supported_mime(mime_type):
+        return get_thumbnail_response(get_thumbnail_fallback_path("unsupported"))
+
+    from thumbnail_generator import get_thumbnail_generator
+
+    generator = get_thumbnail_generator()
+    file_name = get_download_file_name(record)
+    cache_key = f"{message_id}_{file_name}"
+    cached = generator.get_cached_thumbnail("telegram", cache_key)
+    if cached:
+        return get_thumbnail_response(cached, cache_hit=True)
+
+    async with thumbnail_semaphore:
+        cached = generator.get_cached_thumbnail("telegram", cache_key)
+        if cached:
+            return get_thumbnail_response(cached, cache_hit=True)
+
+        temp_dir = None
+        try:
+            file_size = int(record.get("file_size") or 0)
+            if file_size <= 0:
+                raise RuntimeError("媒体文件大小未知")
+
+            if mime_type.lower().startswith("image/"):
+                max_bytes = min(file_size, 50 * 1024 * 1024)
+            else:
+                max_bytes = min(file_size, 12 * 1024 * 1024)
+
+            temp_dir = tempfile.TemporaryDirectory(prefix="mistrelay_tg_thumb_", dir="/tmp")
+            source_path = Path(temp_dir.name) / file_name
+            await asyncio.wait_for(
+                download_telegram_media_sample(message_id, source_path, max_bytes),
+                timeout=35,
+            )
+
+            thumbnail_path = await asyncio.to_thread(
+                generator.generate_thumbnail,
+                "telegram",
+                cache_key,
+                source_path,
+            )
+            if thumbnail_path:
+                return get_thumbnail_response(thumbnail_path)
+        except Exception as error:
+            logger.warning(f"生成 TG 缩略图失败 message_id={message_id}: {error}")
+        finally:
+            if temp_dir is not None:
+                temp_dir.cleanup()
+
+    kind = "video" if mime_type.lower().startswith("video/") else "image"
+    return get_thumbnail_response(get_thumbnail_fallback_path(kind))
 
 
 @routes.delete("/api/telegram/item/{message_id}")

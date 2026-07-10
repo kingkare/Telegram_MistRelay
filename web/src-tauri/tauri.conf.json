@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MistRelay PC Client",
+  "version": "0.1.1",
+  "identifier": "com.mistrelay.pc",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "MistRelay",
+        "width": 1200,
+        "height": 760,
+        "minWidth": 1100,
+        "minHeight": 720,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "MistRelay",
+    "shortDescription": "MistRelay PC Client",
+    "longDescription": "MistRelay desktop Telegram drive client.",
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": true,
+        "installMode": "both",
+        "languages": ["English", "SimpChinese"]
+      }
+    }
+  }
+}

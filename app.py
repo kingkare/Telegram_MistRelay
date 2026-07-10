@@ -19,6 +19,7 @@ from telethon.tl.types import BotCommand, BotCommandScopeDefault, Message
 
 from async_aria2_client import AsyncAria2Client
 from db import init_db
+from download_cleanup import start_download_cleanup_loop
 from configer import (
     API_ID, API_HASH, PROXY_IP, PROXY_PORT, BOT_TOKEN, ADMIN_ID, RPC_SECRET, RPC_URL,
     ENABLE_STREAM
@@ -144,7 +145,7 @@ async def handler(event):
         f"• 发送HTTP链接\n"
         f"• 发送磁力链接（magnet:）\n"
         f"• 发送种子文件（.torrent）\n"
-        f"• 发送Telegram文件（自动生成直链并下载）\n\n"
+        f"• 发送Telegram文件（保存到TG网盘并生成直链）\n\n"
         f"<b>🎛️ 菜单功能：</b>\n"
         f"• ⬇️正在下载 - 查看正在下载的任务\n"
         f"• ⌛️ 正在等待 - 查看等待中的任务\n"
@@ -215,7 +216,7 @@ async def send_welcome(event):
             msg = await event.respond(
                 f'📎 <b>直链功能状态</b>\n\n'
                 f'状态: {status}\n'
-                f'自动下载: {auto_download}\n'
+                f'自动下载兼容开关: {auto_download}\n'
                 f'日志频道: {bin_channel}\n'
                 f'Web地址: <code>{stream_url}</code>',
                 parse_mode='html'
@@ -278,10 +279,10 @@ async def send_welcome(event):
                     path = await bot.download_media(event.message)
                     await client.add_torrent(path)
                 else:
-                    log.info("直链功能未启用，媒体文件不进行自动下载")
+                    log.info("直链功能未启用，媒体文件不进行TG网盘入库")
                     return
             else:
-                log.info("直链功能未启用，媒体文件不进行自动下载")
+                log.info("直链功能未启用，媒体文件不进行TG网盘入库")
                 return
 
 
@@ -766,6 +767,7 @@ async def main():
             cleanup_old_logs()
 
     asyncio.create_task(_log_cleanup_loop())
+    start_download_cleanup_loop(client, log)
 
     await client.connect()
     bot.add_event_handler(BotCallbackHandler)
@@ -989,7 +991,7 @@ async def main():
             
             auto_download_status = "启用" if (Var and Var.AUTO_DOWNLOAD) else "禁用"
             log.info(f'直链功能已启用，将作为Telegram媒体文件的前置处理')
-            log.info(f'自动下载功能: {auto_download_status}')
+            log.info(f'自动下载兼容开关: {auto_download_status}')
         except Exception as e:
             log.error(f'启动直链功能失败: {e}', exc_info=True)
             log.warning('直链功能启动失败，但主应用将继续运行')

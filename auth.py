@@ -10,6 +10,7 @@ import base64
 import time
 import secrets
 import logging
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,9 @@ _JWT_SECRET: str = secrets.token_hex(32)
 
 # Token 有效期（秒）：默认 24 小时
 TOKEN_EXPIRE_SECONDS = 24 * 3600
+
+# Refresh token 有效期（秒）：桌面客户端长期登录 30 天
+REFRESH_TOKEN_EXPIRE_SECONDS = 30 * 24 * 3600
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -65,6 +69,23 @@ def create_token(user_id: int, username: str) -> str:
     sig_b64 = _b64url_encode(signature)
 
     return f"{header}.{payload}.{sig_b64}"
+
+
+def create_refresh_token() -> str:
+    """生成只返回给客户端一次的高熵 refresh token 明文。"""
+    return secrets.token_urlsafe(48)
+
+
+def hash_refresh_token(refresh_token: str) -> str:
+    """对 refresh token 做不可逆哈希，数据库只保存该值。"""
+    return hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
+
+
+def get_refresh_token_expires_at() -> str:
+    """返回 refresh token 过期时间，使用 UTC ISO8601 字符串。"""
+    return (
+        datetime.utcnow() + timedelta(seconds=REFRESH_TOKEN_EXPIRE_SECONDS)
+    ).isoformat(timespec="seconds") + "Z"
 
 
 def verify_token(token: str) -> dict | None:

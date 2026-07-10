@@ -136,6 +136,26 @@
             <el-form-item label="保存路径">
               <el-input v-model="configs.download.SAVE_PATH" />
             </el-form-item>
+            <el-form-item label="自动清理下载文件">
+              <el-switch v-model="configs.download.DOWNLOAD_CLEANUP_ENABLED" />
+              <div class="el-form-item__help">
+                启用后，后台会定期清理保存路径中超过保留时间的本地文件，并跳过正在下载或上传的文件
+              </div>
+            </el-form-item>
+            <el-form-item
+              label="下载文件保留时间（小时）"
+              v-if="configs.download.DOWNLOAD_CLEANUP_ENABLED"
+            >
+              <el-input-number
+                v-model="configs.download.DOWNLOAD_RETENTION_HOURS"
+                :min="1"
+                :max="8760"
+                style="width: 100%"
+              />
+              <div class="el-form-item__help">
+                默认保留 24 小时；清理任务每小时检查一次
+              </div>
+            </el-form-item>
             <el-form-item label="代理IP">
               <el-input v-model="configs.download.PROXY_IP" placeholder="留空则不使用代理" />
             </el-form-item>
@@ -248,8 +268,11 @@
             <el-form-item label="允许使用直链的用户">
               <el-input v-model="configs.stream.STREAM_ALLOWED_USERS" placeholder="逗号分隔，留空则允许所有人" />
             </el-form-item>
-            <el-form-item label="自动添加到下载队列">
+            <el-form-item label="自动下载兼容开关">
               <el-switch v-model="configs.stream.STREAM_AUTO_DOWNLOAD" />
+              <div class="el-form-item__help">
+                TG网盘媒体不会本地下载；此开关仅保留给旧直链流程。
+              </div>
             </el-form-item>
             <el-form-item label="发送直链信息给用户">
               <el-switch v-model="configs.stream.SEND_STREAM_LINK" />
@@ -575,14 +598,17 @@ const configs = ref({
     BOT_TOKEN: '',
     ADMIN_ID: 0,
     FORWARD_ID: '',
-    UP_TELEGRAM: false
+    UP_TELEGRAM: true
   },
   download: {
-    SAVE_PATH: '/root/mistrelay_downloads',
+    SAVE_PATH: '/root/downloads',
     PROXY_IP: '',
     PROXY_PORT: '',
     SKIP_SMALL_FILES: false,
-    MIN_FILE_SIZE_MB: 100
+    MIN_FILE_SIZE_MB: 100,
+    DOWNLOAD_CLEANUP_ENABLED: true,
+    DOWNLOAD_RETENTION_HOURS: 24,
+    DOWNLOAD_CLEANUP_INTERVAL_SECONDS: 3600
   },
   aria2: {
     RPC_SECRET: '',
@@ -592,16 +618,16 @@ const configs = ref({
     ENABLE_STREAM: true,
     BIN_CHANNEL: '',
     STREAM_PORT: 8080,
-    STREAM_BIND_ADDRESS: '127.0.0.1',
+    STREAM_BIND_ADDRESS: '0.0.0.0',
     STREAM_HASH_LENGTH: 6,
     STREAM_HAS_SSL: false,
     STREAM_NO_PORT: false,
-    STREAM_FQDN: '',
+    STREAM_FQDN: '23.94.9.54',
     STREAM_KEEP_ALIVE: false,
     STREAM_PING_INTERVAL: 1200,
     STREAM_USE_SESSION_FILE: false,
     STREAM_ALLOWED_USERS: '',
-    STREAM_AUTO_DOWNLOAD: true,
+    STREAM_AUTO_DOWNLOAD: false,
     SEND_STREAM_LINK: false,
     MULTI_BOT_TOKENS: [] as string[]
   }

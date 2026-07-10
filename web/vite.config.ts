@@ -15,6 +15,7 @@ export default defineConfig({
     port: 5173,
     allowedHosts: [
       'oracle-us-1.jiuyue520.com',
+      '23.94.9.54',
       'localhost',
       '.jiuyue520.com' // 允许所有 jiuyue520.com 的子域名
     ],
@@ -30,6 +31,7 @@ export default defineConfig({
         '**/.git/**',
         '**/dist/**',
         '**/build/**',
+        '**/src-tauri/**',
         '**/*.md'
       ],
       usePolling: false, // 在ARM设备上可能需要设置为true

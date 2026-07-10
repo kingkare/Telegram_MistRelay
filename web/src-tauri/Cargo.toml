@@ -1,0 +1,17 @@
+[package]
+name = "mistrelay-pc-client"
+version = "0.1.1"
+description = "MistRelay desktop Telegram drive client"
+authors = ["MistRelay"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio = { version = "1", features = ["fs", "io-util", "sync"] }

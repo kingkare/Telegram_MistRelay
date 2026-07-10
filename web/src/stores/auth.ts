@@ -1,6 +1,12 @@
 import { defineStore } from 'pinia'
 import { api } from '@/api'
-import { clearAuthToken, getAuthToken, setAuthToken } from '@/utils/runtime'
+import {
+  clearAuthTokens,
+  getAuthToken,
+  getRefreshToken,
+  setAuthToken,
+  setRefreshToken,
+} from '@/utils/runtime'
 
 interface UserInfo {
   id: number
@@ -10,12 +16,14 @@ interface UserInfo {
 
 interface AuthState {
   token: string | null
+  refreshToken: string | null
   user: UserInfo | null
 }
 
 export const useAuthStore = defineStore('auth', {
   state: (): AuthState => ({
     token: getAuthToken(),
+    refreshToken: getRefreshToken(),
     user: null,
   }),
   getters: {
@@ -26,15 +34,22 @@ export const useAuthStore = defineStore('auth', {
       const { data } = await api.post('/auth/login', { username, password })
       if (!data.success) throw new Error(data.error || '登录失败')
       this.token = data.token
+      this.refreshToken = data.refresh_token || null
       this.user = data.user
       setAuthToken(data.token)
+      if (data.refresh_token) {
+        setRefreshToken(data.refresh_token)
+      }
     },
 
     async fetchUser() {
-      if (!this.token) return
+      const token = getAuthToken()
+      if (!token) return
+      this.token = token
+      this.refreshToken = getRefreshToken()
       try {
         const { data } = await api.get('/auth/me', {
-          headers: { Authorization: `Bearer ${this.token}` },
+          headers: { Authorization: `Bearer ${token}` },
         })
         if (data.success) {
           this.user = data.user
@@ -48,8 +63,9 @@ export const useAuthStore = defineStore('auth', {
 
     logout() {
       this.token = null
+      this.refreshToken = null
       this.user = null
-      clearAuthToken()
+      clearAuthTokens()
     },
   },
 })

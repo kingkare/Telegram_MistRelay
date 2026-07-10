@@ -208,6 +208,10 @@ import {
   deleteTelegramGroup,
   deleteTelegramItem,
   getTelegramUsage,
+  isTelegramDriveFile,
+  isTelegramDriveFolder,
+  type TelegramDriveFile,
+  type TelegramDriveFolder,
   type TelegramDriveItem,
   type TelegramUsageStats,
 } from '@/api'
@@ -248,7 +252,7 @@ function getFileName(item?: TelegramDriveItem | null): string {
 
 function getDownloadFileName(item?: TelegramDriveItem | null): string {
   if (!item) return ''
-  if (item.download_file_name) return item.download_file_name
+  if (isFile(item) && item.download_file_name) return item.download_file_name
 
   if (item.stream_url) {
     try {
@@ -288,16 +292,16 @@ function getDownloadUrl(item: TelegramDriveItem): string {
   return downloadUrl.toString()
 }
 
-function isFolder(item?: TelegramDriveItem | null): boolean {
-  return item?.entry_type === 'folder'
+function isFolder(item?: TelegramDriveItem | null): item is TelegramDriveFolder {
+  return isTelegramDriveFolder(item)
 }
 
-function isFile(item?: TelegramDriveItem | null): boolean {
-  return item?.entry_type === 'file'
+function isFile(item?: TelegramDriveItem | null): item is TelegramDriveFile {
+  return isTelegramDriveFile(item)
 }
 
 function getDisplaySize(item: TelegramDriveItem): number {
-  return item.total_size ?? item.file_size ?? 0
+  return isFolder(item) ? item.total_size ?? 0 : item.file_size ?? 0
 }
 
 function isImage(item?: TelegramDriveItem | null): boolean {
@@ -480,7 +484,9 @@ async function handleDelete(item: TelegramDriveItem) {
     loading.value = true
     const response = shouldDeleteGroup && item.media_group_id
       ? await deleteTelegramGroup(item.media_group_id)
-      : await deleteTelegramItem(item.message_id)
+      : isFile(item)
+        ? await deleteTelegramItem(item.message_id)
+        : { success: false, error: '无法定位要删除的文件' }
 
     if (response.success) {
       ElMessage.success(response.message || '删除成功')

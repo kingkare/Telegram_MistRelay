@@ -264,6 +264,33 @@ def init_db():
             )
             """
         )
+
+        # 桌面客户端长期登录会话表
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL,
+                token_hash      TEXT NOT NULL,
+                device_id       TEXT,
+                session_name    TEXT,
+                expires_at      TEXT NOT NULL,
+                revoked_at      TEXT,
+                revoked_reason  TEXT,
+                replaced_by     INTEGER,
+                created_at      TEXT NOT NULL,
+                last_used_at    TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (replaced_by) REFERENCES auth_sessions(id) ON DELETE SET NULL
+            )
+            """
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_auth_sessions_token_hash ON auth_sessions (token_hash)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions (user_id)"
+        )
     
     # 检查是否需要从config.yml迁移配置（在with块外执行，因为需要独立的连接）
     with db_conn() as conn:
@@ -1095,6 +1122,9 @@ def init_config_from_yaml():
             'PROXY_PORT': ('string', 'download', '代理端口'),
             'SKIP_SMALL_FILES': ('bool', 'download', '是否跳过小于指定大小的媒体文件'),
             'MIN_FILE_SIZE_MB': ('int', 'download', '最小文件大小（MB），小于此大小的文件将被跳过'),
+            'DOWNLOAD_CLEANUP_ENABLED': ('bool', 'download', '是否启用下载目录自动清理'),
+            'DOWNLOAD_RETENTION_HOURS': ('int', 'download', '下载文件保留小时数'),
+            'DOWNLOAD_CLEANUP_INTERVAL_SECONDS': ('int', 'download', '下载目录清理间隔秒数'),
             
             # Aria2配置
             'RPC_SECRET': ('string', 'aria2', 'Aria2 RPC密钥'),
@@ -1114,7 +1144,7 @@ def init_config_from_yaml():
             'STREAM_PING_INTERVAL': ('int', 'stream', 'Ping间隔（秒）'),
             'STREAM_USE_SESSION_FILE': ('bool', 'stream', '是否使用会话文件'),
             'STREAM_ALLOWED_USERS': ('string', 'stream', '允许使用直链的用户列表'),
-            'STREAM_AUTO_DOWNLOAD': ('bool', 'stream', '是否自动添加到下载队列'),
+            'STREAM_AUTO_DOWNLOAD': ('bool', 'stream', '历史兼容：是否自动添加到下载队列'),
             'SEND_STREAM_LINK': ('bool', 'stream', '是否发送直链信息给用户'),
             'MULTI_BOT_TOKENS': ('list', 'stream', '多机器人Token列表'),
         }
@@ -2371,6 +2401,199 @@ def update_user_password(user_id: int, new_password_hash: str):
             "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
             (new_password_hash, _now_iso(), user_id),
         )
+
+
+def create_auth_session(
+    user_id: int,
+    token_hash: str,
+    expires_at: str,
+    device_id: str | None = None,
+    session_name: str | None = None,
+) -> dict:
+    """创建桌面客户端 refresh token 会话，数据库只保存 token hash。"""
+    now = _now_iso()
+    with db_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO auth_sessions (
+                user_id, token_hash, device_id, session_name,
+                expires_at, created_at, last_used_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, token_hash, device_id, session_name, expires_at, now, now),
+        )
+        session_id = cur.lastrowid
+        row = conn.execute(
+            "SELECT * FROM auth_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        return dict(row)
+
+
+def get_auth_session(
+    token_hash: str,
+    *,
+    include_revoked: bool = False,
+    touch: bool = True,
+) -> dict | None:
+    """按 token hash 查询有效会话；默认不返回已撤销或已过期会话。"""
+    now = _now_iso()
+    conditions = ["token_hash = ?"]
+    params: list = [token_hash]
+    if not include_revoked:
+        conditions.append("revoked_at IS NULL")
+        conditions.append("expires_at > ?")
+        params.append(now)
+
+    with db_conn() as conn:
+        cur = conn.execute(
+            f"SELECT * FROM auth_sessions WHERE {' AND '.join(conditions)}",
+            tuple(params),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        session = dict(row)
+        if touch and not session.get("revoked_at") and session.get("expires_at", "") > now:
+            conn.execute(
+                "UPDATE auth_sessions SET last_used_at = ? WHERE id = ?",
+                (now, session["id"]),
+            )
+            session["last_used_at"] = now
+        return session
+
+
+def revoke_auth_session(
+    token_hash: str | None = None,
+    *,
+    session_id: int | None = None,
+    reason: str = "revoked",
+    replaced_by: int | None = None,
+) -> bool:
+    """撤销单个会话。可按 token hash 或 session id 定位。"""
+    if token_hash is None and session_id is None:
+        raise ValueError("token_hash or session_id is required")
+
+    now = _now_iso()
+    where_sql = "id = ?" if session_id is not None else "token_hash = ?"
+    where_value = session_id if session_id is not None else token_hash
+    with db_conn() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE auth_sessions
+               SET revoked_at = COALESCE(revoked_at, ?),
+                   revoked_reason = COALESCE(revoked_reason, ?),
+                   replaced_by = COALESCE(replaced_by, ?)
+             WHERE {where_sql}
+               AND revoked_at IS NULL
+            """,
+            (now, reason, replaced_by, where_value),
+        )
+        return cur.rowcount > 0
+
+
+def rotate_auth_session(
+    old_token_hash: str,
+    new_token_hash: str,
+    expires_at: str,
+    *,
+    device_id: str | None = None,
+    session_name: str | None = None,
+) -> dict | None:
+    """
+    轮换 refresh token 会话。
+
+    只有未撤销且未过期的旧 token 可以轮换；成功后旧 token 立即失效。
+    """
+    now = _now_iso()
+    with db_conn() as conn:
+        old_row = conn.execute(
+            """
+            SELECT * FROM auth_sessions
+             WHERE token_hash = ?
+               AND revoked_at IS NULL
+               AND expires_at > ?
+            """,
+            (old_token_hash, now),
+        ).fetchone()
+        if not old_row:
+            return None
+
+        old_session = dict(old_row)
+        cur = conn.execute(
+            """
+            INSERT INTO auth_sessions (
+                user_id, token_hash, device_id, session_name,
+                expires_at, created_at, last_used_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                old_session["user_id"],
+                new_token_hash,
+                device_id if device_id is not None else old_session.get("device_id"),
+                session_name if session_name is not None else old_session.get("session_name"),
+                expires_at,
+                now,
+                now,
+            ),
+        )
+        new_session_id = cur.lastrowid
+        conn.execute(
+            """
+            UPDATE auth_sessions
+               SET revoked_at = ?,
+                   revoked_reason = ?,
+                   replaced_by = ?
+             WHERE id = ?
+               AND revoked_at IS NULL
+            """,
+            (now, "rotated", new_session_id, old_session["id"]),
+        )
+        row = conn.execute(
+            "SELECT * FROM auth_sessions WHERE id = ?",
+            (new_session_id,),
+        ).fetchone()
+        return dict(row)
+
+
+def revoke_user_sessions(
+    user_id: int,
+    *,
+    reason: str = "user_revoked",
+    exclude_session_id: int | None = None,
+) -> int:
+    """撤销指定用户的所有有效会话。"""
+    now = _now_iso()
+    params: list = [now, reason, user_id]
+    exclude_sql = ""
+    if exclude_session_id is not None:
+        exclude_sql = " AND id != ?"
+        params.append(exclude_session_id)
+
+    with db_conn() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE auth_sessions
+               SET revoked_at = ?,
+                   revoked_reason = ?
+             WHERE user_id = ?
+               AND revoked_at IS NULL
+               {exclude_sql}
+            """,
+            tuple(params),
+        )
+        return cur.rowcount
+
+
+def cleanup_expired_auth_sessions(now: str | None = None) -> int:
+    """删除已过期的桌面客户端会话记录。"""
+    cutoff = now or _now_iso()
+    with db_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM auth_sessions WHERE expires_at <= ?",
+            (cutoff,),
+        )
+        return cur.rowcount
 
 
 def list_users() -> list:

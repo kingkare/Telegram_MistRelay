@@ -1,5 +1,13 @@
 const SERVER_BASE_URL_KEY = 'mistrelay.serverBaseUrl'
 const TOKEN_KEY = 'token'
+const REFRESH_TOKEN_KEY = 'mistrelay.refreshToken'
+
+declare global {
+  interface Window {
+    __TAURI__?: unknown
+    __TAURI_INTERNALS__?: unknown
+  }
+}
 
 function getHostnameForProtocolDefault(value: string): string {
   try {
@@ -52,6 +60,17 @@ export function normalizeServerBaseUrl(value: string): string {
 
 export function shouldUseHashHistory(): boolean {
   return import.meta.env.VITE_USE_HASH_ROUTER === 'true'
+}
+
+export function isTauriRuntime(): boolean {
+  return typeof window !== 'undefined' && (
+    Boolean(window.__TAURI_INTERNALS__) ||
+    Boolean(window.__TAURI__)
+  )
+}
+
+export function getDefaultRoutePath(): string {
+  return isTauriRuntime() ? '/pc/drive' : '/dashboard'
 }
 
 function getAppBasePath(): string {
@@ -121,11 +140,36 @@ export function getAuthToken(): string {
 }
 
 export function setAuthToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token)
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token)
+  } else {
+    clearAuthToken()
+  }
 }
 
 export function clearAuthToken(): void {
   localStorage.removeItem(TOKEN_KEY)
+}
+
+export function getRefreshToken(): string {
+  return localStorage.getItem(REFRESH_TOKEN_KEY) || ''
+}
+
+export function setRefreshToken(token: string): void {
+  if (token) {
+    localStorage.setItem(REFRESH_TOKEN_KEY, token)
+  } else {
+    clearRefreshToken()
+  }
+}
+
+export function clearRefreshToken(): void {
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+export function clearAuthTokens(): void {
+  clearAuthToken()
+  clearRefreshToken()
 }
 
 export function buildAuthorizedApiUrl(
@@ -147,21 +191,45 @@ export function buildAuthorizedApiUrl(
   return url.toString()
 }
 
+export function buildAuthorizedStreamUrl(streamUrl: string): string {
+  if (!streamUrl) return ''
+
+  const absoluteUrl = /^https?:\/\//i.test(streamUrl)
+    ? streamUrl
+    : toAbsoluteServerUrl(streamUrl)
+  const url = new URL(absoluteUrl, window.location.origin)
+  const token = getAuthToken()
+
+  if (token) {
+    url.searchParams.set('token', token)
+  }
+
+  return url.toString()
+}
+
 export function getLoginRouteUrl(): string {
   const basePath = getAppBasePath()
+  const loginPath = isTauriRuntime() ? '/pc/login' : '/login'
   if (shouldUseHashHistory()) {
-    return `${basePath}/#/login`
+    return `${basePath}/#${loginPath}`
   }
-  return `${basePath}/login`
+  return `${basePath}${loginPath}`
 }
 
 export function isCurrentLoginRoute(): boolean {
-  if (window.location.hash.startsWith('#/login')) {
+  if (
+    window.location.hash.startsWith('#/login') ||
+    window.location.hash.startsWith('#/pc/login')
+  ) {
     return true
   }
 
   const basePath = getAppBasePath()
-  return normalizePathname(window.location.pathname) === normalizePathname(`${basePath}/login`)
+  const pathname = normalizePathname(window.location.pathname)
+  return (
+    pathname === normalizePathname(`${basePath}/login`) ||
+    pathname === normalizePathname(`${basePath}/pc/login`)
+  )
 }
 
 export function redirectToLogin(): void {
