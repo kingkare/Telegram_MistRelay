@@ -18,14 +18,20 @@
           </el-breadcrumb-item>
         </el-breadcrumb>
       </div>
+      <span class="pc-drive-result-count">{{ drive.total }} 项</span>
       <el-segmented
         v-model="driveViewMode"
         class="pc-drive-view-mode"
         :options="viewModeOptions"
       />
-      <el-button :icon="RefreshRight" :loading="drive.loading" @click="refresh">
-        刷新
-      </el-button>
+      <el-button
+        class="pc-drive-icon-button"
+        :icon="RefreshRight"
+        :loading="drive.loading"
+        title="刷新"
+        aria-label="刷新"
+        @click="refresh"
+      />
     </div>
 
     <div class="pc-drive-toolbar">
@@ -62,7 +68,14 @@
         <el-option label="名称 A到Z" value="file_name-asc" />
         <el-option label="名称 Z到A" value="file_name-desc" />
       </el-select>
-      <el-button :icon="Search" @click="applySearch">搜索</el-button>
+      <el-button
+        class="pc-drive-search-button"
+        type="primary"
+        :icon="Search"
+        title="搜索"
+        aria-label="搜索"
+        @click="applySearch"
+      />
     </div>
 
     <el-alert
@@ -309,14 +322,14 @@ async function confirmDelete(item: TelegramDriveItem) {
 <style scoped>
 .pc-drive-view {
   display: grid;
-  gap: 16px;
+  gap: 14px;
 }
 
 .pc-drive-actions {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 40px;
+  min-height: 36px;
 }
 
 .pc-drive-path {
@@ -324,8 +337,8 @@ async function confirmDelete(item: TelegramDriveItem) {
   flex: 1;
   overflow: hidden;
   color: var(--pc-color-text);
-  font-size: 16px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -345,15 +358,26 @@ async function confirmDelete(item: TelegramDriveItem) {
   font-weight: 700;
 }
 
+.pc-drive-result-count {
+  min-width: max-content;
+  color: var(--pc-color-text-muted);
+  font-size: 12px;
+}
+
 .pc-drive-view-mode {
   flex: 0 0 auto;
 }
 
 .pc-drive-toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 128px 160px auto;
-  gap: 10px;
+  grid-template-columns: minmax(260px, 1fr) 124px 168px 34px;
+  gap: 8px;
   align-items: center;
+  padding: 10px;
+  border: 1px solid var(--pc-color-border);
+  border-radius: var(--pc-radius-md);
+  background: var(--pc-color-surface);
+  box-shadow: var(--pc-shadow-sm);
 }
 
 .pc-drive-search,
@@ -362,14 +386,21 @@ async function confirmDelete(item: TelegramDriveItem) {
   min-width: 0;
 }
 
+.pc-drive-icon-button,
+.pc-drive-search-button {
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+}
+
 .pc-drive-alert {
   max-width: 720px;
 }
 
 .pc-drive-skeleton {
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 16 / 13;
   background:
-    linear-gradient(90deg, rgba(238, 247, 244, 0.72), rgba(255, 255, 255, 0.92), rgba(238, 247, 244, 0.72));
+    linear-gradient(90deg, rgba(234, 236, 247, 0.78), rgba(255, 255, 255, 0.96), rgba(234, 236, 247, 0.78));
   background-size: 220% 100%;
   animation: pc-skeleton 1.4s ease infinite;
 }
@@ -401,6 +432,22 @@ async function confirmDelete(item: TelegramDriveItem) {
 @media (max-width: 820px) {
   .pc-drive-toolbar {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .pc-drive-search {
+    grid-column: 1 / -1;
+  }
+
+  .pc-drive-search-button {
+    width: 100%;
+  }
+
+  .pc-drive-actions {
+    flex-wrap: wrap;
+  }
+
+  .pc-drive-path {
+    flex-basis: 50%;
   }
 }
 </style>

@@ -159,7 +159,7 @@ function clearLocalRecent() {
 <style scoped>
 .pc-recent-view {
   display: grid;
-  gap: 28px;
+  gap: 30px;
 }
 
 .pc-recent-section {
@@ -177,14 +177,15 @@ function clearLocalRecent() {
 .pc-recent-heading h2 {
   margin: 0;
   color: var(--pc-color-text);
-  font-size: 17px;
+  font-size: 16px;
+  font-weight: 700;
   line-height: 1.25;
 }
 
 .pc-recent-skeleton {
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 16 / 13;
   background:
-    linear-gradient(90deg, rgba(238, 247, 244, 0.72), rgba(255, 255, 255, 0.92), rgba(238, 247, 244, 0.72));
+    linear-gradient(90deg, rgba(234, 236, 247, 0.78), rgba(255, 255, 255, 0.96), rgba(234, 236, 247, 0.78));
   background-size: 220% 100%;
   animation: pc-recent-skeleton 1.4s ease infinite;
 }

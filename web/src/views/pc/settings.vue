@@ -57,7 +57,7 @@
       <div class="pc-settings-info-grid">
         <div>
           <span>主题</span>
-          <strong>清爽浅色</strong>
+          <strong>蓝紫浅色</strong>
         </div>
         <div>
           <span>版本</span>
@@ -191,13 +191,13 @@ function logout() {
 <style scoped>
 .pc-settings-view {
   display: grid;
-  gap: 14px;
+  gap: 12px;
 }
 
 .pc-settings-section {
   display: grid;
   gap: 14px;
-  padding: 16px;
+  padding: 17px 18px;
 }
 
 .pc-settings-section-heading {
@@ -268,7 +268,7 @@ function logout() {
   padding: 12px;
   border: 1px solid var(--pc-color-border);
   border-radius: var(--pc-radius-md);
-  background: #f3f8f6;
+  background: #f5f6fa;
   color: var(--pc-color-text);
   font-size: 12px;
   line-height: 1.5;

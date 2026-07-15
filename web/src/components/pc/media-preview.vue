@@ -158,7 +158,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr) 64px;
   grid-template-rows: 58px minmax(0, 1fr);
-  background: rgba(18, 28, 32, 0.92);
+  background: rgba(24, 25, 40, 0.94);
   color: #ffffff;
 }
 
@@ -170,6 +170,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
   align-items: center;
   padding: 8px 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(31, 32, 51, 0.72);
+  backdrop-filter: blur(16px);
 }
 
 .pc-preview-title {

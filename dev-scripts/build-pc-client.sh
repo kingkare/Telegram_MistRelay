@@ -13,14 +13,32 @@ fi
 cd "$WEB_DIR"
 
 VERSION="$(node -p "require('./package.json').version")"
+TARGET=""
+TAURI_BUILD_ARGS=()
+
+if [[ "$(uname -s)" == "Linux" ]]; then
+  TARGET="x86_64-pc-windows-msvc"
+  TAURI_BUILD_ARGS+=(--runner cargo-xwin --target "$TARGET")
+
+  for command_name in cargo rustup cargo-xwin llvm-rc makensis; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+      echo "Required command not found: $command_name" >&2
+      exit 1
+    fi
+  done
+fi
 
 if [[ "$SKIP_CHECKS" != "1" ]]; then
   npm run check
 fi
 
-npm run tauri:build
+npm run tauri:build -- "${TAURI_BUILD_ARGS[@]}"
 
-RELEASE_DIR="$TAURI_DIR/target/release"
+if [[ -n "$TARGET" ]]; then
+  RELEASE_DIR="$TAURI_DIR/target/$TARGET/release"
+else
+  RELEASE_DIR="$TAURI_DIR/target/release"
+fi
 EXE_PATH="$RELEASE_DIR/mistrelay-pc-client.exe"
 if [[ ! -f "$EXE_PATH" ]]; then
   EXE_PATH="$RELEASE_DIR/mistrelay-pc-client"

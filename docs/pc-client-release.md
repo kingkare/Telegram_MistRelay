@@ -11,7 +11,7 @@ Windows 打包机需要准备：
 - Tauri v2 所需 Windows 构建工具。
 - 可选：`zip` 或 PowerShell `Compress-Archive`，用于生成便携包。
 
-Linux 环境只能做前端检查；若要运行 Tauri build，需要安装 Rust/Cargo 以及 Tauri Linux 依赖，例如 WebKitGTK 和 librsvg。
+Linux 可以通过 `cargo-xwin` 交叉编译 Windows x64 NSIS 安装包。Ubuntu/Debian 构建机需要安装 `clang`、`lld`、`llvm`、`nsis` 和 `zip`，并准备 Rust stable、`x86_64-pc-windows-msvc` target 与 `cargo-xwin`。
 
 ## 2. 检查命令
 
@@ -68,6 +68,23 @@ Bash / Git Bash：
 ./dev-scripts/build-pc-client.sh
 ```
 
+在 Linux 上执行同一个 Bash 脚本时，会自动使用：
+
+```bash
+tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc
+```
+
+Ubuntu/Debian 首次构建前安装工具链：
+
+```bash
+sudo apt update
+sudo apt install -y build-essential clang lld llvm nsis curl zip
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+source "$HOME/.cargo/env"
+rustup target add x86_64-pc-windows-msvc
+cargo install --locked cargo-xwin
+```
+
 跳过前端检查：
 
 ```powershell
@@ -82,14 +99,16 @@ Bash / Git Bash：
 
 1. 读取 `web/package.json` 版本。
 2. 执行 `npm run check`。
-3. 执行 `npm run tauri:build`。
+3. Windows 原生环境执行 `npm run tauri:build`；Linux 环境使用 `cargo-xwin` 交叉编译 Windows x64 目标。
 4. 使用 Tauri NSIS bundle 输出安装包。
 5. 将 release exe 打成 zip 便携包。
 
 产物路径：
 
-- 安装包：`web/src-tauri/target/release/bundle/nsis/`
-- 便携包：`web/src-tauri/target/release/bundle/portable/MistRelay-PC-Client-<version>-windows-x64-portable.zip`
+- Windows 原生安装包：`web/src-tauri/target/release/bundle/nsis/`
+- Windows 原生便携包：`web/src-tauri/target/release/bundle/portable/MistRelay-PC-Client-<version>-windows-x64-portable.zip`
+- Linux 交叉编译安装包：`web/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`
+- Linux 交叉编译便携包：`web/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/portable/MistRelay-PC-Client-<version>-windows-x64-portable.zip`
 
 ## 5. 发布前清单
 

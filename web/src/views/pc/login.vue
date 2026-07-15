@@ -9,7 +9,7 @@
         <span class="pc-login-mark">M</span>
         <div>
           <h1>MistRelay</h1>
-          <p>PC Client</p>
+          <p>桌面客户端</p>
         </div>
       </div>
 
@@ -203,20 +203,28 @@ async function handleLogin() {
 <style scoped>
 .pc-login-page {
   display: grid;
-  grid-template-columns: minmax(420px, 1fr) minmax(360px, 430px);
+  grid-template-columns: minmax(460px, 1fr) minmax(360px, 420px);
   align-items: center;
-  gap: 44px;
+  gap: clamp(36px, 5vw, 76px);
   min-height: 100vh;
-  padding: 42px clamp(24px, 6vw, 82px);
+  padding: 42px clamp(28px, 6vw, 88px);
+  background: #f8f9fc;
 }
 
 .pc-login-visual {
+  position: relative;
   min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--pc-color-border);
+  border-radius: var(--pc-radius-md);
+  background: var(--pc-color-surface);
+  box-shadow: 0 18px 44px rgba(55, 61, 94, 0.1);
 }
 
 .pc-login-panel {
   width: 100%;
-  padding: 28px;
+  padding: 30px;
+  box-shadow: 0 14px 38px rgba(55, 61, 94, 0.08);
 }
 
 .pc-login-heading {
@@ -232,9 +240,10 @@ async function handleLogin() {
   width: 40px;
   height: 40px;
   border-radius: var(--pc-radius-md);
-  background: var(--pc-color-primary);
+  background: var(--pc-gradient-brand);
   color: #ffffff;
   font-weight: 800;
+  box-shadow: 0 7px 16px rgba(89, 101, 215, 0.24);
 }
 
 .pc-login-heading h1 {

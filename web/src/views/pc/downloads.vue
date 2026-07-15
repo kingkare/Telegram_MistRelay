@@ -325,10 +325,33 @@ async function clearFinished() {
 }
 
 .pc-download-stat {
+  position: relative;
   display: grid;
   gap: 4px;
   min-height: 72px;
-  padding: 12px;
+  padding: 13px 14px 12px 17px;
+  overflow: hidden;
+}
+
+.pc-download-stat::before {
+  position: absolute;
+  inset: 12px auto 12px 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--pc-color-primary);
+  content: "";
+}
+
+.pc-download-stat:nth-child(2)::before {
+  background: var(--pc-color-warning);
+}
+
+.pc-download-stat:nth-child(3)::before {
+  background: var(--pc-color-success);
+}
+
+.pc-download-stat:nth-child(4)::before {
+  background: var(--pc-color-accent);
 }
 
 .pc-download-stat span {
@@ -357,7 +380,13 @@ async function clearFinished() {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
-  padding: 14px;
+  padding: 15px;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.pc-download-task:hover {
+  border-color: #d2d5ed;
+  box-shadow: 0 6px 18px rgba(55, 61, 94, 0.07);
 }
 
 .pc-download-task-main {
@@ -374,7 +403,7 @@ async function clearFinished() {
   height: 44px;
   border: 1px solid var(--pc-color-border);
   border-radius: var(--pc-radius-md);
-  background: var(--pc-color-surface-soft);
+  background: var(--pc-color-primary-soft);
   color: var(--pc-color-primary-strong);
 }
 

@@ -1,0 +1,14 @@
+Use case: ui-mockup
+Asset type: high-fidelity fictional desktop cloud-drive application design concept
+
+Create a front-facing 16:9 screenshot of a fictional Windows desktop cloud-drive application. Use entirely invented placeholder content and no real user data, no real product name, no server information, no organization details, and no proprietary text.
+
+The design should feel like premium desktop productivity software combined with restrained mature anime-tech art direction: cool white background, white surfaces, soft blue-to-violet accents, subtle borders, gentle shadows, 6-8px corner radii, clear typography, compact professional information density, and precise Figma-quality alignment. It must look like a real usable software interface, not a marketing page or concept-art scene.
+
+Layout: a slim light sidebar with a small abstract fictional logo and four generic navigation icons; a simple top bar; two compact rows of search, filter, sort, view-mode, and refresh controls; a dense six-column file grid with invented photo thumbnails, video thumbnails, document icons, audio icons, and a few media-album cards; a compact paginator at the bottom. Use only generic placeholder labels or simple icons. Do not render any real names, URLs, credentials, IDs, or recognizable company/product branding.
+
+Anime accent: no mascot in the populated file view. Express the anime-tech quality only through refined illustration-like thumbnail art, precise line work, soft volumetric light, and subtle blue-violet brand details. Characters shown inside invented thumbnails must be clearly adult, fully clothed, original, calm, and professional, with no resemblance to existing IP.
+
+Keep white and neutral gray above 80% of the canvas. Blue and violet are small interaction accents, not a full-screen purple theme. Use restrained semantic green, amber, and red only where needed.
+
+Avoid: real data, real product names, real company branding, URLs, credentials, file IDs, personal names, admin dashboards, upload, share, collaboration, batch management, AI assistant, dark sidebar, neon cyberpunk, glassmorphism, decorative gradient orbs, oversized radius, giant anime character, chibi, cat ears, school uniform, existing anime IP, Figma editor chrome, browser chrome, device mockup, perspective tilt, marketing poster, watermark, gibberish, overlap, and clipped text.

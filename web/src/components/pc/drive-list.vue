@@ -1,5 +1,12 @@
 <template>
   <div class="pc-list pc-drive-list">
+    <div class="pc-drive-list-header" aria-hidden="true">
+      <span>名称</span>
+      <span>类型</span>
+      <span>大小</span>
+      <span>日期</span>
+      <span></span>
+    </div>
     <div
       v-for="item in items"
       :key="getItemKey(item)"
@@ -116,6 +123,20 @@ function isAudio(item: TelegramDriveItem): boolean {
   cursor: pointer;
 }
 
+.pc-drive-list-header {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 96px 128px 156px 40px;
+  gap: 12px;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--pc-color-border);
+  background: var(--pc-color-surface-soft);
+  color: var(--pc-color-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
 .pc-drive-list-delete {
   display: inline-grid;
   place-items: center;
@@ -134,7 +155,13 @@ function isAudio(item: TelegramDriveItem): boolean {
 }
 
 .pc-drive-list-row:hover {
-  background: var(--pc-color-surface-soft);
+  background: #f7f7fc;
+}
+
+.pc-drive-list-row:focus-visible {
+  position: relative;
+  outline: 2px solid var(--pc-color-primary);
+  outline-offset: -2px;
 }
 
 .pc-drive-list-name {
@@ -162,5 +189,19 @@ function isAudio(item: TelegramDriveItem): boolean {
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 820px) {
+  .pc-drive-list-header,
+  .pc-drive-list-row {
+    grid-template-columns: minmax(180px, 1fr) 92px 40px;
+  }
+
+  .pc-drive-list-header span:nth-child(2),
+  .pc-drive-list-header span:nth-child(4),
+  .pc-drive-list-row > span:nth-child(2),
+  .pc-drive-list-row > span:nth-child(4) {
+    display: none;
+  }
 }
 </style>
