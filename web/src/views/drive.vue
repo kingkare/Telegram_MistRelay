@@ -72,6 +72,44 @@
         </el-breadcrumb>
       </div>
 
+      <div v-if="items.length" class="selection-toolbar">
+        <el-checkbox
+          :model-value="allPageSelected"
+          :indeterminate="somePageSelected"
+          :disabled="loading || batchDeleting"
+          @change="toggleSelectPage(Boolean($event))"
+        >
+          全选本页
+        </el-checkbox>
+        <span class="selection-count">已选 {{ selectedItems.length }} 项</span>
+        <div class="selection-actions">
+          <el-button
+            :icon="Download"
+            :disabled="selectedFiles.length === 0 || loading || batchDeleting"
+            @click="handleBatchDownload"
+          >
+            下载文件<span v-if="selectedFiles.length">（{{ selectedFiles.length }}）</span>
+          </el-button>
+          <el-button
+            type="danger"
+            :icon="Delete"
+            :disabled="selectedItems.length === 0 || loading"
+            :loading="batchDeleting"
+            @click="handleBatchDelete"
+          >
+            批量删除<span v-if="selectedItems.length">（{{ selectedItems.length }}）</span>
+          </el-button>
+          <el-button
+            v-if="selectedItems.length"
+            text
+            :disabled="batchDeleting"
+            @click="clearSelection"
+          >
+            取消选择
+          </el-button>
+        </div>
+      </div>
+
       <el-table
         v-if="viewMode === 'list'"
         :data="items"
@@ -80,6 +118,27 @@
         @row-click="handleOpen"
         :row-style="{ cursor: 'pointer' }"
       >
+        <el-table-column width="48" align="center">
+          <template #header>
+            <el-checkbox
+              :model-value="allPageSelected"
+              :indeterminate="somePageSelected"
+              :disabled="loading || batchDeleting"
+              aria-label="全选本页"
+              @click.stop
+              @change="toggleSelectPage(Boolean($event))"
+            />
+          </template>
+          <template #default="{ row }">
+            <el-checkbox
+              :model-value="isSelected(row)"
+              :disabled="batchDeleting"
+              :aria-label="`选择 ${getFileName(row)}`"
+              @click.stop
+              @change="toggleItemSelection(row, Boolean($event))"
+            />
+          </template>
+        </el-table-column>
         <el-table-column label="名称" min-width="260">
           <template #default="{ row }">
             <div class="file-name">
@@ -129,7 +188,21 @@
       </el-table>
 
       <div v-else v-loading="loading" class="grid-view">
-        <div v-for="item in items" :key="getItemKey(item)" class="grid-item" @click="handleOpen(item)">
+        <div
+          v-for="item in items"
+          :key="getItemKey(item)"
+          class="grid-item"
+          :class="{ 'is-selected': isSelected(item) }"
+          @click="handleOpen(item)"
+        >
+          <el-checkbox
+            class="grid-item-checkbox"
+            :model-value="isSelected(item)"
+            :disabled="batchDeleting"
+            :aria-label="`选择 ${getFileName(item)}`"
+            @click.stop
+            @change="toggleItemSelection(item, Boolean($event))"
+          />
           <div class="grid-item-preview">
             <el-image v-if="!isFolder(item) && isImage(item)" :src="getStreamUrl(item)" fit="cover" class="grid-thumbnail" lazy>
               <template #error><el-icon :size="44"><Picture /></el-icon></template>
@@ -205,6 +278,7 @@ import { ArrowLeft, Delete, Document, Download, Folder, Grid, Headset, List, Pic
 import {
   browseTelegramDrive,
   clearTelegramDrive,
+  deleteTelegramBatch,
   deleteTelegramGroup,
   deleteTelegramItem,
   getTelegramUsage,
@@ -234,8 +308,18 @@ const previewType = ref<'image' | 'video' | 'unknown'>('unknown')
 const previewUrl = ref('')
 const currentMediaGroupId = ref('')
 const currentFolderName = ref('')
+const selectedKeys = ref(new Set<string>())
+const batchDeleting = ref(false)
 
 const isInsideGroup = computed(() => Boolean(currentMediaGroupId.value))
+const selectedItems = computed(() => items.value.filter(item => selectedKeys.value.has(getItemKey(item))))
+const selectedFiles = computed(() => selectedItems.value.filter(isFile))
+const allPageSelected = computed(() => (
+  items.value.length > 0 && items.value.every(item => selectedKeys.value.has(getItemKey(item)))
+))
+const somePageSelected = computed(() => (
+  selectedItems.value.length > 0 && !allPageSelected.value
+))
 
 const sortParams = computed(() => {
   const [sortBy, order] = sortOption.value.split('-')
@@ -278,6 +362,28 @@ function getDownloadFileName(item?: TelegramDriveItem | null): string {
 
 function getItemKey(item: TelegramDriveItem): string {
   return isFolder(item) ? `folder-${item.media_group_id}` : item.file_unique_id
+}
+
+function isSelected(item: TelegramDriveItem): boolean {
+  return selectedKeys.value.has(getItemKey(item))
+}
+
+function clearSelection() {
+  selectedKeys.value = new Set()
+}
+
+function toggleItemSelection(item: TelegramDriveItem, selected: boolean) {
+  const next = new Set(selectedKeys.value)
+  const key = getItemKey(item)
+  if (selected) next.add(key)
+  else next.delete(key)
+  selectedKeys.value = next
+}
+
+function toggleSelectPage(selected: boolean) {
+  selectedKeys.value = selected
+    ? new Set(items.value.map(getItemKey))
+    : new Set()
 }
 
 function getStreamUrl(item: TelegramDriveItem): string {
@@ -353,6 +459,7 @@ async function loadUsage() {
 }
 
 async function loadItems() {
+  clearSelection()
   loading.value = true
   try {
     const response = await browseTelegramDrive({
@@ -434,6 +541,35 @@ function handleDownload(item: TelegramDriveItem) {
   link.remove()
 }
 
+function handleBatchDownload() {
+  const files = selectedFiles.value
+  if (!files.length) return
+
+  let started = 0
+  for (const item of files) {
+    const url = getDownloadUrl(item)
+    if (!url) continue
+
+    const link = document.createElement('a')
+    link.href = url
+    link.download = getDownloadFileName(item)
+    link.target = '_blank'
+    link.rel = 'noopener noreferrer'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    started += 1
+  }
+
+  const skippedFolders = selectedItems.value.length - files.length
+  if (started) {
+    ElMessage.success(`已开始下载 ${started} 个文件`)
+  }
+  if (skippedFolders) {
+    ElMessage.info(`已跳过 ${skippedFolders} 个媒体组文件夹`)
+  }
+}
+
 function handleOpen(item: TelegramDriveItem) {
   if (isFolder(item)) {
     enterFolder(item)
@@ -505,6 +641,43 @@ async function handleDelete(item: TelegramDriveItem) {
     }
   } finally {
     loading.value = false
+  }
+}
+
+async function handleBatchDelete() {
+  const selection = selectedItems.value
+  if (!selection.length) return
+
+  const messageIds = selection.filter(isFile).map(item => item.message_id)
+  const mediaGroupIds = selection.filter(isFolder).map(item => item.media_group_id)
+
+  try {
+    await ElMessageBox.confirm(
+      `确定删除已选 ${selection.length} 项吗？媒体组文件夹会连同组内频道消息一起删除。`,
+      '批量删除',
+      {
+        confirmButtonText: '删除所选',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+
+    batchDeleting.value = true
+    const response = await deleteTelegramBatch({
+      message_ids: messageIds,
+      media_group_ids: mediaGroupIds,
+    })
+    if (!response.success) throw new Error(response.error || '批量删除失败')
+
+    clearSelection()
+    ElMessage.success(response.message || `已删除 ${selection.length} 项`)
+    await refreshAll()
+  } catch (error: any) {
+    if (error === 'cancel' || error === 'close') return
+    console.error('批量删除 TG 网盘文件失败:', error)
+    ElMessage.error(error.response?.data?.error || error.message || '批量删除失败')
+  } finally {
+    batchDeleting.value = false
   }
 }
 
@@ -609,6 +782,31 @@ onMounted(refreshAll)
   text-decoration: underline;
 }
 
+.selection-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  margin-top: 12px;
+  padding: 6px 10px;
+  border: 1px solid #dbe2ea;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.selection-count {
+  color: #64748b;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .file-name {
   display: flex;
   align-items: center;
@@ -636,6 +834,27 @@ onMounted(refreshAll)
   border-color: #409eff;
   box-shadow: 0 8px 18px rgba(64, 158, 255, 0.14);
   transform: translateY(-2px);
+}
+
+.grid-item.is-selected {
+  border-color: #409eff;
+  background: #f0f7ff;
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.14);
+}
+
+.grid-item-checkbox {
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  left: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
 }
 
 .grid-item-preview {
@@ -713,6 +932,22 @@ onMounted(refreshAll)
   .pagination-container {
     justify-content: flex-start;
     overflow-x: auto;
+  }
+
+  .selection-toolbar,
+  .selection-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .selection-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .selection-actions :deep(.el-button) {
+    width: 100%;
+    margin-left: 0;
   }
 
   .video-container,

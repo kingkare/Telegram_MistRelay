@@ -142,6 +142,7 @@ JWT 特性：
 | `GET` | `/api/telegram/usage` | 是 | TG 频道网盘统计 |
 | `DELETE` | `/api/telegram/item/{message_id}` | 是 | 删除单个 TG 文件 |
 | `DELETE` | `/api/telegram/group/{media_group_id}` | 是 | 删除媒体组文件夹 |
+| `POST` | `/api/telegram/batch/delete` | 是 | 删除当前选择的 TG 文件和媒体组 |
 | `DELETE` | `/api/telegram/all` | 是 | 清空 TG 频道网盘 |
 | `GET` | `/api/files/list` | 是 | 本地文件列表 |
 | `GET` | `/api/files/download` | 是 | 本地文件下载 |
@@ -1595,7 +1596,39 @@ curl -X DELETE "$BASE_URL/api/telegram/group/12345678901234567" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-### 9.5 `DELETE /api/telegram/all`
+### 9.5 `POST /api/telegram/batch/delete`
+
+批量删除选中的 Telegram 文件和媒体组。单次最多提交 200 个所选项目；媒体组会在服务端展开，和单文件一起去重后删除频道消息及关联记录。
+
+请求体：
+
+```json
+{
+  "message_ids": [12345, 12346],
+  "media_group_ids": ["12345678901234567"]
+}
+```
+
+成功响应中的 `matched_file_count` 是媒体组展开并去重后的频道文件数。已不存在的选择会分别出现在 `missing_message_ids` 和 `missing_media_group_ids`，只要至少匹配到一个文件，其他有效选择仍会完成删除。
+
+```json
+{
+  "success": true,
+  "message": "已删除 7 个频道文件",
+  "data": {
+    "selected_item_count": 3,
+    "matched_file_count": 7,
+    "deleted_message_count": 7,
+    "deleted_media": 7,
+    "deleted_downloads": 2,
+    "deleted_uploads": 1,
+    "missing_message_ids": [],
+    "missing_media_group_ids": []
+  }
+}
+```
+
+### 9.6 `DELETE /api/telegram/all`
 
 清空整个 Telegram 频道网盘。
 

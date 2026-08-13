@@ -11,6 +11,7 @@ import type {
   SystemResourcesResponse,
   TelegramBrowseParams,
   TelegramBrowseResponse,
+  TelegramBatchDeleteRequest,
   TelegramDeleteResponse,
   TelegramUsageResponse,
   UploadRecord
@@ -30,6 +31,7 @@ import { notifyPc } from '@/utils/pcNotifications'
 export type {
   TelegramBrowseParams,
   TelegramBrowseResponse,
+  TelegramBatchDeleteRequest,
   TelegramDeleteResponse,
   TelegramDriveFile,
   TelegramDriveFolder,
@@ -361,6 +363,10 @@ export function deleteTelegramItem(messageId: number): Promise<TelegramDeleteRes
 
 export function deleteTelegramGroup(mediaGroupId: string): Promise<TelegramDeleteResponse> {
   return api.delete<TelegramDeleteResponse>(`/telegram/group/${mediaGroupId}`).then(response => response.data)
+}
+
+export function deleteTelegramBatch(payload: TelegramBatchDeleteRequest): Promise<TelegramDeleteResponse> {
+  return api.post<TelegramDeleteResponse>('/telegram/batch/delete', payload).then(response => response.data)
 }
 
 export function clearTelegramDrive(): Promise<TelegramDeleteResponse> {

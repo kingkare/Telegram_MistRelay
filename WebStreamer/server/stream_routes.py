@@ -2865,6 +2865,96 @@ async def telegram_delete_group_handler(request: web.Request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
+@routes.post("/api/telegram/batch/delete")
+async def telegram_batch_delete_handler(request: web.Request):
+    """Delete selected files and media groups in one bounded operation."""
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return web.json_response({"success": False, "error": "请求数据格式错误"}, status=400)
+
+        raw_message_ids = payload.get("message_ids", [])
+        raw_group_ids = payload.get("media_group_ids", [])
+        if not isinstance(raw_message_ids, list) or not isinstance(raw_group_ids, list):
+            return web.json_response({
+                "success": False,
+                "error": "message_ids 和 media_group_ids 必须使用列表格式",
+            }, status=400)
+        if len(raw_message_ids) + len(raw_group_ids) > 200:
+            return web.json_response({
+                "success": False,
+                "error": "单次最多删除 200 个所选项目",
+            }, status=400)
+
+        message_ids = []
+        for value in raw_message_ids:
+            if isinstance(value, bool):
+                raise ValueError("message_id 格式错误")
+            message_id = int(value)
+            if message_id <= 0:
+                raise ValueError("message_id 格式错误")
+            message_ids.append(message_id)
+        message_ids = list(dict.fromkeys(message_ids))
+
+        group_ids = []
+        for value in raw_group_ids:
+            if not isinstance(value, str) or not value.strip() or len(value.strip()) > 128:
+                raise ValueError("media_group_id 格式错误")
+            group_ids.append(value.strip())
+        group_ids = list(dict.fromkeys(group_ids))
+
+        if not message_ids and not group_ids:
+            return web.json_response({"success": False, "error": "请至少选择一个项目"}, status=400)
+
+        records_by_file_id = {}
+        missing_message_ids = []
+        missing_group_ids = []
+
+        for message_id in message_ids:
+            record = get_tg_media_record_by_message_id(message_id)
+            if record:
+                records_by_file_id[record["file_unique_id"]] = record
+            else:
+                missing_message_ids.append(message_id)
+
+        for group_id in group_ids:
+            records = get_tg_media_records_by_media_group(group_id)
+            if not records:
+                missing_group_ids.append(group_id)
+                continue
+            for record in records:
+                records_by_file_id[record["file_unique_id"]] = record
+
+        records = list(records_by_file_id.values())
+        if not records:
+            return web.json_response({
+                "success": False,
+                "error": "所选 Telegram 文件或媒体组不存在",
+            }, status=404)
+
+        deletion = await delete_bin_channel_messages([
+            record["message_id"] for record in records
+        ])
+        cleanup = delete_tg_media_records(list(records_by_file_id))
+        return web.json_response({
+            "success": True,
+            "message": f"已删除 {len(records)} 个频道文件",
+            "data": {
+                **cleanup,
+                **deletion,
+                "selected_item_count": len(message_ids) + len(group_ids),
+                "matched_file_count": len(records),
+                "missing_message_ids": missing_message_ids,
+                "missing_media_group_ids": missing_group_ids,
+            },
+        })
+    except (TypeError, ValueError) as error:
+        return web.json_response({"success": False, "error": str(error)}, status=400)
+    except Exception as error:
+        logger.error("Telegram batch delete API error: %s", error, exc_info=True)
+        return web.json_response({"success": False, "error": str(error)}, status=500)
+
+
 @routes.delete("/api/telegram/all")
 async def telegram_clear_all_handler(request: web.Request):
     """清空整个 tg 网盘：删除频道消息并清理 tg_media/downloads/uploads 记录。"""

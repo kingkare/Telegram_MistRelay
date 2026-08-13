@@ -146,6 +146,14 @@ class FakeRequest(dict):
         self.method = method
 
 
+class FakeJsonRequest:
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def json(self):
+        return self.payload
+
+
 class TelegramThumbnailTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
@@ -326,6 +334,87 @@ class TelegramThumbnailTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.body["data"]["MULTI_BOT_TOKENS"], [])
         self.assertEqual(response.body["secret_counts"]["MULTI_BOT_TOKENS"], 2)
         self.assertNotIn("MULTI_BOT_TOKENS", response.body["offline_only_keys"])
+
+    async def test_batch_delete_expands_groups_and_deduplicates_records(self):
+        deleted_message_ids = []
+        deleted_file_ids = []
+
+        async def fake_delete_messages(message_ids):
+            deleted_message_ids.extend(message_ids)
+            return {
+                "deleted_message_count": len(message_ids),
+                "cleanup_only": False,
+                "client_index": 0,
+            }
+
+        def fake_get_record(message_id):
+            if message_id == 101:
+                return {"file_unique_id": "file-a", "message_id": 101}
+            return None
+
+        def fake_get_group(group_id):
+            if group_id != "group-a":
+                return []
+            return [
+                {"file_unique_id": "file-a", "message_id": 101},
+                {"file_unique_id": "file-b", "message_id": 102},
+            ]
+
+        def fake_cleanup(file_ids):
+            deleted_file_ids.extend(file_ids)
+            return {
+                "deleted_media": len(file_ids),
+                "deleted_downloads": 0,
+                "deleted_uploads": 0,
+            }
+
+        request = FakeJsonRequest({
+            "message_ids": [101, 101, 999],
+            "media_group_ids": ["group-a", "group-a", "missing-group"],
+        })
+        with patch.object(
+            self.routes,
+            "get_tg_media_record_by_message_id",
+            side_effect=fake_get_record,
+        ), patch.object(
+            self.routes,
+            "get_tg_media_records_by_media_group",
+            side_effect=fake_get_group,
+        ), patch.object(
+            self.routes,
+            "delete_bin_channel_messages",
+            side_effect=fake_delete_messages,
+        ), patch.object(
+            self.routes,
+            "delete_tg_media_records",
+            side_effect=fake_cleanup,
+        ):
+            response = await self.routes.telegram_batch_delete_handler(request)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(deleted_message_ids, [101, 102])
+        self.assertEqual(deleted_file_ids, ["file-a", "file-b"])
+        self.assertEqual(response.body["data"]["matched_file_count"], 2)
+        self.assertEqual(response.body["data"]["missing_message_ids"], [999])
+        self.assertEqual(
+            response.body["data"]["missing_media_group_ids"],
+            ["missing-group"],
+        )
+
+    async def test_batch_delete_rejects_empty_or_oversized_selections(self):
+        empty_response = await self.routes.telegram_batch_delete_handler(
+            FakeJsonRequest({"message_ids": [], "media_group_ids": []})
+        )
+        self.assertEqual(empty_response.status, 400)
+
+        oversized_response = await self.routes.telegram_batch_delete_handler(
+            FakeJsonRequest({
+                "message_ids": list(range(1, 202)),
+                "media_group_ids": [],
+            })
+        )
+        self.assertEqual(oversized_response.status, 400)
+        self.assertIn("200", oversized_response.body["error"])
 
 
 if __name__ == "__main__":

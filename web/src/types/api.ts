@@ -231,6 +231,11 @@ export interface TelegramDeleteResponse {
   error?: string
 }
 
+export interface TelegramBatchDeleteRequest {
+  message_ids: number[]
+  media_group_ids: string[]
+}
+
 export function isTelegramDriveFile(
   item?: TelegramDriveItem | null,
 ): item is TelegramDriveFile {
