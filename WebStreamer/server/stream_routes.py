@@ -625,11 +625,23 @@ async def root_route_handler(request: web.Request):
 async def docker_status_handler(request: web.Request):
     """获取Docker容器状态"""
     if not DOCKER_CONTROL_ENABLED:
-        return web.json_response({
-            "success": False,
-            "in_docker": os.path.exists("/.dockerenv"),
-            "error": "Docker 控制接口已禁用",
-        }, status=403)
+        in_docker = os.path.exists("/.dockerenv")
+        payload = {
+            "success": True,
+            "in_docker": in_docker,
+            "status": "running",
+            "status_source": "application",
+            "control_enabled": False,
+            "control_message": "宿主 Docker 控制未启用，当前状态来自应用自检",
+            "created": datetime.fromtimestamp(StartTime).astimezone().isoformat(),
+            "application_version": f"v{__version__}",
+        }
+        if in_docker:
+            payload["container_name"] = (
+                os.environ.get("MISTRELAY_CONTAINER_NAME", "mistrelay").strip()
+                or "mistrelay"
+            )
+        return web.json_response(payload)
     try:
         # 检查是否在Docker容器内
         if not os.path.exists("/.dockerenv"):
@@ -710,7 +722,10 @@ async def docker_status_handler(request: web.Request):
                     "container_name": container.name,
                     "status": container.status,
                     "image": container.image.tags[0] if container.image.tags else container.image.id,
-                    "created": container.attrs.get("Created", "")
+                    "created": container.attrs.get("Created", ""),
+                    "status_source": "docker",
+                    "control_enabled": True,
+                    "application_version": f"v{__version__}",
                 })
             else:
                 return web.json_response({

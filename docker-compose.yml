@@ -40,6 +40,7 @@ services:
       - HOME=/home/mistrelay
       - XDG_CACHE_HOME=/tmp/.cache
       - MISTRELAY_FILE_ROOT=/data/downloads
+      - MISTRELAY_CONTAINER_NAME=mistrelay
       - MISTRELAY_SESSION_DIR=/app/db/sessions
       - MISTRELAY_ADMIN_PASSWORD_FILE=/app/db/admin-password
       - MISTRELAY_LOG_RETENTION_DAYS=90

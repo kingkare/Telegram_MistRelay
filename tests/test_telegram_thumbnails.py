@@ -288,6 +288,28 @@ class TelegramThumbnailTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.body["logs"], "first\nsecond")
         self.assertEqual(response.body["lines"], 2)
 
+    async def test_docker_status_uses_application_self_check_without_socket(self):
+        with patch.object(self.routes, "DOCKER_CONTROL_ENABLED", False), patch.object(
+            self.routes.os.path,
+            "exists",
+            return_value=True,
+        ), patch.dict(
+            self.routes.os.environ,
+            {"MISTRELAY_CONTAINER_NAME": "mistrelay-test"},
+        ):
+            response = await self.routes.docker_status_handler(None)
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.body["success"])
+        self.assertTrue(response.body["in_docker"])
+        self.assertEqual(response.body["container_name"], "mistrelay-test")
+        self.assertEqual(response.body["status"], "running")
+        self.assertEqual(response.body["status_source"], "application")
+        self.assertFalse(response.body["control_enabled"])
+        self.assertIn("应用自检", response.body["control_message"])
+        self.assertEqual(response.body["application_version"], "vtest")
+        self.assertNotIn("error", response.body)
+
     async def test_config_handler_appends_redacted_multi_bot_tokens(self):
         existing = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
         addition = "234567:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"

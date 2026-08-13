@@ -555,7 +555,7 @@ curl -X POST "$BASE_URL/api/auth/password" \
 
 ## 4. 系统与 Docker 接口
 
-默认加固 Compose 不挂载 Docker socket，因此 `4.2-4.5` 的 Docker 状态、重启和日志接口会返回不可用，不能控制宿主 Docker。只有明确修改部署并承担等同宿主 root 的风险后，这些兼容接口才可能工作；生产环境不应这样做。
+默认加固 Compose 不挂载 Docker socket。状态接口会返回应用自检结果，日志接口会读取持久化应用日志；重启接口保持关闭，页面会明确显示宿主 Docker 控制未启用。
 
 ### 4.1 `GET /api/health`
 
@@ -587,25 +587,32 @@ curl "$BASE_URL/api/health"
   "in_docker": true,
   "container_name": "mistrelay",
   "status": "running",
-  "image": "mistrelay:latest",
-  "created": "2026-04-20T10:00:00.000000000Z"
+  "created": "2026-08-13T10:00:00+00:00",
+  "status_source": "application",
+  "control_enabled": false,
+  "control_message": "宿主 Docker 控制未启用，当前状态来自应用自检",
+  "application_version": "v2.2.5"
 }
 ```
 
-运行时失败通常仍返回 `200`：
+启用 Docker 控制且 Docker API 可访问时，`status_source` 为 `docker`、`control_enabled` 为 `true`，响应还会包含镜像名称。默认加固部署中的镜像名称为空，因为应用自检不会访问宿主 Docker API。
+
+非容器环境同样返回当前应用状态：
 
 ```json
 {
-  "success": false,
-  "error": "不在Docker容器内运行",
-  "in_docker": false
+  "success": true,
+  "in_docker": false,
+  "status": "running",
+  "status_source": "application",
+  "control_enabled": false
 }
 ```
 
 说明：
 
-- 该接口会尝试通过 cgroup、容器名 `mistrelay`、`HOSTNAME` 等方式查找当前容器
-- 如果 `docker` Python SDK 不可用，也会返回 `success: false`
+- 只读状态不依赖 Docker socket，默认使用当前应用进程的启动时间和运行状态
+- 启用 Docker 控制后，接口会尝试通过 cgroup、容器名 `mistrelay`、`HOSTNAME` 等方式查找当前容器
 
 示例：
 

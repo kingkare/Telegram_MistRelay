@@ -321,6 +321,12 @@
                   <el-descriptions-item label="镜像名称">
                     {{ dockerStatus.image || '-' }}
                   </el-descriptions-item>
+                  <el-descriptions-item label="状态来源">
+                    {{ dockerStatus.status_source === 'docker' ? 'Docker API' : '应用自检' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="应用版本">
+                    {{ dockerStatus.application_version || '-' }}
+                  </el-descriptions-item>
                   <el-descriptions-item label="创建时间">
                     {{ formatDate(dockerStatus.created) }}
                   </el-descriptions-item>
@@ -351,7 +357,7 @@
                   :icon="RefreshRight"
                   @click="handleRestart"
                   :loading="restarting"
-                  :disabled="!dockerStatus?.in_docker"
+                  :disabled="!dockerStatus?.control_enabled"
                   block
                   size="large"
                 >
@@ -359,8 +365,8 @@
                 </el-button>
 
                 <el-alert
-                  v-if="!dockerStatus?.in_docker"
-                  title="当前不在Docker容器内运行，无法执行容器操作"
+                  v-if="dockerStatus && !dockerStatus.control_enabled"
+                  :title="dockerStatus.control_message || '宿主 Docker 控制未启用'"
                   type="info"
                   :closable="false"
                   class="mt-4"
@@ -994,8 +1000,8 @@ function clearAppLogDisplay() {
 }
 
 function handleRestart() {
-  if (!dockerStatus.value?.in_docker) {
-    ElMessage.warning('当前不在Docker容器内运行')
+  if (!dockerStatus.value?.control_enabled) {
+    ElMessage.warning(dockerStatus.value?.control_message || '宿主 Docker 控制未启用')
     return
   }
 

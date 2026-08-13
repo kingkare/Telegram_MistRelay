@@ -91,6 +91,10 @@ export interface DockerStatus {
   status?: string
   image?: string
   created?: string
+  status_source?: 'docker' | 'application'
+  control_enabled?: boolean
+  control_message?: string
+  application_version?: string
   error?: string
 }
 
