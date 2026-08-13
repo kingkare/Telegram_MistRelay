@@ -22,7 +22,6 @@ import {
   getRefreshToken,
   isCurrentLoginRoute,
   redirectToLogin,
-  resolveServerUrl,
   setAuthToken,
   setRefreshToken,
 } from '@/utils/runtime'
@@ -199,10 +198,6 @@ export function getConfig(category?: string): Promise<ConfigResponse> {
 
 export function updateConfig(config: Record<string, any>): Promise<ConfigUpdateResponse> {
   return api.post<ConfigUpdateResponse>('/config', config).then(response => response.data)
-}
-
-export function reloadConfig(): Promise<ConfigUpdateResponse> {
-  return api.post<ConfigUpdateResponse>('/config/reload').then(response => response.data)
 }
 
 export interface QueueStatus {
@@ -407,11 +402,16 @@ export function getLogContent(params: {
   return api.get<LogContentResponse>('/logs', { params }).then(r => r.data)
 }
 
-export function getLogDownloadUrl(filename: string): string {
-  const token = getAuthToken()
-  return resolveServerUrl(
-    `/api/logs/download/${encodeURIComponent(filename)}?token=${encodeURIComponent(token)}`
-  )
+export async function downloadLogFile(filename: string): Promise<void> {
+  const response = await api.get<Blob>(`/logs/download/${encodeURIComponent(filename)}`, {
+    responseType: 'blob',
+  })
+  const objectUrl = URL.createObjectURL(response.data)
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(objectUrl)
 }
 
 // ==================== 用户认证 API ====================

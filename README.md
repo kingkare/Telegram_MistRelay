@@ -32,14 +32,14 @@ MistRelay 是一个基于 Telegram Bot 的 aria2 下载控制与 Telegram 频道
 - 集成 TG-FileStreamBot 风格的直链服务。
 - 支持完整链接和短链接。
 - 支持多 Bot 客户端负载均衡，降低单 Bot 直链读取压力。
-- 可通过 `STREAM_ALLOWED_USERS` 限制哪些 Telegram 用户能使用直链入库能力。
+- `STREAM_ALLOWED_USERS` 只接受不可转让的数字 Telegram 用户 ID；留空时拒绝所有入库请求。
 
 ### Web 管理界面
 
 - Vue 3 + Vite + Element Plus 前端。
-- JWT 登录，默认首次初始化会创建 `admin / admin123`，上线后必须立即修改密码。
+- JWT 登录；首次初始化必须通过 root-only 密码文件显式提供强管理员密码，不再创建默认密码。
 - 仪表盘、下载任务、上传任务、TG 网盘、系统状态、日志、配置页面。
-- Docker 容器状态、日志查看和重启能力依赖 Docker socket 挂载。
+- 生产容器不挂载 Docker socket，也不能从 Web 界面控制宿主 Docker。
 
 ### 数据与同步
 
@@ -74,6 +74,7 @@ cd MistRelay
 
 ```bash
 cp db/config.yml.example db/config.yml
+chmod 0600 db/config.yml
 ```
 
 最小配置示例：
@@ -86,18 +87,19 @@ ADMIN_ID: your_telegram_user_id
 BIN_CHANNEL: -100xxxxxxxxxx
 
 UP_TELEGRAM: true
-SAVE_PATH: /root/downloads
+SAVE_PATH: /data/downloads
 DOWNLOAD_CLEANUP_ENABLED: true
 DOWNLOAD_RETENTION_HOURS: 24
 DOWNLOAD_CLEANUP_INTERVAL_SECONDS: 3600
 
-RPC_SECRET: change_me_to_a_long_random_secret
+RPC_SECRET: "<openssl rand -hex 32 的输出>"
 RPC_URL: localhost:6800/jsonrpc
 
 ENABLE_STREAM: true
 STREAM_PORT: 8080
 STREAM_BIND_ADDRESS: 0.0.0.0
 STREAM_FQDN: your-domain.example
+STREAM_ALLOWED_USERS: "123456789"
 STREAM_AUTO_DOWNLOAD: false
 SEND_STREAM_LINK: false
 ```
@@ -109,7 +111,7 @@ SEND_STREAM_LINK: false
 | `UP_TELEGRAM` | 下载完成后是否上传到 Telegram 频道网盘。 |
 | `BIN_CHANNEL` | TG 频道网盘存储频道，直链和上传流程都依赖它。 |
 | `STREAM_FQDN` | 生成直链时使用的域名或公网 IP。 |
-| `STREAM_ALLOWED_USERS` | 允许使用直链入库的 Telegram 用户 ID/用户名，逗号分隔，留空表示不限制。 |
+| `STREAM_ALLOWED_USERS` | 允许使用直链入库的数字 Telegram 用户 ID，逗号分隔；留空时拒绝所有用户。 |
 | `STREAM_AUTO_DOWNLOAD` | 历史兼容开关；当前 TG 网盘媒体不会自动加入 aria2。 |
 | `SEND_STREAM_LINK` | 是否把生成的直链主动回复给 Telegram 用户。 |
 | `DOWNLOAD_CLEANUP_ENABLED` | 是否启用下载目录自动清理，默认启用。 |
@@ -117,29 +119,41 @@ SEND_STREAM_LINK: false
 | `DOWNLOAD_CLEANUP_INTERVAL_SECONDS` | 清理任务检查间隔，默认 `3600` 秒。 |
 | `SKIP_SMALL_FILES` / `MIN_FILE_SIZE_MB` | 下载链路的小文件过滤配置。 |
 | `MAX_CONCURRENT_MESSAGES` | Telegram 媒体消息队列的最大并发处理数。 |
+| `MAX_MESSAGE_QUEUE_SIZE` | Telegram 媒体等待队列硬上限，默认 `100`，运行时限制为 `1-1000`。 |
 | `MULTI_BOT_TOKENS` | 额外 Bot Token 列表，用于直链读取负载均衡。 |
 
 ### 3. Docker 部署
 
 ```bash
-docker compose up -d --build
+install -d -m 0750 db downloads cache/thumbnails
+chown -R 10001:10001 db downloads cache/thumbnails
+chmod 0600 db/config.yml
+umask 077
+openssl rand -base64 24 > db/admin-password
+chown 10001:10001 db/admin-password
+chmod 0600 db/admin-password
+# 另用 `openssl rand -hex 32` 生成 RPC_SECRET 并写入 db/config.yml。
+docker compose build
+docker compose run --rm --no-deps \
+  -e MISTRELAY_ALLOW_LEGACY_YAML_BOOTSTRAP=1 \
+  mistrelay python3 bootstrap_legacy.py
+docker compose up -d --no-build
 docker compose logs -f --tail=100
 ```
 
-默认使用 host 网络，服务监听 `8080`：
+旧 YAML 只允许通过上面的单次离线命令导入。命令会校验 owner-only 权限、把配置写入 SQLite 并将 `db/config.yml` 替换为空的退休占位文件。不要把 `MISTRELAY_ALLOW_LEGACY_YAML_BOOTSTRAP=1` 写入 Compose 或长期环境；正常启动在数据库缺失、为空或读取失败时都会拒绝回退到 YAML。
+
+Compose 会拒绝自动创建缺失的 bind 目录，目录必须预先存在并由容器 UID/GID `10001:10001` 可写。容器使用 bridge 网络，只把 Web 端口发布到宿主回环地址；aria2 RPC 不对宿主发布：
 
 ```text
-http://your-server:8080
+http://127.0.0.1:8080
 ```
 
-首次登录：
+首次登录用户名为 `admin`，密码是 `db/admin-password` 中的值。确认登录并改成长期密码后，可删除初始密码文件：
 
-```text
-username: admin
-password: admin123
+```bash
+rm -f db/admin-password
 ```
-
-登录后先修改密码，再继续配置服务。
 
 ### 4. 运行后的目录
 
@@ -148,9 +162,8 @@ password: admin123
 | 宿主机路径 | 容器路径 | 用途 |
 | --- | --- | --- |
 | `./db` | `/app/db` | 数据库、配置、Telegram session、日志。 |
-| `./downloads` | `/root/downloads` | aria2 下载目录。 |
+| `./downloads` | `/data/downloads` | aria2 下载目录。 |
 | `./cache/thumbnails` | `/app/cache/thumbnails` | 缩略图缓存。 |
-| `/var/run/docker.sock` | `/var/run/docker.sock` | Web 系统管理模块读取/控制容器。 |
 
 ## 使用方式
 
@@ -162,8 +175,6 @@ password: admin123
 | `/help` | 查看帮助。 |
 | `/menu` | 管理员菜单。 |
 | `/info` | 查看 aria2 全局信息。 |
-| `/web` | 获取 AriaNg 在线控制地址。 |
-| `/path [目录]` | 设置 aria2 默认下载目录。 |
 
 ### 下载任务
 
@@ -185,7 +196,7 @@ password: admin123
 
 直链 URL 由 `STREAM_FQDN`、`STREAM_PORT`、`STREAM_HAS_SSL`、`STREAM_NO_PORT` 和消息 hash 拼接生成。
 
-如果播放器、下载器或客户端不能携带 `Authorization` 头，可以在部分 API/播放地址中使用 `?token=<jwt>`。PC 客户端适配细节见：
+API 不接受 URL 查询参数中的管理员 JWT。TG 流媒体 URL 使用消息 hash，缩略图使用服务端签发的短时、单路径票据；WebSocket 使用 `Sec-WebSocket-Protocol` 传递 JWT。PC 客户端适配细节见：
 
 ```text
 docs/pc-client-tg-drive.md
@@ -257,20 +268,46 @@ Vite 会把 `/api` 和直链路径代理到 `http://localhost:8080`。
 
 ## 部署与安全注意事项
 
-当前默认 Docker Compose 偏向“单机自用、快速部署”：
+默认 Compose 使用固定 bridge 网络、read-only rootfs、`no-new-privileges`、全部 capability drop，并且不挂载 Docker socket。Web 入口只发布到 `127.0.0.1:8080`，应由受控的 HTTPS 反向代理转发；aria2 RPC 只监听容器回环地址且不发布端口。生产代理模板见 `deploy/nginx-mistrelay.conf.example`，启用前必须替换域名和证书路径。模板会覆盖而非追加 `X-Forwarded-For`，与 Compose 中仅信任 `172.25.0.1/32` 的设置配套使用。
 
-- `network_mode: host` 会让容器直接使用宿主机网络。
-- `privileged: true` 会扩大容器权限。
-- 挂载 `/var/run/docker.sock` 后，Web 系统管理模块具备控制 Docker 的能力。
-- aria2 RPC 默认由启动脚本生成配置，务必设置强 `RPC_SECRET`。
+发生凭据泄漏后，必须先停止服务，再离线轮换。将 `docs/credential-rotation.example.yml` 复制到仓库外，填入 BotFather 新签发的 token、新 RPC secret、新管理员密码和已完成 TLS 配置的 `PUBLIC_BASE_URL`，并限制为当前用户可读。若 DNS/TLS 尚未就绪，将公开地址留空并保持 `SEND_STREAM_LINK: false`：
 
-建议：
+```bash
+chmod 0600 /path/to/new-mistrelay-credentials.yml
+python3 rotate_credentials.py \
+  --input /path/to/new-mistrelay-credentials.yml \
+  --database db/downloads.db
+```
 
-- 只把 Web 入口暴露给可信网络，或放在反向代理后面。
-- 上线后立即修改默认管理员密码。
-- 不要把 `db/*.session`、`db/*.session.bak-*`、真实 `db/config.yml` 提交到仓库。
-- 如果不需要 Web 控制 Docker，移除 Docker socket 挂载并关闭相关页面入口。
-- 生产环境建议使用 HTTPS，并正确设置 `STREAM_HAS_SSL` / `STREAM_FQDN`。
+成功后立即删除输入文件。工具不会打印秘密，会在单个 SQLite 事务中更新配置、撤销现有 Web refresh session，并关闭持久化 Pyrogram 会话。不要通过命令行参数、Telegram 消息或 Web 配置接口传递秘密。
+
+SQLite 更新会先在单一事务中提交并复核，随后再退休同目录的旧 `config.yml`。若第二步因文件权限失败，工具会明确提示数据库已经完成轮换；修复权限后用同一输入重跑，只会补做旧文件清理。轮换还会删除遗留 `FORWARD_ID`，避免旧的静默转发目标复活。
+
+轮换后、启动前执行只读激活门禁。管理员、频道、完整 allowlist 和 HTTPS origin 必须与预期精确匹配；每个允许用户都要单独重复一次 `--expected-allowed-user`：
+
+```bash
+python3 activation_preflight.py \
+  --database db/downloads.db \
+  --download-root downloads \
+  --cache-root cache/thumbnails \
+  --rotation-input-path /path/to/new-mistrelay-credentials.yml \
+  --expected-public-origin https://files.example.com \
+  --expected-admin-id 123456789 \
+  --expected-channel-id -1001234567890 \
+  --expected-allowed-user 123456789
+```
+
+该命令不会打印秘密，也不会启动服务。它会检查数据库完整性、schema、规范化配置、管理员哈希、session 撤销、数据卷权限、镜像与工作树关键文件哈希、容器实际权限/挂载/网络和停止状态。外部凭据或域名尚未准备时，只能用 `--staged-only` 做结构检查；该模式的成功不能视为公开上线许可。
+
+- `RPC_SECRET` 必须是 32-256 位高熵 URL-safe 随机字符串；可用 `openssl rand -hex 32` 生成。
+- `API_ID` / `API_HASH`、主 Bot Token、所有额外 Bot Token 和 RPC secret 都必须与泄漏值不同；工具会拒绝复用。
+- `STREAM_HASH_LENGTH` 的运行时最低值为 `32` 个十六进制字符（128 bit）。
+- `STREAM_ALLOWED_USERS` 必须显式填写可信数字用户 ID，用户名和空 allowlist 均不会获得权限。
+- 不要提交 `db/*.session*`、`db/sessions/`、真实 `db/config.yml`、数据库、下载或缓存目录。
+- 默认 Bot 客户端只使用内存会话；如显式启用 `STREAM_USE_SESSION_FILE`，会话文件写入 `/app/db/sessions`，必须按凭证文件保护。
+- 生产环境使用 HTTPS，并正确设置 `STREAM_HAS_SSL` / `STREAM_FQDN`。
+- 旧 rclone/OneDrive/Google Drive 路径、remote、归档目标和上传开关会在轮换事务中删除；仍需在提供商侧撤销 OAuth grant。
+- 事件恢复期间 Compose 保持 `restart: "no"`；凭据轮换、频道可访问性和 HTTPS 实链路测试全部通过后，再改为 `unless-stopped`。
 
 ## 数据一致性
 

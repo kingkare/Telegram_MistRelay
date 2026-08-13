@@ -52,13 +52,13 @@ def get_cleanup_settings() -> dict[str, Any]:
             DEFAULT_INTERVAL_SECONDS,
             minimum=60,
         ),
-        "save_path": get_config_value("SAVE_PATH", "/root/downloads"),
+        "save_path": get_config_value("SAVE_PATH", "/data/downloads"),
     }
 
 
 def _resolve_download_dir(raw_path: str | os.PathLike[str] | None) -> Path:
     if not raw_path:
-        raw_path = "/root/downloads"
+        raw_path = "/data/downloads"
     path = Path(str(raw_path)).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path

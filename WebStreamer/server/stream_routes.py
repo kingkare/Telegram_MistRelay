@@ -12,6 +12,7 @@ import subprocess
 import json
 import asyncio
 import sqlite3
+import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -33,10 +34,20 @@ from WebStreamer.bot import (
     mark_bot_success,
 )
 from WebStreamer.server.exceptions import FIleNotFound, InvalidHash
+from path_security import UnsafePathError, resolve_under, validate_child_name
+from request_security import (
+    LOGIN_LIMITER,
+    audit_username,
+    get_client_ip,
+    login_limit_keys,
+    sanitize_log_value,
+)
+from log_config import LOG_FILE, read_log_lines
+from security_validation import merge_additional_bot_tokens
 from WebStreamer.server.ws_manager import ws_manager
 from WebStreamer import Var, utils, StartTime, __version__, StreamBot
 from db import (
-    fetch_recent_downloads, get_all_configs, get_config, set_config,
+    fetch_recent_downloads, get_all_configs, get_config, set_configs,
     get_download_id_by_gid, get_download_by_id, get_upload_by_id,
     mark_download_failed, update_upload_status, mark_upload_failed,
     delete_download_record, browse_tg_media, get_tg_media_stats,
@@ -137,6 +148,10 @@ except ImportError:
     DOCKER_AVAILABLE = False
     docker = None
 
+DOCKER_CONTROL_ENABLED = os.environ.get("MISTRELAY_ENABLE_DOCKER_CONTROL", "").lower() in {
+    "1", "true", "yes", "on",
+}
+
 # psutil（用于系统资源监控）
 try:
     import psutil
@@ -149,11 +164,127 @@ logger = logging.getLogger("routes")
 
 # 前端静态文件路径
 FRONTEND_DIST = Path("/app/web/dist")
+STATIC_ASSET_ROOT = FRONTEND_DIST / "assets"
+FILE_API_ROOT = Path(os.environ.get("MISTRELAY_FILE_ROOT", "/data/downloads")).resolve()
+
+SECRET_CONFIG_KEYS = frozenset({
+    "API_HASH",
+    "BOT_TOKEN",
+    "MULTI_BOT_TOKENS",
+    "RPC_SECRET",
+})
+
+# A stolen web-admin session must not be enough to redirect Telegram data or
+# replace credentials. Rotate these values during a maintenance window.
+OFFLINE_ONLY_CONFIG_KEYS = frozenset({
+    "ADMIN_ID",
+    "API_HASH",
+    "API_ID",
+    "BIN_CHANNEL",
+    "BOT_TOKEN",
+    "PROXY_IP",
+    "PROXY_PORT",
+    "RPC_SECRET",
+    "RPC_URL",
+    "STREAM_ALLOWED_USERS",
+    "STREAM_BIND_ADDRESS",
+    "STREAM_FQDN",
+    "STREAM_HASH_LENGTH",
+    "STREAM_HAS_SSL",
+    "STREAM_NO_PORT",
+    "STREAM_PORT",
+    "STREAM_USE_SESSION_FILE",
+    "ENABLE_STREAM",
+    "SAVE_PATH",
+    "SEND_STREAM_LINK",
+})
 
 routes = web.RouteTableDef()
 
 # 缩略图生成信号量（限制并发数为1，实现"一个一个加载"）
 thumbnail_semaphore = asyncio.Semaphore(1)
+
+
+def _bounded_log_lines(raw_value, default=100):
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, 1000))
+
+
+def _application_log_response(lines):
+    log_lines = read_log_lines(tail=lines)
+    return web.json_response({
+        "success": True,
+        "logs": "\n".join(log_lines),
+        "lines": lines,
+        "source": "application",
+    })
+
+
+async def _stream_application_logs(ws, tail_lines):
+    """Stream the persisted application log when Docker API access is absent."""
+    offset = 0
+    inode = None
+    try:
+        with open(LOG_FILE, "rb") as handle:
+            raw_history = handle.readlines()
+            offset = handle.tell()
+            inode = os.fstat(handle.fileno()).st_ino
+        history = [
+            line.decode("utf-8", errors="replace").rstrip("\r\n")
+            for line in raw_history[-tail_lines:]
+        ]
+    except OSError:
+        history = read_log_lines(tail=tail_lines)
+    await ws.send_json({
+        "type": "history",
+        "logs": "\n".join(history),
+        "source": "application",
+    })
+
+    await ws.send_json({
+        "type": "stream_start",
+        "message": "开始实时日志流",
+        "source": "application",
+    })
+
+    pending = b""
+    while not ws.closed:
+        await asyncio.sleep(1)
+        try:
+            stat_result = os.stat(LOG_FILE)
+        except OSError:
+            offset = 0
+            inode = None
+            continue
+
+        if inode != stat_result.st_ino or stat_result.st_size < offset:
+            offset = 0
+            inode = stat_result.st_ino
+            pending = b""
+        if stat_result.st_size == offset:
+            continue
+
+        try:
+            with open(LOG_FILE, "rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+                offset = handle.tell()
+            data = pending + chunk
+            complete_lines = data.splitlines(keepends=True)
+            pending = b""
+            if complete_lines and not complete_lines[-1].endswith((b"\n", b"\r")):
+                pending = complete_lines.pop()
+            for raw_line in complete_lines:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if line:
+                    await ws.send_json({"type": "log", "line": line})
+        except (ConnectionResetError, RuntimeError):
+            break
+        except OSError as exc:
+            logger.warning("读取应用日志流失败: %s", exc)
 
 def is_flood_wait_error(e: Exception) -> bool:
     """检查异常是否是Telegram限流错误"""
@@ -179,26 +310,71 @@ def is_flood_wait_error(e: Exception) -> bool:
 @routes.post("/api/auth/login")
 async def auth_login_handler(request: web.Request):
     """用户登录，返回 JWT token"""
+    client_ip = get_client_ip(request)
+    user_agent = sanitize_log_value(request.headers.get("User-Agent", ""))
+    username = ""
     try:
         body = await request.json()
-        username = body.get("username", "").strip()
+        if not isinstance(body, dict):
+            return web.json_response({"success": False, "error": "请求数据格式错误"}, status=400)
+        raw_username = body.get("username", "")
         password = body.get("password", "")
+        if not isinstance(raw_username, str) or not isinstance(password, str):
+            return web.json_response({"success": False, "error": "用户名或密码错误"}, status=401)
+        username = raw_username.strip()
         if not username or not password:
             return web.json_response({"success": False, "error": "用户名和密码不能为空"}, status=400)
+        if len(username) > 128 or len(password) > 512:
+            logger.warning(
+                "auth.login denied remote=%s username_hash=%s reason=invalid_length ua=%r",
+                client_ip,
+                audit_username(username),
+                user_agent,
+            )
+            return web.json_response({"success": False, "error": "用户名或密码错误"}, status=401)
 
-        from db import create_auth_session, get_user_by_username
+        limit_keys = login_limit_keys(client_ip, username)
+        retry_after = LOGIN_LIMITER.retry_after(limit_keys)
+        if retry_after:
+            logger.warning(
+                "auth.login throttled remote=%s username_hash=%s retry_after=%s ua=%r",
+                client_ip,
+                audit_username(username),
+                retry_after,
+                user_agent,
+            )
+            return web.json_response(
+                {"success": False, "error": "登录尝试过多，请稍后重试"},
+                status=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        from db import create_auth_session, get_user_by_username, update_user_password
         from auth import (
             TOKEN_EXPIRE_SECONDS,
             create_refresh_token,
             create_token,
             get_refresh_token_expires_at,
             hash_refresh_token,
+            hash_password,
+            password_needs_rehash,
             verify_password,
         )
         user = get_user_by_username(username)
         if not user or not verify_password(password, user["password_hash"]):
+            LOGIN_LIMITER.record_failure(limit_keys)
+            logger.warning(
+                "auth.login failed remote=%s username_hash=%s ua=%r",
+                client_ip,
+                audit_username(username),
+                user_agent,
+            )
             return web.json_response({"success": False, "error": "用户名或密码错误"}, status=401)
 
+        if password_needs_rehash(user["password_hash"]):
+            update_user_password(user["id"], hash_password(password))
+
+        LOGIN_LIMITER.record_success(limit_keys)
         token = create_token(user["id"], user["username"])
         refresh_token = create_refresh_token()
         device_id = body.get("device_id")
@@ -218,6 +394,13 @@ async def auth_login_handler(request: web.Request):
             device_id=device_id,
             session_name=session_name,
         )
+        logger.info(
+            "auth.login succeeded remote=%s user_id=%s username_hash=%s ua=%r",
+            client_ip,
+            user["id"],
+            audit_username(username),
+            user_agent,
+        )
         return web.json_response({
             "success": True,
             "token": token,
@@ -226,7 +409,7 @@ async def auth_login_handler(request: web.Request):
             "user": {"id": user["id"], "username": user["username"], "role": user["role"]},
         })
     except Exception as e:
-        logger.error(f"登录失败: {e}", exc_info=True)
+        logger.error("登录失败 remote=%s: %s", client_ip, e, exc_info=True)
         return web.json_response({"success": False, "error": "登录失败"}, status=500)
 
 
@@ -285,9 +468,13 @@ async def auth_logout_handler(request: web.Request):
             return web.json_response({"success": False, "error": "refresh_token 不能为空"}, status=400)
 
         from db import revoke_auth_session
-        from auth import hash_refresh_token
+        from auth import hash_refresh_token, rotate_signing_secret
 
-        revoke_auth_session(hash_refresh_token(refresh_token), reason="logout")
+        revoked = revoke_auth_session(hash_refresh_token(refresh_token), reason="logout")
+        if revoked:
+            # MistRelay has a single recovery-controlled administrator. Rotating
+            # the in-memory key makes logout revoke outstanding access tokens too.
+            rotate_signing_secret()
         return web.json_response({"success": True})
     except Exception as e:
         logger.error(f"退出登录失败: {e}", exc_info=True)
@@ -319,21 +506,49 @@ async def auth_change_password_handler(request: web.Request):
         new_password = body.get("new_password", "")
         if not old_password or not new_password:
             return web.json_response({"success": False, "error": "请填写旧密码和新密码"}, status=400)
-        if len(new_password) < 6:
-            return web.json_response({"success": False, "error": "新密码长度不能少于6位"}, status=400)
+        if not isinstance(old_password, str) or not isinstance(new_password, str):
+            return web.json_response({"success": False, "error": "密码格式无效"}, status=400)
+        if not 16 <= len(new_password) <= 512:
+            return web.json_response({"success": False, "error": "新密码长度必须为16-512位"}, status=400)
+        if len(old_password) > 512:
+            return web.json_response({"success": False, "error": "旧密码错误"}, status=401)
 
         from db import get_user_by_username, revoke_user_sessions, update_user_password
-        from auth import verify_password, hash_password
+        from auth import hash_password, rotate_signing_secret, verify_password
         db_user = get_user_by_username(user["sub"])
         if not db_user or not verify_password(old_password, db_user["password_hash"]):
             return web.json_response({"success": False, "error": "旧密码错误"}, status=400)
 
         update_user_password(db_user["id"], hash_password(new_password))
         revoke_user_sessions(db_user["id"], reason="password_changed")
-        return web.json_response({"success": True, "message": "密码修改成功"})
+        rotate_signing_secret()
+        logger.info(
+            "auth.password changed remote=%s user_id=%s",
+            get_client_ip(request),
+            db_user["id"],
+        )
+        return web.json_response({"success": True, "message": "密码修改成功，请重新登录"})
     except Exception as e:
         logger.error(f"修改密码失败: {e}", exc_info=True)
         return web.json_response({"success": False, "error": "修改密码失败"}, status=500)
+
+
+@routes.get("/api/health", allow_head=True)
+async def api_health_handler(_):
+    """Minimal liveness/readiness response for proxies and container health checks."""
+    from service_runtime import is_service_ready
+
+    telegram_connected = bool(StreamBot and getattr(StreamBot, "is_connected", False))
+    ready = is_service_ready() and telegram_connected
+    return web.json_response(
+        {
+            "server_status": "running" if ready else "starting",
+            "ready": ready,
+            "telegram_connected": telegram_connected,
+            "version": f"v{__version__}",
+        },
+        status=200 if ready else 503,
+    )
 
 
 @routes.get("/api/status", allow_head=True)
@@ -403,12 +618,18 @@ async def root_route_handler(request: web.Request):
     else:
         # 降级到 API 状态(开发环境或前端未构建时)
         logger.warning("前端 index.html 不存在,返回 API 状态")
-        return await api_status_handler(request)
+        return await api_health_handler(request)
 
 
 @routes.get("/api/system/docker/status", allow_head=True)
 async def docker_status_handler(request: web.Request):
     """获取Docker容器状态"""
+    if not DOCKER_CONTROL_ENABLED:
+        return web.json_response({
+            "success": False,
+            "in_docker": os.path.exists("/.dockerenv"),
+            "error": "Docker 控制接口已禁用",
+        }, status=403)
     try:
         # 检查是否在Docker容器内
         if not os.path.exists("/.dockerenv"):
@@ -514,6 +735,11 @@ async def docker_status_handler(request: web.Request):
 @routes.post("/api/system/docker/restart")
 async def docker_restart_handler(request: web.Request):
     """重启Docker容器（热重载）"""
+    if not DOCKER_CONTROL_ENABLED:
+        return web.json_response({
+            "success": False,
+            "error": "Docker 控制接口已禁用",
+        }, status=403)
     try:
         # 检查是否在Docker容器内
         if not os.path.exists("/.dockerenv"):
@@ -613,20 +839,17 @@ async def docker_restart_handler(request: web.Request):
 @routes.get("/api/system/docker/logs", allow_head=True)
 async def docker_logs_handler(request: web.Request):
     """获取Docker容器日志"""
+    lines = _bounded_log_lines(request.query.get("lines", "100"))
+    if not DOCKER_CONTROL_ENABLED:
+        return _application_log_response(lines)
     try:
         # 检查是否在Docker容器内
         if not os.path.exists("/.dockerenv"):
-            return web.json_response({
-                "success": False,
-                "error": "不在Docker容器内运行"
-            })
+            return _application_log_response(lines)
         
         # 检查Docker SDK是否可用
         if not DOCKER_AVAILABLE:
-            return web.json_response({
-                "success": False,
-                "error": "Docker Python SDK不可用，请安装docker包"
-            })
+            return _application_log_response(lines)
         
         # 获取容器ID或名称
         container_id = os.environ.get("HOSTNAME", "")
@@ -642,9 +865,6 @@ async def docker_logs_handler(request: web.Request):
         
         if not container_id:
             container_id = "mistrelay"
-        
-        lines = int(request.query.get("lines", "100"))
-        lines = max(1, min(lines, 1000))  # 限制在1-1000行
         
         # 使用Docker Python SDK查找当前容器
         try:
@@ -706,25 +926,17 @@ async def docker_logs_handler(request: web.Request):
                 return web.json_response({
                     "success": True,
                     "logs": logs,
-                    "lines": lines
+                    "lines": lines,
+                    "source": "docker",
                 })
             else:
-                return web.json_response({
-                    "success": False,
-                    "error": f"无法找到容器: {container_id}"
-                })
+                return _application_log_response(lines)
         except docker.errors.APIError as e:
-            logger.error(f"Docker API错误: {e}")
-            return web.json_response({
-                "success": False,
-                "error": f"Docker API错误: {str(e)}"
-            })
+            logger.warning("Docker API日志读取失败，使用应用日志: %s", e)
+            return _application_log_response(lines)
     except Exception as e:
-        logger.error(f"获取Docker日志失败: {e}", exc_info=True)
-        return web.json_response({
-            "success": False,
-            "error": str(e)
-        })
+        logger.warning("获取Docker日志失败，使用应用日志: %s", e, exc_info=True)
+        return _application_log_response(lines)
 
 
 @routes.get("/api/system/resources", allow_head=True)
@@ -785,32 +997,19 @@ async def system_resources_handler(request: web.Request):
 @routes.get("/api/system/docker/logs/ws")
 async def docker_logs_ws_handler(request: web.Request):
     """WebSocket实时推送Docker容器日志"""
-    ws = web.WebSocketResponse(heartbeat=30)
+    protocols = (request["websocket_protocol"],) if request.get("websocket_protocol") else ()
+    ws = web.WebSocketResponse(heartbeat=30, protocols=protocols)
     await ws.prepare(request)
+
+    tail_lines = _bounded_log_lines(request.query.get("tail", "100"))
+    if not DOCKER_CONTROL_ENABLED or not DOCKER_AVAILABLE or not os.path.exists("/.dockerenv"):
+        try:
+            await _stream_application_logs(ws, tail_lines)
+        finally:
+            await ws.close()
+        return ws
     
     try:
-        # 检查是否在Docker容器内
-        if not os.path.exists("/.dockerenv"):
-            await ws.send_json({
-                "type": "error",
-                "message": "不在Docker容器内运行"
-            })
-            await ws.close()
-            return ws
-        
-        # 检查Docker SDK是否可用
-        if not DOCKER_AVAILABLE:
-            await ws.send_json({
-                "type": "error",
-                "message": "Docker Python SDK不可用，请安装docker包"
-            })
-            await ws.close()
-            return ws
-        
-        # 获取初始日志行数（从查询参数）
-        tail_lines = int(request.query.get("tail", "100"))
-        tail_lines = max(1, min(tail_lines, 1000))  # 限制在1-1000行
-        
         # 查找容器
         container = None
         try:
@@ -863,11 +1062,8 @@ async def docker_logs_ws_handler(request: web.Request):
                     container = all_containers[0]
             
             if not container:
-                await ws.send_json({
-                    "type": "error",
-                    "message": "无法找到容器"
-                })
-                await ws.close()
+                logger.warning("未找到当前容器，使用应用日志流")
+                await _stream_application_logs(ws, tail_lines)
                 return ws
             
             # 先发送历史日志
@@ -878,11 +1074,9 @@ async def docker_logs_ws_handler(request: web.Request):
                     "logs": logs
                 })
             except Exception as e:
-                logger.error(f"获取历史日志失败: {e}", exc_info=True)
-                await ws.send_json({
-                    "type": "error",
-                    "message": f"获取历史日志失败: {str(e)}"
-                })
+                logger.warning("获取Docker历史日志失败，使用应用日志流: %s", e)
+                await _stream_application_logs(ws, tail_lines)
+                return ws
             
             # 开始实时流式推送日志
             await ws.send_json({
@@ -968,17 +1162,11 @@ async def docker_logs_ws_handler(request: web.Request):
                 })
                 
         except docker.errors.APIError as e:
-            logger.error(f"Docker API错误: {e}")
-            await ws.send_json({
-                "type": "error",
-                "message": f"Docker API错误: {str(e)}"
-            })
+            logger.warning("Docker API日志流失败，使用应用日志流: %s", e)
+            await _stream_application_logs(ws, tail_lines)
         except Exception as e:
-            logger.error(f"WebSocket日志流错误: {e}", exc_info=True)
-            await ws.send_json({
-                "type": "error",
-                "message": f"错误: {str(e)}"
-            })
+            logger.warning("Docker日志流失败，使用应用日志流: %s", e, exc_info=True)
+            await _stream_application_logs(ws, tail_lines)
             
     except Exception as e:
         logger.error(f"WebSocket连接错误: {e}", exc_info=True)
@@ -1002,9 +1190,23 @@ async def get_config_handler(request: web.Request):
     try:
         category = request.query.get('category')
         configs = get_all_configs(category=category)
+        redacted_keys = []
+        secret_counts = {}
+        for key in SECRET_CONFIG_KEYS:
+            if key not in configs:
+                continue
+            value = configs[key]
+            if value:
+                redacted_keys.append(key)
+            if isinstance(value, list):
+                secret_counts[key] = len(value)
+            configs[key] = [] if isinstance(value, list) else ""
         return web.json_response({
             "success": True,
-            "data": configs
+            "data": configs,
+            "redacted_keys": sorted(redacted_keys),
+            "secret_counts": secret_counts,
+            "offline_only_keys": sorted(key for key in OFFLINE_ONLY_CONFIG_KEYS if key in configs),
         })
     except Exception as e:
         logger.error(f"获取配置失败: {e}", exc_info=True)
@@ -1033,7 +1235,6 @@ async def update_config_handler(request: web.Request):
             'API_HASH': ('string', 'telegram', 'Telegram API Hash'),
             'BOT_TOKEN': ('string', 'telegram', 'Telegram Bot Token'),
             'ADMIN_ID': ('int', 'telegram', 'Telegram管理员ID'),
-            'FORWARD_ID': ('string', 'telegram', '转发ID'),
             'UP_TELEGRAM': ('bool', 'telegram', '是否上传到Telegram频道网盘'),
             'SAVE_PATH': ('string', 'download', '下载保存路径'),
             'PROXY_IP': ('string', 'download', '代理IP'),
@@ -1057,9 +1258,11 @@ async def update_config_handler(request: web.Request):
             'STREAM_KEEP_ALIVE': ('bool', 'stream', '是否保持连接活跃'),
             'STREAM_PING_INTERVAL': ('int', 'stream', 'Ping间隔（秒）'),
             'STREAM_USE_SESSION_FILE': ('bool', 'stream', '是否使用会话文件'),
-            'STREAM_ALLOWED_USERS': ('string', 'stream', '允许使用直链的用户列表'),
+            'STREAM_ALLOWED_USERS': ('string', 'stream', '允许使用直链的数字用户 ID 列表'),
             'STREAM_AUTO_DOWNLOAD': ('bool', 'stream', '历史兼容：是否自动添加到下载队列'),
             'SEND_STREAM_LINK': ('bool', 'stream', '是否发送直链信息给用户'),
+            'MAX_CONCURRENT_MESSAGES': ('int', 'stream', '消息处理最大并发数'),
+            'MAX_MESSAGE_QUEUE_SIZE': ('int', 'stream', '消息等待队列上限（1-1000）'),
             'MULTI_BOT_TOKENS': ('list', 'stream', '多机器人Token列表'),
         }
         
@@ -1071,7 +1274,7 @@ async def update_config_handler(request: web.Request):
             'STREAM_USE_SESSION_FILE', 'MULTI_BOT_TOKENS'
         }
         
-        updated_count = 0
+        updates = []
         errors = []
         needs_restart = False
         
@@ -1079,8 +1282,21 @@ async def update_config_handler(request: web.Request):
             if key in config_definitions:
                 value_type, category, description = config_definitions[key]
                 try:
-                    set_config(key, value, value_type, category, description)
-                    updated_count += 1
+                    if key in SECRET_CONFIG_KEYS and value in (None, "", []):
+                        continue
+                    if key == "MULTI_BOT_TOKENS":
+                        value = merge_additional_bot_tokens(
+                            get_config(key, []),
+                            value,
+                            get_config("BOT_TOKEN", ""),
+                        )
+                    if key in OFFLINE_ONLY_CONFIG_KEYS:
+                        current_value = get_config(key, None)
+                        if value == current_value or str(value) == str(current_value):
+                            continue
+                        errors.append(f"{key}: 安全敏感配置只能在停机维护窗口离线修改")
+                        continue
+                    updates.append((key, value, value_type, category, description))
                     if key in requires_restart:
                         needs_restart = True
                 except Exception as e:
@@ -1092,9 +1308,12 @@ async def update_config_handler(request: web.Request):
             return web.json_response({
                 "success": False,
                 "error": f"部分配置更新失败: {', '.join(errors)}",
-                "updated_count": updated_count,
+                "updated_count": 0,
                 "needs_restart": needs_restart
             }, status=400)
+
+        set_configs(updates)
+        updated_count = len(updates)
         
         # 配置已保存到数据库，下次使用时将从数据库读取
         # 对于需要重启的配置，提示用户重启服务
@@ -1116,23 +1335,11 @@ async def update_config_handler(request: web.Request):
 
 @routes.post("/api/config/reload")
 async def reload_config_handler(request: web.Request):
-    """手动触发配置重载（从config.yml重新导入到数据库）"""
-    try:
-        from db import init_config_from_yaml
-        # 从config.yml重新导入到数据库
-        imported = init_config_from_yaml()
-        logger.info("配置已从config.yml重新导入到数据库")
-        return web.json_response({
-            "success": True,
-            "message": "配置已从config.yml重新导入到数据库，下次使用时将从数据库读取最新配置",
-            "imported": imported
-        })
-    except Exception as e:
-        logger.error(f"配置重载失败: {e}", exc_info=True)
-        return web.json_response({
-            "success": False,
-            "error": str(e)
-        }, status=500)
+    """Reject online imports that could replace locked credentials or destinations."""
+    return web.json_response({
+        "success": False,
+        "error": "配置导入只能在停机维护窗口离线执行",
+    }, status=403)
 
 
 RCLONE_DEPRECATED_MESSAGE = "第三方网盘已废弃，请使用 Telegram 频道网盘"
@@ -1368,7 +1575,8 @@ async def ws_status_handler(request: web.Request):
     """
     WebSocket 端点：实时推送下载/上传/清理状态更新
     """
-    ws = web.WebSocketResponse(heartbeat=30)
+    protocols = (request["websocket_protocol"],) if request.get("websocket_protocol") else ()
+    ws = web.WebSocketResponse(heartbeat=30, protocols=protocols)
     await ws.prepare(request)
     
     try:
@@ -1930,7 +2138,10 @@ async def stream_handler(request: web.Request):
     # 2. 静态资源处理 (assets/, favicon.ico, robots.txt 等)
     if path.startswith("assets/"):
         # 前端静态资源 (CSS, JS, 图片等)
-        file_path = FRONTEND_DIST / path
+        try:
+            file_path = resolve_under(STATIC_ASSET_ROOT, path[len("assets/"):])
+        except UnsafePathError:
+            raise web.HTTPNotFound(text="Static file not found")
         if file_path.exists() and file_path.is_file():
             response = web.FileResponse(file_path)
             # 添加强缓存头(1年),因为 Vite 构建的文件名包含哈希
@@ -2100,15 +2311,19 @@ def build_telegram_thumbnail_url(item: dict) -> str | None:
         if value
     ]
 
-    if entry_type == "folder":
-        if any(value.startswith(("image/", "video/")) for value in group_mime_types):
-            return f"/api/telegram/thumbnail/{message_id}"
+    supported = (
+        any(value.startswith(("image/", "video/")) for value in group_mime_types)
+        if entry_type == "folder"
+        else mime_type.startswith(("image/", "video/"))
+    )
+    if not supported:
         return None
 
-    if mime_type.startswith(("image/", "video/")):
-        return f"/api/telegram/thumbnail/{message_id}"
+    from auth import create_resource_ticket
 
-    return None
+    path = f"/api/telegram/thumbnail/{message_id}"
+    ticket = quote(create_resource_ticket(path), safe="")
+    return f"{path}?ticket={ticket}"
 
 
 def is_thumbnail_supported_mime(mime_type: str | None) -> bool:
@@ -2300,6 +2515,16 @@ async def delete_bin_channel_messages(message_ids: list[int]) -> dict:
 async def media_streamer(request: web.Request, message_id: int, secure_hash: str):
     range_header = request.headers.get("Range", 0)
 
+    # Reject invalid capabilities before making a Telegram API request. The
+    # database is the authority for public streamable channel messages.
+    source_record = get_tg_media_record_by_message_id(message_id)
+    source_unique_id = (source_record or {}).get("file_unique_id", "")
+    if not source_unique_id or str(source_unique_id).startswith("telethon:"):
+        raise FIleNotFound
+    expected_hash = utils.get_hash(source_unique_id, Var.HASH_LENGTH)
+    if not secrets.compare_digest(str(secure_hash or ""), expected_hash):
+        raise InvalidHash
+
     # 检查是否有可用的客户端
     if not work_loads:
         logger.error("没有可用的客户端")
@@ -2315,8 +2540,8 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
         logger.warning(f"主客户端获取文件属性失败: {error}")
         raise
 
-    if utils.get_hash(source_file_id.unique_id, Var.HASH_LENGTH) != secure_hash:
-        logger.debug(f"Invalid hash for message with ID {message_id}")
+    if source_file_id.unique_id != source_unique_id:
+        logger.warning("Telegram media identity changed for message ID %s", message_id)
         raise InvalidHash
 
     attempted_indices = set()
@@ -2695,20 +2920,8 @@ async def list_files_handler(request: web.Request):
     参数: path (可选, 默认为根目录 /)
     """
     try:
-        # 获取请求路径
         path_param = request.query.get("path", "/")
-        
-        # 基础目录 (默认为下载目录或者根目录, 这里为了灵活暂时设为根目录, 实际应限制在安全目录下)
-        # 注意: 生产环境应严格限制 base_path 以防止路径遍历攻击
-        base_path = "/" 
-        
-        # 拼接完整路径
-        if path_param == "/":
-            target_path = base_path
-        else:
-            # 移除开头的 /
-            clean_path = path_param.lstrip("/")
-            target_path = os.path.join(base_path, clean_path)
+        target_path = resolve_under(FILE_API_ROOT, path_param)
         
         if not os.path.exists(target_path):
              return web.json_response({
@@ -2728,11 +2941,17 @@ async def list_files_handler(request: web.Request):
             with os.scandir(target_path) as entries:
                 for entry in entries:
                     try:
-                        stat = entry.stat()
+                        if entry.is_symlink():
+                            continue
+                        entry_path = resolve_under(
+                            FILE_API_ROOT,
+                            Path(entry.path).relative_to(FILE_API_ROOT).as_posix(),
+                        )
+                        stat = entry.stat(follow_symlinks=False)
                         files.append({
                             "name": entry.name,
-                            "path": os.path.join(path_param if path_param != "/" else "", entry.name), # 相对 API 的路径
-                            "is_dir": entry.is_dir(),
+                            "path": f"/{entry_path.relative_to(FILE_API_ROOT).as_posix()}",
+                            "is_dir": entry.is_dir(follow_symlinks=False),
                             "size": stat.st_size,
                             "modified_time": datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
                         })
@@ -2755,6 +2974,8 @@ async def list_files_handler(request: web.Request):
         })
         
     except Exception as e:
+        if isinstance(e, UnsafePathError):
+            return web.json_response({"success": False, "error": "路径不在允许的下载目录内"}, status=403)
         logger.error(f"列出文件失败: {e}", exc_info=True)
         return web.json_response({
             "success": False,
@@ -2773,9 +2994,7 @@ async def download_file_handler(request: web.Request):
         if not path_param:
             return web.json_response({"success": False, "error": "缺少 path 参数"}, status=400)
             
-        base_path = "/"
-        clean_path = path_param.lstrip("/")
-        target_path = os.path.join(base_path, clean_path)
+        target_path = resolve_under(FILE_API_ROOT, path_param, allow_root=False)
         
         if not os.path.exists(target_path):
             return web.json_response({"success": False, "error": "文件不存在"}, status=404)
@@ -2787,6 +3006,8 @@ async def download_file_handler(request: web.Request):
         return web.FileResponse(target_path)
         
     except Exception as e:
+        if isinstance(e, UnsafePathError):
+            return web.json_response({"success": False, "error": "路径不在允许的下载目录内"}, status=403)
         logger.error(f"下载文件失败: {e}", exc_info=True)
         return web.json_response({
             "success": False,
@@ -2824,22 +3045,15 @@ async def upload_file_handler(request: web.Request):
         if not file_field:
             return web.json_response({"success": False, "error": "未找到文件字段"}, status=400)
             
-        filename = file_field.filename
-        if not filename:
-             return web.json_response({"success": False, "error": "文件名为空"}, status=400)
-             
-        # 构建保存路径
-        if target_dir == "/":
-            save_dir = "/"
-        else:
-            save_dir = os.path.join("/", target_dir.lstrip("/"))
-            
-        if not os.path.exists(save_dir):
-             os.makedirs(save_dir, exist_ok=True)
-             
-        save_path = os.path.join(save_dir, filename)
-        
-        # 写入文件
+        filename = validate_child_name(file_field.filename)
+        save_dir = resolve_under(FILE_API_ROOT, target_dir)
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = resolve_under(
+            FILE_API_ROOT,
+            (save_dir.relative_to(FILE_API_ROOT) / filename).as_posix(),
+            allow_root=False,
+        )
+
         size = 0
         with open(save_path, 'wb') as f:
             while True:
@@ -2854,12 +3068,14 @@ async def upload_file_handler(request: web.Request):
             "message": "上传成功",
             "file": {
                 "name": filename,
-                "path": os.path.join(target_dir if target_dir != "/" else "", filename),
+                "path": f"/{save_path.relative_to(FILE_API_ROOT).as_posix()}",
                 "size": size
             }
         })
 
     except Exception as e:
+        if isinstance(e, UnsafePathError):
+            return web.json_response({"success": False, "error": "上传路径或文件名无效"}, status=403)
         logger.error(f"上传文件失败: {e}", exc_info=True)
         return web.json_response({
             "success": False,
@@ -2879,7 +3095,7 @@ async def mkdir_handler(request: web.Request):
         if not path_param:
             return web.json_response({"success": False, "error": "缺少 path 参数"}, status=400)
             
-        target_path = os.path.join("/", path_param.lstrip("/"))
+        target_path = resolve_under(FILE_API_ROOT, path_param, allow_root=False)
         
         if os.path.exists(target_path):
              return web.json_response({"success": False, "error": "目录已存在"}, status=400)
@@ -2892,6 +3108,8 @@ async def mkdir_handler(request: web.Request):
         })
         
     except Exception as e:
+        if isinstance(e, UnsafePathError):
+            return web.json_response({"success": False, "error": "路径不在允许的下载目录内"}, status=403)
         logger.error(f"创建目录失败: {e}", exc_info=True)
         return web.json_response({
             "success": False,
@@ -2909,15 +3127,11 @@ async def delete_file_handler(request: web.Request):
         if not path_param:
             return web.json_response({"success": False, "error": "缺少 path 参数"}, status=400)
             
-        target_path = os.path.join("/", path_param.lstrip("/"))
+        target_path = resolve_under(FILE_API_ROOT, path_param, allow_root=False)
         
         if not os.path.exists(target_path):
             return web.json_response({"success": False, "error": "文件或目录不存在"}, status=404)
         
-        # 安全检查: 防止删除根目录
-        if target_path == "/":
-             return web.json_response({"success": False, "error": "不能删除根目录"}, status=403)
-
         if os.path.isdir(target_path):
             shutil.rmtree(target_path)
         else:
@@ -2929,6 +3143,8 @@ async def delete_file_handler(request: web.Request):
         })
         
     except Exception as e:
+        if isinstance(e, UnsafePathError):
+            return web.json_response({"success": False, "error": "路径不在允许的下载目录内"}, status=403)
         logger.error(f"删除失败: {e}", exc_info=True)
         return web.json_response({
             "success": False,
@@ -2998,7 +3214,7 @@ async def download_log_file_handler(request: web.Request):
         return web.FileResponse(
             path,
             headers={
-                "Content-Disposition": f'attachment; filename="{safe_name}"'
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(safe_name, safe='')}"
             },
         )
     except Exception as e:

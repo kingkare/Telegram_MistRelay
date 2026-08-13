@@ -26,9 +26,9 @@ class Var(object):
     PING_INTERVAL = STREAM_PING_INTERVAL if STREAM_PING_INTERVAL else 1200  # 20 minutes
     HAS_SSL = STREAM_HAS_SSL if STREAM_HAS_SSL else False
     NO_PORT = STREAM_NO_PORT if STREAM_NO_PORT else False
-    HASH_LENGTH = STREAM_HASH_LENGTH if STREAM_HASH_LENGTH else 6
-    if not 5 < HASH_LENGTH < 64:
-        sys.exit("Hash length should be greater than 5 and less than 64")
+    HASH_LENGTH = STREAM_HASH_LENGTH if STREAM_HASH_LENGTH else 32
+    if not 32 <= HASH_LENGTH <= 64:
+        sys.exit("Hash length must be between 32 and 64 hexadecimal characters")
     FQDN = str(STREAM_FQDN if STREAM_FQDN else BIND_ADDRESS)
     URL = "http{}://{}{}/".format(
             "s" if HAS_SSL else "", FQDN, "" if NO_PORT else ":" + str(PORT)
@@ -36,7 +36,11 @@ class Var(object):
     KEEP_ALIVE = STREAM_KEEP_ALIVE if STREAM_KEEP_ALIVE else False
     DEBUG = False
     USE_SESSION_FILE = STREAM_USE_SESSION_FILE if STREAM_USE_SESSION_FILE else False
-    ALLOWED_USERS = [x.strip("@ ") for x in str(STREAM_ALLOWED_USERS or "").split(",") if x.strip("@ ")] if STREAM_ALLOWED_USERS else []
+    ALLOWED_USERS = [
+        item.strip()
+        for item in str(STREAM_ALLOWED_USERS or "").split(",")
+        if item.strip().isdigit() and int(item.strip()) > 0
+    ]
     ENABLE_STREAM = ENABLE_STREAM if ENABLE_STREAM else False
     AUTO_DOWNLOAD = bool(STREAM_AUTO_DOWNLOAD)
     SEND_STREAM_LINK = SEND_STREAM_LINK if SEND_STREAM_LINK else False

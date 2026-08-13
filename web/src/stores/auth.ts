@@ -56,12 +56,19 @@ export const useAuthStore = defineStore('auth', {
         } else {
           this.logout()
         }
-      } catch {
-        this.logout()
+      } catch (error: unknown) {
+        const status = (error as { response?: { status?: number } })?.response?.status
+        if (status === 401 || status === 403) {
+          this.logout()
+        }
       }
     },
 
     logout() {
+      const refreshToken = getRefreshToken()
+      if (refreshToken) {
+        void api.post('/auth/logout', { refresh_token: refreshToken }).catch(() => undefined)
+      }
       this.token = null
       this.refreshToken = null
       this.user = null

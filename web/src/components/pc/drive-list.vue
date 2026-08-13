@@ -13,9 +13,10 @@
       class="pc-list-row pc-drive-list-row"
       role="button"
       tabindex="0"
+      :aria-label="`打开 ${getTitle(item)}`"
       @click="$emit('open', item)"
-      @keydown.enter="$emit('open', item)"
-      @keydown.space.prevent="$emit('open', item)"
+      @keydown.enter.self="$emit('open', item)"
+      @keydown.space.self.prevent="$emit('open', item)"
     >
       <span class="pc-drive-list-name">
         <span class="pc-drive-list-icon">
@@ -37,6 +38,7 @@
         class="pc-drive-list-delete"
         type="button"
         title="删除"
+        :aria-label="`删除 ${getTitle(item)}`"
         @click.stop="$emit('delete', item)"
       >
         <el-icon :size="16"><Delete /></el-icon>
@@ -131,10 +133,10 @@ function isAudio(item: TelegramDriveItem): boolean {
   min-height: 36px;
   padding: 0 12px;
   border-bottom: 1px solid var(--pc-color-border);
-  background: var(--pc-color-surface-soft);
+  background: var(--pc-color-surface-subtle);
   color: var(--pc-color-text-muted);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .pc-drive-list-delete {
@@ -147,6 +149,15 @@ function isAudio(item: TelegramDriveItem): boolean {
   background: transparent;
   color: var(--pc-color-text-muted);
   cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.pc-drive-list-row:hover .pc-drive-list-delete,
+.pc-drive-list-row:focus-within .pc-drive-list-delete {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .pc-drive-list-delete:hover {
@@ -154,8 +165,13 @@ function isAudio(item: TelegramDriveItem): boolean {
   color: var(--pc-color-danger);
 }
 
+.pc-drive-list-delete:focus-visible {
+  outline: 2px solid var(--pc-color-primary);
+  outline-offset: 1px;
+}
+
 .pc-drive-list-row:hover {
-  background: #f7f7fc;
+  background: var(--pc-color-surface-soft);
 }
 
 .pc-drive-list-row:focus-visible {
@@ -177,10 +193,17 @@ function isAudio(item: TelegramDriveItem): boolean {
   place-items: center;
   width: 30px;
   height: 30px;
-  border-radius: var(--pc-radius-md);
-  background: var(--pc-color-surface-soft);
+  border-radius: 6px;
+  background: var(--pc-color-surface-subtle);
   color: var(--pc-color-primary-strong);
   flex: 0 0 auto;
+}
+
+@media (hover: none) {
+  .pc-drive-list-delete {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .pc-drive-list-title {

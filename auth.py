@@ -17,11 +17,14 @@ logger = logging.getLogger(__name__)
 # JWT 密钥：首次启动时随机生成，重启后旧 token 自动失效
 _JWT_SECRET: str = secrets.token_hex(32)
 
-# Token 有效期（秒）：默认 24 小时
-TOKEN_EXPIRE_SECONDS = 24 * 3600
+# Access tokens are deliberately short lived; refresh tokens are rotated server-side.
+TOKEN_EXPIRE_SECONDS = 15 * 60
 
 # Refresh token 有效期（秒）：桌面客户端长期登录 30 天
 REFRESH_TOKEN_EXPIRE_SECONDS = 30 * 24 * 3600
+RESOURCE_TICKET_EXPIRE_SECONDS = 5 * 60
+PASSWORD_HASH_SCHEME = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = 600_000
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -38,18 +41,42 @@ def _b64url_decode(s: str) -> bytes:
 def hash_password(password: str) -> str:
     """使用 PBKDF2-SHA256 对密码进行哈希"""
     salt = secrets.token_hex(16)
-    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100_000)
-    return f"{salt}${dk.hex()}"
+    dk = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), salt.encode(), PASSWORD_HASH_ITERATIONS
+    )
+    return f"{PASSWORD_HASH_SCHEME}${PASSWORD_HASH_ITERATIONS}${salt}${dk.hex()}"
 
 
 def verify_password(password: str, hashed: str) -> bool:
     """验证密码是否匹配"""
     try:
-        salt, dk_hex = hashed.split('$', 1)
-        dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100_000)
+        parts = hashed.split("$")
+        if len(parts) == 4 and parts[0] == PASSWORD_HASH_SCHEME:
+            iterations = int(parts[1])
+            salt, dk_hex = parts[2], parts[3]
+            if iterations < 100_000 or iterations > 2_000_000:
+                return False
+        elif len(parts) == 2:
+            # Backward compatibility for hashes created before the incident fix.
+            iterations = 100_000
+            salt, dk_hex = parts
+        else:
+            return False
+        dk = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), salt.encode(), iterations
+        )
         return hmac.compare_digest(dk.hex(), dk_hex)
     except Exception:
         return False
+
+
+def password_needs_rehash(hashed: str) -> bool:
+    """Return true for legacy hashes or hashes below the current work factor."""
+    try:
+        scheme, iterations, _salt, _digest = hashed.split("$", 3)
+        return scheme != PASSWORD_HASH_SCHEME or int(iterations) != PASSWORD_HASH_ITERATIONS
+    except (AttributeError, TypeError, ValueError):
+        return True
 
 
 def create_token(user_id: int, username: str) -> str:
@@ -113,3 +140,43 @@ def verify_token(token: str) -> dict | None:
         return payload
     except Exception:
         return None
+
+
+def create_resource_ticket(path: str, lifetime_seconds: int = RESOURCE_TICKET_EXPIRE_SECONDS) -> str:
+    """Create a short-lived ticket that grants access to one exact API path."""
+    if not isinstance(path, str) or not path.startswith("/") or "?" in path:
+        raise ValueError("resource ticket path must be an absolute URL path")
+    lifetime = max(1, min(int(lifetime_seconds), RESOURCE_TICKET_EXPIRE_SECONDS))
+    payload = _b64url_encode(json.dumps({
+        "path": path,
+        "exp": int(time.time()) + lifetime,
+    }, separators=(",", ":")).encode())
+    signature = hmac.new(
+        _JWT_SECRET.encode(),
+        f"resource.{payload}".encode(),
+        hashlib.sha256,
+    ).digest()
+    return f"{payload}.{_b64url_encode(signature)}"
+
+
+def verify_resource_ticket(ticket: str, path: str) -> bool:
+    """Verify that a resource ticket is valid for the requested exact path."""
+    try:
+        payload_b64, signature_b64 = ticket.split(".", 1)
+        expected_signature = hmac.new(
+            _JWT_SECRET.encode(),
+            f"resource.{payload_b64}".encode(),
+            hashlib.sha256,
+        ).digest()
+        if not hmac.compare_digest(expected_signature, _b64url_decode(signature_b64)):
+            return False
+        payload = json.loads(_b64url_decode(payload_b64))
+        return payload.get("path") == path and payload.get("exp", 0) >= time.time()
+    except Exception:
+        return False
+
+
+def rotate_signing_secret() -> None:
+    """Invalidate every outstanding access token after a security event."""
+    global _JWT_SECRET
+    _JWT_SECRET = secrets.token_hex(32)

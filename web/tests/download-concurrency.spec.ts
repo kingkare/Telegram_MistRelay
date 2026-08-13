@@ -21,12 +21,22 @@ let fixtureServerUrl = ''
 function sendFixtureResponse(request: IncomingMessage, response: ServerResponse) {
   const supportsRange = request.url?.startsWith('/range') || request.url?.startsWith('/fail-once')
   const headers: Record<string, string> = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    'Access-Control-Allow-Headers': 'Range',
+    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range',
     'Content-Type': 'application/octet-stream',
     'Content-Length': String(fixtureBytes.byteLength),
     'Content-Disposition': 'attachment; filename="fixture.bin"',
   }
   if (supportsRange) {
     headers['Accept-Ranges'] = 'bytes'
+  }
+
+  if (request.method === 'OPTIONS') {
+    response.writeHead(204, headers)
+    response.end()
+    return
   }
 
   if (request.method === 'HEAD') {
@@ -296,7 +306,19 @@ async function installTauriDownloadHarness(page: Page, maxConcurrentTasks: numbe
 
 async function openDownloads(page: Page, maxConcurrentTasks = 2) {
   await installTauriDownloadHarness(page, maxConcurrentTasks)
+  await page.route('**/api/auth/me', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        user: { id: 1, username: 'download-test', role: 'user' },
+      }),
+    })
+  })
   await page.goto('/pc/downloads')
+  await expect(page).toHaveURL(/\/pc\/downloads$/)
+  await expect(page.locator('.pc-downloads-view')).toBeVisible()
 }
 
 async function enqueueDownloads(page: Page, tasks: Array<{ sourceUrl: string; fileName: string; savePath: string; threads: number }>) {

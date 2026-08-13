@@ -24,7 +24,7 @@ queue_processing_lock = None  # 用于确保队列处理器只有一个实例在
 
 # 队列项信息跟踪:跟踪每个队列项的详细信息
 # 格式: {queue_id: {'message_id': int, 'chat_id': int, 'title': str, 'type': 'single'|'media_group', 
-#                    'media_group_total': int, 'status': 'waiting'|'processing'|'completed', 
+#                    'media_group_total': int, 'status': 'waiting'|'processing'|'completed',
 #                    'task_gids': list, 'added_at': timestamp}}
 queue_item_tracker = {}
 current_processing_queue_id = None  # 当前正在处理的队列ID
@@ -33,6 +33,21 @@ queue_id_counter = 0  # 队列ID计数器
 
 # 消息并发控制信号量（用于限制同时处理的消息数量）
 message_concurrent_semaphore = None
+DEFAULT_MAX_QUEUE_SIZE = 100
+HARD_MAX_QUEUE_SIZE = 1000
+
+
+def _get_max_queue_size() -> int:
+    try:
+        from configer import get_config_value
+
+        configured = int(get_config_value("MAX_MESSAGE_QUEUE_SIZE", DEFAULT_MAX_QUEUE_SIZE))
+    except (TypeError, ValueError, RuntimeError):
+        configured = DEFAULT_MAX_QUEUE_SIZE
+    except Exception as exc:
+        logger.warning("无法读取消息队列上限，使用默认值 %s: %s", DEFAULT_MAX_QUEUE_SIZE, exc)
+        configured = DEFAULT_MAX_QUEUE_SIZE
+    return max(1, min(configured, HARD_MAX_QUEUE_SIZE))
 
 
 def _ensure_queue_initialized():
@@ -42,7 +57,7 @@ def _ensure_queue_initialized():
     global message_processing_queue, queue_processing_lock, queue_tracker_lock, message_concurrent_semaphore
     
     if message_processing_queue is None:
-        message_processing_queue = asyncio.Queue()
+        message_processing_queue = asyncio.Queue(maxsize=_get_max_queue_size())
     
     if queue_processing_lock is None:
         queue_processing_lock = asyncio.Lock()
@@ -91,7 +106,7 @@ async def message_queue_processor():
     
     # 确保队列已初始化
     _ensure_queue_initialized()
-    
+
     # 获取配置的最大并发消息数
     try:
         from configer import get_config_value
@@ -201,6 +216,7 @@ async def _process_message_item(queue_item, aria2_client):
         except Exception as e:
             logger.error(f"获取排队通知消息失败: {e}", exc_info=True)
     
+    requeued = False
     try:
         # 执行任务
         # 将排队回复消息传递给处理函数（如果支持）
@@ -319,8 +335,13 @@ async def _process_message_item(queue_item, aria2_client):
                 if is_flood_wait_error(e2):
                     logger.warning(f"检测到限流错误,触发限流处理")
                     await handle_flood_wait_start(e2)
-                    # 将当前任务重新放回队列头部
-                    await message_processing_queue.put((task_func, task_args, task_kwargs, queue_notification, queue_id))
+                    try:
+                        message_processing_queue.put_nowait(
+                            (task_func, task_args, task_kwargs, queue_notification, queue_id)
+                        )
+                        requeued = True
+                    except asyncio.QueueFull:
+                        logger.error("限流重试任务无法重新入队：消息队列已满")
                 else:
                     logger.error(f"处理消息队列任务失败: {e2}", exc_info=True)
         else:
@@ -330,33 +351,25 @@ async def _process_message_item(queue_item, aria2_client):
         if is_flood_wait_error(e):
             logger.warning(f"检测到限流错误,触发限流处理")
             await handle_flood_wait_start(e)
-            # 将当前任务重新放回队列头部,等限流结束后继续处理
-            # 注意:使用 put_nowait 而不是 put,避免阻塞
+            # 将当前任务重新放回队列尾部；队列满时安全拒绝。
             try:
-                # 创建新的队列,将当前任务放在最前面
-                temp_items = [(task_func, task_args, task_kwargs, queue_notification, queue_id)]
-                while not message_processing_queue.empty():
-                    try:
-                        item = message_processing_queue.get_nowait()
-                        temp_items.append(item)
-                    except Exception:
-                        break
-                # 重新放回队列
-                for item in temp_items:
-                    message_processing_queue.put_nowait(item)
-                logger.info(f"已将当前任务和 {len(temp_items)-1} 个等待任务重新放回队列")
+                message_processing_queue.put_nowait(
+                    (task_func, task_args, task_kwargs, queue_notification, queue_id)
+                )
+                requeued = True
+                logger.info("已将限流任务重新放回队列")
+            except asyncio.QueueFull:
+                logger.error("限流重试任务无法重新入队：消息队列已满")
             except Exception as requeue_error:
                 logger.error(f"重新放回队列失败: {requeue_error}", exc_info=True)
         else:
             logger.error(f"处理消息队列任务失败: {e}", exc_info=True)
     finally:
-        # 更新队列项状态（即使出错也标记）
-        if queue_id and queue_tracker_lock:
+        # 完成项不保留在内存 tracker 中；重排队项继续复用原记录。
+        if queue_id and queue_tracker_lock and not requeued:
             try:
                 async with queue_tracker_lock:
-                    if queue_id in queue_item_tracker:
-                        if queue_item_tracker[queue_id]['status'] != 'completed':
-                            queue_item_tracker[queue_id]['status'] = 'completed'  # 出错也标记为完成
+                    queue_item_tracker.pop(queue_id, None)
                     if current_processing_queue_id == queue_id:
                         current_processing_queue_id = None
             except Exception as e:
@@ -374,7 +387,7 @@ def enqueue_message_task(task_func, *args, **kwargs):
         **kwargs: 关键字参数
     
     Returns:
-        排队通知消息（如果有）
+        bool: 是否成功进入有界队列
     """
     global queue_processor_task, queue_id_counter
     
@@ -383,6 +396,13 @@ def enqueue_message_task(task_func, *args, **kwargs):
     
     # 确保队列已初始化
     _ensure_queue_initialized()
+
+    if message_processing_queue.full():
+        logger.warning(
+            "拒绝消息入队：队列已达到硬上限 %s",
+            message_processing_queue.maxsize,
+        )
+        return False
     
     # 确保队列处理器任务已启动（使用锁确保只有一个处理器实例）
     async def _ensure_processor_started():
@@ -449,36 +469,17 @@ def enqueue_message_task(task_func, *args, **kwargs):
                     title = "媒体文件"
                 
                 # 记录队列项信息
-                import asyncio as asyncio_module
                 try:
-                    loop = asyncio_module.get_event_loop()
-                    if loop.is_running():
-                        # 如果事件循环正在运行，使用异步方式
-                        async def _track_queue_item():
-                            async with queue_tracker_lock:
-                                queue_item_tracker[queue_id] = {
-                                    'message_id': message_obj.id,
-                                    'chat_id': message_obj.chat.id,
-                                    'title': title,
-                                    'type': 'media_group' if is_media_group else 'single',
-                                    'media_group_total': media_group_total,
-                                    'status': 'waiting',
-                                    'task_gids': [],
-                                    'added_at': asyncio_module.get_event_loop().time()
-                                }
-                        loop.create_task(_track_queue_item())
-                    else:
-                        # 如果事件循环未运行，直接设置（不应该发生）
-                        queue_item_tracker[queue_id] = {
-                            'message_id': message_obj.id,
-                            'chat_id': message_obj.chat.id,
-                            'title': title,
-                            'type': 'media_group' if is_media_group else 'single',
-                            'media_group_total': media_group_total,
-                            'status': 'waiting',
-                            'task_gids': [],
-                            'added_at': time.time() if hasattr(time, 'time') else 0
-                        }
+                    queue_item_tracker[queue_id] = {
+                        'message_id': message_obj.id,
+                        'chat_id': message_obj.chat.id,
+                        'title': title,
+                        'type': 'media_group' if is_media_group else 'single',
+                        'media_group_total': media_group_total,
+                        'status': 'waiting',
+                        'task_gids': [],
+                        'added_at': asyncio.get_running_loop().time(),
+                    }
                 except Exception as e:
                     logger.debug(f"记录队列项信息失败: {e}")
             except Exception as e:
@@ -503,8 +504,17 @@ def enqueue_message_task(task_func, *args, **kwargs):
             logger.info(f"消息已加入处理队列，当前队列大小: {queue_size}（严格串行模式，按顺序处理）")
         else:
             logger.debug(f"消息已加入处理队列，当前队列大小: {queue_size}")
+        return True
+    except asyncio.QueueFull:
+        if queue_notification:
+            queue_notification.cancel()
+        if queue_id:
+            queue_item_tracker.pop(queue_id, None)
+        logger.warning("拒绝消息入队：队列在提交时已满")
+        return False
     except Exception as e:
         logger.error(f"将任务加入队列失败: {e}", exc_info=True)
+        return False
 
 
 async def get_queue_status():

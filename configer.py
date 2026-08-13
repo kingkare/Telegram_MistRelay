@@ -1,62 +1,50 @@
-import yaml
 import os
+
+from legacy_config import (
+    LegacyConfigError,
+    legacy_config_path,
+    legacy_yaml_bootstrap_enabled,
+    load_legacy_config,
+)
 
 # 配置缓存
 _config_cache = None
 _config_cache_time = None
 
 def _load_config():
-    """从数据库或YAML文件加载配置"""
+    """Load runtime configuration from SQLite, with explicit one-shot migration only."""
     global _config_cache, _config_cache_time
-    
-    # 优先从数据库读取配置，如果数据库中没有则从config.yml读取
+
     try:
-        from db import get_config, get_all_configs, init_config_from_yaml
-        
-        # 尝试从数据库读取配置
+        from db import DB_PATH, get_all_configs
+
         db_config = get_all_configs()
-        
         if db_config:
-            # 从数据库读取配置
             result = db_config
-            # 补充缺失的配置项（向后兼容）
-            if not result.get('API_ID'):
-                # 如果数据库中没有配置，尝试从config.yml导入
-                config_file = './db/config.yml'
-                if os.path.exists(config_file):
-                    with open(config_file, 'r', encoding='utf-8') as f:
-                        yaml_config = yaml.load(f.read(), Loader=yaml.FullLoader)
-                    # 导入到数据库
-                    init_config_from_yaml()
-                    # 重新从数据库读取
-                    result = get_all_configs()
+        elif legacy_yaml_bootstrap_enabled():
+            result = load_legacy_config(legacy_config_path(DB_PATH))
         else:
-            # 数据库中没有配置，从config.yml读取并导入
-            config_file = './db/config.yml'
-            if os.path.exists(config_file):
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    result = yaml.load(f.read(), Loader=yaml.FullLoader)
-                # 导入到数据库
-                init_config_from_yaml()
-            else:
-                result = {}
-        
+            result = {}
+
         _config_cache = result
-        _config_cache_time = os.path.getmtime('./db/downloads.db') if os.path.exists('./db/downloads.db') else None
+        _config_cache_time = os.path.getmtime(DB_PATH) if os.path.exists(DB_PATH) else None
         return result
     except Exception as e:
-        # 如果数据库操作失败，回退到从config.yml读取
-        print(f"[CONFIG] 警告: 无法从数据库读取配置，使用config.yml: {e}")
-        config_file = './db/config.yml'
-        if os.path.exists(config_file):
-            with open(config_file, 'r', encoding='utf-8') as f:
-                result = yaml.load(f.read(), Loader=yaml.FullLoader)
-            _config_cache = result
-            _config_cache_time = os.path.getmtime(config_file)
-            return result
-        else:
+        if not legacy_yaml_bootstrap_enabled():
+            print(f"[CONFIG] SQLite configuration unavailable; YAML fallback disabled: {e}")
             _config_cache = {}
+            _config_cache_time = None
             return {}
+        try:
+            from db import DB_PATH
+
+            config_file = legacy_config_path(DB_PATH)
+            result = load_legacy_config(config_file)
+        except LegacyConfigError as legacy_error:
+            raise RuntimeError("explicit legacy YAML bootstrap failed") from legacy_error
+        _config_cache = result
+        _config_cache_time = os.path.getmtime(config_file)
+        return result
 
 
 def reload_config():
@@ -83,7 +71,7 @@ def get_config_value(key, default=None):
 # 初始加载配置
 result = _load_config()
 
-# 从配置中读取值，支持数据库和YAML两种方式
+# 从配置中读取值；YAML 仅用于显式的一次性离线迁移
 # 注意：这些变量在模块导入时初始化，如果需要热重载，请使用 get_config_value() 函数
 API_ID = result.get('API_ID') or 0
 API_HASH = result.get('API_HASH') or ''
@@ -91,7 +79,6 @@ BOT_TOKEN = result.get('BOT_TOKEN') or ''
 PROXY_IP = result.get('PROXY_IP') or None
 PROXY_PORT = result.get('PROXY_PORT') or None
 ADMIN_ID = result.get('ADMIN_ID') or 0
-FORWARD_ID = result.get('FORWARD_ID') or None
 UP_TELEGRAM = result.get('UP_TELEGRAM', True)
 RPC_SECRET = result.get('RPC_SECRET') or ''
 RPC_URL = result.get('RPC_URL') or 'localhost:6800/jsonrpc'
@@ -101,7 +88,10 @@ ENABLE_STREAM = result.get('ENABLE_STREAM', True)  # 默认启用
 BIN_CHANNEL = result.get('BIN_CHANNEL')
 STREAM_PORT = result.get('STREAM_PORT', 8080)
 STREAM_BIND_ADDRESS = result.get('STREAM_BIND_ADDRESS', '0.0.0.0')
-STREAM_HASH_LENGTH = result.get('STREAM_HASH_LENGTH', 6)
+try:
+    STREAM_HASH_LENGTH = max(32, int(result.get('STREAM_HASH_LENGTH', 32) or 32))
+except (TypeError, ValueError):
+    STREAM_HASH_LENGTH = 32
 STREAM_HAS_SSL = result.get('STREAM_HAS_SSL', False)
 STREAM_NO_PORT = result.get('STREAM_NO_PORT', False)
 STREAM_FQDN = result.get('STREAM_FQDN', '')
@@ -125,6 +115,8 @@ DOWNLOAD_RETENTION_HOURS = result.get('DOWNLOAD_RETENTION_HOURS', 24)
 DOWNLOAD_CLEANUP_INTERVAL_SECONDS = result.get('DOWNLOAD_CLEANUP_INTERVAL_SECONDS', 3600)
 # 消息队列最大并发处理数量（默认5，限制同时处理的消息数量）
 MAX_CONCURRENT_MESSAGES = result.get('MAX_CONCURRENT_MESSAGES', 5)
+# 消息队列等待上限（默认100，运行时强制限制在1-1000）
+MAX_MESSAGE_QUEUE_SIZE = result.get('MAX_MESSAGE_QUEUE_SIZE', 100)
 # aria2最大并发下载数（默认5，限制同时下载的任务数量）
 ARIA2_MAX_CONCURRENT_DOWNLOADS = result.get('ARIA2_MAX_CONCURRENT_DOWNLOADS', 5)
 # 多机器人负载配置

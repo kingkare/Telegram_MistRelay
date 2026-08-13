@@ -116,26 +116,6 @@ class UploadHandler:
     async def _mark_failed(self, gid):
         await self._set_task_tracker_status(gid, 'failed')
 
-    async def _forward_legacy_target(self, upload_client, message, source_chat_id):
-        """Optionally keep the old FORWARD_ID mirror without making it the TG-drive source."""
-        forward_id = get_config_value('FORWARD_ID', None)
-        if not forward_id or str(forward_id) == str(source_chat_id):
-            return
-
-        try:
-            forward_chat_id = int(forward_id)
-        except (TypeError, ValueError):
-            forward_chat_id = forward_id
-
-        try:
-            if hasattr(message, 'forward_to'):  # Telethon
-                await message.forward_to(forward_chat_id)
-            else:  # Pyrogram
-                source = getattr(getattr(message, "chat", None), "id", source_chat_id)
-                await upload_client.forward_messages(forward_chat_id, source, message.id)
-        except Exception as e:
-            logger.warning(f"转发上传文件到兼容目标失败(已忽略): {e}")
-
     async def upload_to_telegram_with_load_balance(self, file_path, gid, upload_id=None):
         """
         使用多客户端负载均衡上传文件到Telegram
@@ -231,7 +211,6 @@ class UploadHandler:
                         temp_msg = await upload_client.send_photo(upload_chat_id, file_path)
 
                     remote_path = self._record_uploaded_media(temp_msg, os.path.basename(file_path))
-                    await self._forward_legacy_target(upload_client, temp_msg, upload_chat_id)
 
                     # 标记图片上传完成
                     if upload_id:
@@ -300,7 +279,6 @@ class UploadHandler:
                             temp_msg = await upload_client.send_video(upload_chat_id, file_path)
 
                     remote_path = self._record_uploaded_media(temp_msg, os.path.basename(file_path))
-                    await self._forward_legacy_target(upload_client, temp_msg, upload_chat_id)
 
                     # 标记视频上传完成
                     if upload_id:
@@ -355,7 +333,6 @@ class UploadHandler:
                         temp_msg = await upload_client.send_document(upload_chat_id, file_path)
 
                     remote_path = self._record_uploaded_media(temp_msg, os.path.basename(file_path))
-                    await self._forward_legacy_target(upload_client, temp_msg, upload_chat_id)
 
                     if hasattr(msg, 'delete'):
                         await msg.delete()

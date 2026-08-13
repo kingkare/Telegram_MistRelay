@@ -105,12 +105,16 @@ export interface DockerLogsResponse {
   success: boolean
   logs?: string
   lines?: number
+  source?: 'docker' | 'application'
   error?: string
 }
 
 export interface ConfigResponse {
   success: boolean
   data?: Record<string, any>
+  redacted_keys?: string[]
+  secret_counts?: Record<string, number>
+  offline_only_keys?: string[]
   error?: string
 }
 

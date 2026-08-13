@@ -6,9 +6,10 @@
       class="pc-card pc-media-card pc-drive-card"
       role="button"
       tabindex="0"
+      :aria-label="`打开 ${getTitle(item)}`"
       @click="$emit('open', item)"
-      @keydown.enter="$emit('open', item)"
-      @keydown.space.prevent="$emit('open', item)"
+      @keydown.enter.self="$emit('open', item)"
+      @keydown.space.self.prevent="$emit('open', item)"
     >
       <span class="pc-media-cover pc-drive-cover" :class="getCoverClass(item)">
         <img
@@ -35,6 +36,7 @@
           class="pc-drive-delete-button"
           type="button"
           title="删除"
+          :aria-label="`删除 ${getTitle(item)}`"
           @click.stop="$emit('delete', item)"
         >
           <el-icon :size="16"><Delete /></el-icon>
@@ -98,10 +100,10 @@ function getMeta(item: TelegramDriveItem): string {
 }
 
 function getTypeLabel(item: TelegramDriveItem): string {
-  if (isTelegramDriveFolder(item)) return 'ALBUM'
-  if (isVideo(item)) return 'VIDEO'
-  if (isImage(item)) return 'IMAGE'
-  if (isAudio(item)) return 'AUDIO'
+  if (isTelegramDriveFolder(item)) return '相册'
+  if (isVideo(item)) return '视频'
+  if (isImage(item)) return '图片'
+  if (isAudio(item)) return '音频'
   const title = getTitle(item)
   const extension = title.includes('.') ? title.split('.').pop() : ''
   return extension?.slice(0, 6).toUpperCase() || 'FILE'
@@ -145,9 +147,9 @@ function markCoverFailed(item: TelegramDriveItem) {
 }
 
 .pc-drive-card:hover {
-  border-color: #c8ccef;
+  border-color: #c5ccda;
   box-shadow: var(--pc-shadow-md);
-  transform: translateY(-2px);
+  transform: translateY(-1px);
 }
 
 .pc-drive-card:focus-visible {
@@ -161,23 +163,23 @@ function markCoverFailed(item: TelegramDriveItem) {
 }
 
 .pc-drive-cover.is-album {
-  background: linear-gradient(135deg, #ebeefe, #f2eafe);
+  background: #f0effa;
 }
 
 .pc-drive-cover.is-video {
-  background: linear-gradient(135deg, #e8edff, #eef4fb);
+  background: #edf2f8;
 }
 
 .pc-drive-cover.is-image {
-  background: linear-gradient(135deg, #e8f2fa, #f1effd);
+  background: #edf4f6;
 }
 
 .pc-drive-cover.is-audio {
-  background: linear-gradient(135deg, #f3ebfb, #ecefff);
+  background: #f3eff8;
 }
 
 .pc-drive-cover.is-file {
-  background: linear-gradient(135deg, #edf0f6, #f5f6fa);
+  background: #f1f3f6;
 }
 
 .pc-drive-cover img {
@@ -191,7 +193,7 @@ function markCoverFailed(item: TelegramDriveItem) {
   display: grid;
   align-content: center;
   place-items: center;
-  gap: 9px;
+  gap: 6px;
   width: 100%;
   height: 100%;
   color: var(--pc-color-primary-strong);
@@ -200,18 +202,17 @@ function markCoverFailed(item: TelegramDriveItem) {
 .pc-drive-fallback-icon {
   display: inline-grid;
   place-items: center;
-  width: 52px;
-  height: 52px;
-  border: 1px solid rgba(98, 109, 231, 0.16);
-  border-radius: var(--pc-radius-md);
-  background: rgba(255, 255, 255, 0.76);
-  box-shadow: 0 5px 14px rgba(55, 61, 94, 0.08);
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(79, 95, 215, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.82);
 }
 
 .pc-drive-type-label {
   color: var(--pc-color-text-muted);
-  font-size: 9px;
-  font-weight: 750;
+  font-size: 10px;
+  font-weight: 600;
   letter-spacing: 0;
 }
 
@@ -225,7 +226,7 @@ function markCoverFailed(item: TelegramDriveItem) {
   background: rgba(37, 42, 61, 0.76);
   color: #ffffff;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 18px;
 }
 
@@ -237,18 +238,41 @@ function markCoverFailed(item: TelegramDriveItem) {
   place-items: center;
   width: 30px;
   height: 30px;
-  border: 0;
-  border-radius: var(--pc-radius-md);
   border: 1px solid rgba(207, 212, 227, 0.88);
-  background: rgba(255, 255, 255, 0.9);
-  color: #697086;
-  box-shadow: 0 3px 9px rgba(55, 61, 94, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--pc-color-text-muted);
+  box-shadow: 0 2px 7px rgba(31, 41, 55, 0.1);
   cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 140ms ease, transform 140ms ease, background-color 140ms ease, border-color 140ms ease;
+}
+
+.pc-drive-card:hover .pc-drive-delete-button,
+.pc-drive-card:focus-within .pc-drive-delete-button {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 .pc-drive-delete-button:hover {
   border-color: var(--pc-color-danger);
   background: var(--pc-color-danger);
   color: #ffffff;
+}
+
+.pc-drive-delete-button:focus-visible {
+  outline: 3px solid var(--pc-color-focus);
+  outline-offset: 2px;
+}
+
+@media (hover: none) {
+  .pc-drive-delete-button {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
 }
 </style>

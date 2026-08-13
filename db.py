@@ -48,8 +48,16 @@ import os
 import sqlite3
 import json
 import logging
+import stat
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
+
+from legacy_config import (
+    legacy_config_path,
+    legacy_yaml_bootstrap_enabled,
+    load_legacy_config,
+    retire_legacy_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +73,7 @@ if _db_dir and not os.path.exists(_db_dir):
 
 def _now_iso() -> str:
     """返回UTC时间的ISO8601格式字符串，带'Z'后缀表示UTC时区"""
-    return datetime.utcnow().isoformat(timespec="seconds") + 'Z'
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _format_message_date(msg_date) -> str:
@@ -89,6 +97,7 @@ def get_connection():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
 
@@ -291,6 +300,31 @@ def init_db():
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions (user_id)"
         )
+
+        # Older releases created this now-unused index table but did not enable
+        # SQLite foreign keys. Preserve its records while applying the declared
+        # ON DELETE SET NULL result to already-orphaned links.
+        has_legacy_channel_files = cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tg_channel_files'"
+        ).fetchone()
+        if has_legacy_channel_files:
+            repaired_links = cur.execute(
+                """
+                UPDATE tg_channel_files
+                   SET file_unique_id = NULL
+                 WHERE file_unique_id IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM tg_media
+                        WHERE tg_media.file_unique_id = tg_channel_files.file_unique_id
+                   )
+                """
+            ).rowcount
+            if repaired_links:
+                logger.warning(
+                    "已将 %d 条历史频道索引孤儿外键安全置空",
+                    repaired_links,
+                )
     
     # 检查是否需要从config.yml迁移配置（在with块外执行，因为需要独立的连接）
     with db_conn() as conn:
@@ -298,15 +332,18 @@ def init_db():
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) as count FROM config_settings")
         count = cur.fetchone()['count']
-        if count == 0:
-            # 配置表为空，尝试从config.yml导入
+        if legacy_yaml_bootstrap_enabled():
+            # The explicit recovery path also retries retirement after an earlier
+            # successful database commit followed by a filesystem cleanup error.
             try:
                 if init_config_from_yaml():
                     logger.info("已从config.yml成功导入配置到数据库")
                 else:
-                    logger.warning("配置表为空，且无法从config.yml导入配置")
+                    logger.info("旧YAML配置已退休或无需迁移")
             except Exception as e:
-                logger.warning(f"从config.yml导入配置时出错: {e}")
+                raise RuntimeError("旧YAML配置导入或安全退休失败") from e
+        elif count == 0:
+            logger.warning("配置表为空，且旧YAML引导未授权")
 
 
 def save_tg_media(message, media=None) -> str:
@@ -1039,24 +1076,38 @@ def get_config(key: str, default=None):
         return default
 
 
-def set_config(key: str, value: any, value_type: str = 'string', category: str = 'general', description: str = None):
-    """设置配置值"""
-    now = _now_iso()
-    
-    # 根据类型转换值
+def _serialize_config_value(value, value_type: str) -> str:
     if value_type == 'list' or value_type == 'json':
-        value_str = json.dumps(value, ensure_ascii=False) if value else ''
-    else:
-        value_str = str(value) if value is not None else ''
-    
-    with db_cursor() as cur:
-        cur.execute(
+        return json.dumps(value, ensure_ascii=False) if value else ''
+    return str(value) if value is not None else ''
+
+
+def set_configs(updates: list[tuple]):
+    """Atomically update multiple configuration values."""
+    now = _now_iso()
+    with db_conn() as conn:
+        conn.executemany(
             """
             INSERT OR REPLACE INTO config_settings (key, value, value_type, category, description, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (key, value_str, value_type, category, description, now)
+            [
+                (
+                    key,
+                    _serialize_config_value(value, value_type),
+                    value_type,
+                    category,
+                    description,
+                    now,
+                )
+                for key, value, value_type, category, description in updates
+            ],
         )
+
+
+def set_config(key: str, value: any, value_type: str = 'string', category: str = 'general', description: str = None):
+    """设置配置值"""
+    set_configs([(key, value, value_type, category, description)])
 
 
 def get_all_configs(category: str = None):
@@ -1094,26 +1145,19 @@ def get_all_configs(category: str = None):
 
 
 def init_config_from_yaml():
-    """从config.yml初始化配置到数据库（迁移函数）"""
-    import yaml
-    import os
-    
-    config_file = './db/config.yml'
-    if not os.path.exists(config_file):
+    """Perform an explicitly authorized, one-shot migration from config.yml."""
+    if not legacy_yaml_bootstrap_enabled():
         return False
-    
-    try:
-        with open(config_file, 'r', encoding='utf-8') as f:
-            yaml_config = yaml.load(f.read(), Loader=yaml.FullLoader)
-        
-        # 配置项定义：key -> (value_type, category, description)
-        config_definitions = {
+    config_file = legacy_config_path(DB_PATH)
+    yaml_config = load_legacy_config(config_file)
+
+    # 配置项定义：key -> (value_type, category, description)
+    config_definitions = {
             # Telegram配置
             'API_ID': ('int', 'telegram', 'Telegram API ID'),
             'API_HASH': ('string', 'telegram', 'Telegram API Hash'),
             'BOT_TOKEN': ('string', 'telegram', 'Telegram Bot Token'),
             'ADMIN_ID': ('int', 'telegram', 'Telegram管理员ID'),
-            'FORWARD_ID': ('string', 'telegram', '转发ID'),
             'UP_TELEGRAM': ('bool', 'telegram', '是否上传到Telegram频道网盘'),
             
             # 下载配置
@@ -1143,25 +1187,74 @@ def init_config_from_yaml():
             'STREAM_KEEP_ALIVE': ('bool', 'stream', '是否保持连接活跃'),
             'STREAM_PING_INTERVAL': ('int', 'stream', 'Ping间隔（秒）'),
             'STREAM_USE_SESSION_FILE': ('bool', 'stream', '是否使用会话文件'),
-            'STREAM_ALLOWED_USERS': ('string', 'stream', '允许使用直链的用户列表'),
+            'STREAM_ALLOWED_USERS': ('string', 'stream', '允许使用直链的数字用户 ID 列表'),
             'STREAM_AUTO_DOWNLOAD': ('bool', 'stream', '历史兼容：是否自动添加到下载队列'),
             'SEND_STREAM_LINK': ('bool', 'stream', '是否发送直链信息给用户'),
+            'MAX_CONCURRENT_MESSAGES': ('int', 'stream', '消息处理最大并发数'),
+            'MAX_MESSAGE_QUEUE_SIZE': ('int', 'stream', '消息等待队列上限（1-1000）'),
             'MULTI_BOT_TOKENS': ('list', 'stream', '多机器人Token列表'),
-        }
-        
-        # 导入配置
-        imported_count = 0
-        for key, (value_type, category, description) in config_definitions.items():
-            if key in yaml_config:
-                value = yaml_config[key]
-                set_config(key, value, value_type, category, description)
-                imported_count += 1
-        
-        return imported_count > 0
-    except Exception as e:
-        import logging
-        logging.error(f"从config.yml导入配置失败: {e}")
+    }
+
+    updates = [
+        (key, yaml_config[key], value_type, category, description)
+        for key, (value_type, category, description) in config_definitions.items()
+        if key in yaml_config
+    ]
+    with db_conn() as connection:
+        existing_count = connection.execute(
+            "SELECT COUNT(*) FROM config_settings"
+        ).fetchone()[0]
+    if not updates:
+        if existing_count == 0:
+            raise RuntimeError("legacy configuration contains no supported settings")
         return False
+
+    now = _now_iso()
+    imported = existing_count == 0
+    if imported:
+        with db_conn() as connection:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO config_settings
+                    (key, value, value_type, category, description, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        key,
+                        _serialize_config_value(value, value_type),
+                        value_type,
+                        category,
+                        description,
+                        now,
+                    )
+                    for key, value, value_type, category, description in updates
+                ],
+            )
+
+    expected = {
+        key: (_serialize_config_value(value, value_type), value_type)
+        for key, value, value_type, _category, _description in updates
+    }
+    placeholders = ",".join("?" for _ in expected)
+    with db_conn() as connection:
+        actual = {
+            row[0]: (row[1], row[2])
+            for row in connection.execute(
+                f"SELECT key, value, value_type FROM config_settings "
+                f"WHERE key IN ({placeholders})",
+                tuple(expected),
+            )
+        }
+    if actual != expected:
+        raise RuntimeError(
+            "existing SQLite settings do not match the explicitly supplied legacy YAML"
+        )
+
+    # SQLite is committed and verified before touching the separate YAML file.
+    # If retirement fails, the explicit bootstrap command can safely be rerun.
+    retire_legacy_config(config_file)
+    return imported
 
 
 # ============================================================================
@@ -2059,18 +2152,56 @@ def migrate_upload_data():
 # ======================== 用户管理 ========================
 
 def ensure_default_admin():
-    """确保默认管理员账号存在。若用户表为空则自动创建。"""
+    """Create the first administrator only from an explicit strong secret."""
     from auth import hash_password
     with db_conn() as conn:
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM users")
         if cur.fetchone()[0] == 0:
+            password_file = os.environ.get(
+                "MISTRELAY_ADMIN_PASSWORD_FILE",
+                "/app/db/admin-password",
+            )
+            try:
+                password_stat = os.stat(password_file, follow_symlinks=False)
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    "initial administrator password file does not exist"
+                ) from exc
+            if not stat.S_ISREG(password_stat.st_mode):
+                raise RuntimeError("initial administrator password must be a regular file")
+            if password_stat.st_uid != os.geteuid():
+                raise RuntimeError("initial administrator password file must be owned by the runtime user")
+            if stat.S_IMODE(password_stat.st_mode) & 0o077:
+                raise RuntimeError("initial administrator password file permissions must not allow group or other access")
+            with open(password_file, "r", encoding="utf-8") as handle:
+                password = handle.read().strip()
+            if not 16 <= len(password) <= 512:
+                raise RuntimeError(
+                    "initial administrator password must be provided via "
+                    "MISTRELAY_ADMIN_PASSWORD_FILE and contain 16-512 characters"
+                )
             now = _now_iso()
             cur.execute(
                 "INSERT INTO users (username, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                ("admin", hash_password("admin123"), "admin", now, now),
+                ("admin", hash_password(password), "admin", now, now),
             )
-            logger.info("已创建默认管理员账号 admin / admin123，请尽快修改密码")
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO config_settings
+                    (key, value, value_type, category, description, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "SECURITY_BASELINE_VERSION",
+                    "2",
+                    "int",
+                    "security",
+                    "Applied security baseline version",
+                    now,
+                ),
+            )
+            logger.info("已从显式初始密码文件创建管理员账号 admin")
 
 
 def browse_tg_media(

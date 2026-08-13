@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
   testDir: './tests',
+  outputDir: '../.playwright/test-results',
   timeout: 30000,
   expect: {
     timeout: 8000,
@@ -10,6 +11,7 @@ export default defineConfig({
   reporter: 'list',
   use: {
     baseURL: 'http://127.0.0.1:5173',
+    timezoneId: 'UTC',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },

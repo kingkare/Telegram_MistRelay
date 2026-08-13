@@ -1,12 +1,12 @@
 <template>
   <main class="pc-client pc-login-page">
     <section class="pc-login-visual" aria-hidden="true">
-      <div class="pc-anime-asset pc-anime-login-hero"></div>
+      <img :src="loginHeroUrl" alt="">
     </section>
 
-    <section class="pc-login-panel pc-card">
+    <section class="pc-login-panel">
       <div class="pc-login-heading">
-        <span class="pc-login-mark">M</span>
+        <img class="pc-login-mark" :src="appMarkUrl" alt="">
         <div>
           <h1>MistRelay</h1>
           <p>桌面客户端</p>
@@ -33,6 +33,7 @@
             <el-button
               class="pc-test-button"
               :loading="checking"
+              :disabled="loading"
               @click="handleConnectionTest"
             >
               测试
@@ -76,6 +77,7 @@
           class="pc-login-submit"
           size="large"
           :loading="loading"
+          :disabled="checking"
           @click="handleLogin"
         >
           登录
@@ -86,10 +88,12 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { FormInstance, FormRules } from 'element-plus'
 import { Link, Lock, User } from '@element-plus/icons-vue'
+import appMarkUrl from '@/assets/pc-theme/app-mark.svg'
+import loginHeroUrl from '@/assets/pc-theme/illustrations/login-hero.svg'
 import { useAuthStore } from '@/stores/auth'
 import { checkServerConnection } from '@/utils/connection'
 import {
@@ -110,6 +114,7 @@ const loading = ref(false)
 const checking = ref(false)
 const message = ref('')
 const messageType = ref<MessageType>('info')
+const verifiedServerUrl = ref('')
 
 const form = reactive({
   serverUrl: getServerBaseUrl() || getDefaultServerBaseUrl(),
@@ -147,6 +152,12 @@ const rules: FormRules = {
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
 }
 
+watch(() => form.serverUrl, (value) => {
+  if (verifiedServerUrl.value === normalizeServerBaseUrl(value)) return
+  verifiedServerUrl.value = ''
+  message.value = ''
+})
+
 function setMessage(text: string, type: MessageType) {
   message.value = text
   messageType.value = type
@@ -158,19 +169,29 @@ async function validateForm(): Promise<boolean> {
 }
 
 async function handleConnectionTest(): Promise<boolean> {
+  if (checking.value) return false
+
   const valid = await formRef.value?.validateField('serverUrl').catch(() => false)
   if (valid === false) return false
 
+  const requestedUrl = normalizeServerBaseUrl(form.serverUrl)
   checking.value = true
   try {
-    const result = await checkServerConnection(form.serverUrl)
+    const result = await checkServerConnection(requestedUrl)
+
+    // Ignore a stale response if the user edited the address while the check ran.
+    if (normalizeServerBaseUrl(form.serverUrl) !== requestedUrl) return false
+
     if (result.ok) {
-      form.serverUrl = result.serverBaseUrl
-      setServerBaseUrl(result.serverBaseUrl)
+      const normalizedUrl = normalizeServerBaseUrl(result.serverBaseUrl)
+      form.serverUrl = normalizedUrl
+      verifiedServerUrl.value = normalizedUrl
+      setServerBaseUrl(normalizedUrl)
       setMessage(result.message, 'success')
       return true
     }
 
+    verifiedServerUrl.value = ''
     setMessage(result.message, 'error')
     return false
   } finally {
@@ -179,14 +200,17 @@ async function handleConnectionTest(): Promise<boolean> {
 }
 
 async function handleLogin() {
-  if (!(await validateForm())) return
+  if (loading.value || checking.value || !(await validateForm())) return
 
   loading.value = true
   try {
-    const connectionOk = await handleConnectionTest()
-    if (!connectionOk) return
+    const normalizedUrl = normalizeServerBaseUrl(form.serverUrl)
+    if (verifiedServerUrl.value !== normalizedUrl) {
+      const connectionOk = await handleConnectionTest()
+      if (!connectionOk) return
+    }
 
-    setServerBaseUrl(form.serverUrl)
+    setServerBaseUrl(normalizedUrl)
     await authStore.login(form.username, form.password)
     const redirect = typeof route.query.redirect === 'string'
       ? route.query.redirect
@@ -203,58 +227,58 @@ async function handleLogin() {
 <style scoped>
 .pc-login-page {
   display: grid;
-  grid-template-columns: minmax(460px, 1fr) minmax(360px, 420px);
+  grid-template-columns: minmax(480px, 1fr) minmax(360px, 410px);
   align-items: center;
-  gap: clamp(36px, 5vw, 76px);
+  gap: clamp(52px, 7vw, 108px);
   min-height: 100vh;
-  padding: 42px clamp(28px, 6vw, 88px);
-  background: #f8f9fc;
+  padding: 48px clamp(44px, 7vw, 112px);
+  background: var(--pc-color-bg, #f6f8fc);
 }
 
 .pc-login-visual {
-  position: relative;
+  display: grid;
+  place-items: center;
   min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--pc-color-border);
-  border-radius: var(--pc-radius-md);
-  background: var(--pc-color-surface);
-  box-shadow: 0 18px 44px rgba(55, 61, 94, 0.1);
+}
+
+.pc-login-visual img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: calc(100vh - 96px);
+  object-fit: contain;
 }
 
 .pc-login-panel {
   width: 100%;
-  padding: 30px;
-  box-shadow: 0 14px 38px rgba(55, 61, 94, 0.08);
+  min-width: 0;
+  padding: 12px 0;
 }
 
 .pc-login-heading {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 24px;
+  margin-bottom: 28px;
 }
 
 .pc-login-mark {
-  display: inline-grid;
-  place-items: center;
   width: 40px;
   height: 40px;
   border-radius: var(--pc-radius-md);
-  background: var(--pc-gradient-brand);
-  color: #ffffff;
-  font-weight: 800;
-  box-shadow: 0 7px 16px rgba(89, 101, 215, 0.24);
+  box-shadow: 0 5px 14px rgba(58, 71, 158, 0.18);
 }
 
 .pc-login-heading h1 {
   margin: 0;
   color: var(--pc-color-text);
   font-size: 22px;
+  font-weight: 700;
   line-height: 1.2;
 }
 
 .pc-login-heading p {
-  margin: 2px 0 0;
+  margin: 3px 0 0;
   color: var(--pc-color-text-muted);
   font-size: 13px;
 }
@@ -299,11 +323,15 @@ async function handleLogin() {
   box-shadow: 0 0 0 1px var(--pc-color-primary) inset;
 }
 
-@media (max-width: 920px) {
+@media (max-width: 1080px) {
   .pc-login-page {
     grid-template-columns: 1fr;
     gap: 24px;
-    padding: 24px;
+    padding: 28px;
+  }
+
+  .pc-login-visual {
+    display: none;
   }
 
   .pc-login-panel {

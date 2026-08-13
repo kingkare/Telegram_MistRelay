@@ -5,14 +5,13 @@ BOT_TOKEN: your_bot_token
 
 #Telegram 管理员 ID
 ADMIN_ID: your_admin_id
-FORWARD_ID: 转发id
 
 # 默认是否上传到 Telegram 频道网盘 true 或者 false
 UP_TELEGRAM: true
 
 
 #下载保存路径
-SAVE_PATH: /root/mistrelay_downloads
+SAVE_PATH: /data/downloads
 # 下载目录自动清理: 默认启用,清理超过 24 小时的本地下载文件
 DOWNLOAD_CLEANUP_ENABLED: true
 DOWNLOAD_RETENTION_HOURS: 24
@@ -23,7 +22,7 @@ PROXY_IP:
 PROXY_PORT:
 
 # aria2c RPC配置
-RPC_SECRET: your_rpc_secret
+RPC_SECRET: replace-with-openssl-rand-hex-32-output
 RPC_URL: localhost:6800/jsonrpc
 
 # 直链与 TG 频道网盘配置(默认启用,作为 TG 媒体文件下载和上传的前置能力)
@@ -35,8 +34,8 @@ BIN_CHANNEL: your_bin_channel_id
 STREAM_PORT: 8080
 # Web服务器绑定地址(127.0.0.1 表示只允许本地访问,前端通过代理访问)
 STREAM_BIND_ADDRESS: 0.0.0.0
-# 哈希长度(5-64之间)
-STREAM_HASH_LENGTH: 6
+# 公开直链能力哈希长度(32-64之间)
+STREAM_HASH_LENGTH: 32
 # 是否使用SSL
 STREAM_HAS_SSL: false
 # 是否隐藏端口(需要端口为80或443)
@@ -49,8 +48,8 @@ STREAM_KEEP_ALIVE: false
 STREAM_PING_INTERVAL: 1200
 # 是否使用会话文件
 STREAM_USE_SESSION_FILE: false
-# 允许使用直链的用户列表(用逗号分隔,留空则允许所有人)
-STREAM_ALLOWED_USERS: 
+# 允许使用直链的数字用户 ID(用逗号分隔；留空时拒绝所有人)
+STREAM_ALLOWED_USERS: ''
 # 是否自动将直链添加到aria2下载队列(历史兼容,默认关闭;TG网盘媒体不会本地下载)
 STREAM_AUTO_DOWNLOAD: false
 # 是否发送直链信息给用户(默认不启用,设置为 true 后才会发送直链信息给用户)
@@ -61,6 +60,8 @@ SKIP_SMALL_FILES: false
 MIN_FILE_SIZE_MB: 100
 # 消息队列最大并发处理数量(默认5,限制同时处理的消息数量)
 MAX_CONCURRENT_MESSAGES: 5
+# 等待队列硬上限(默认100,运行时限制为1-1000)
+MAX_MESSAGE_QUEUE_SIZE: 100
 
 # aria2最大并发下载数(默认5,限制同时下载的任务数量)
 # 注意:此配置会覆盖aria2.conf中的max-concurrent-downloads设置

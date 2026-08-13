@@ -48,4 +48,8 @@ export function createTelegramDriveFixture(total = 10000): TelegramDriveItem[] {
   ))
 }
 
-export const pcDriveViewportWidths = [1100, 1366, 1920] as const
+export const pcDriveViewports = [
+  { width: 1100, height: 720, columns: 5 },
+  { width: 1366, height: 768, columns: 6 },
+  { width: 1920, height: 1080, columns: 8 },
+] as const

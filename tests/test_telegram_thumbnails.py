@@ -6,6 +6,8 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from PIL import Image
 
@@ -77,7 +79,7 @@ def load_stream_routes():
     sys.modules["pyrogram.file_id"] = pyrogram_file_id
 
     webstreamer = types.ModuleType("WebStreamer")
-    webstreamer.Var = SimpleNamespace(HASH_LENGTH=6, BIN_CHANNEL=-100, MULTI_CLIENT=False, URL="")
+    webstreamer.Var = SimpleNamespace(HASH_LENGTH=32, BIN_CHANNEL=-100, MULTI_CLIENT=False, URL="")
     webstreamer.utils = SimpleNamespace(
       get_hash=lambda value, length: str(value)[:length].ljust(length, "0"),
       ByteStreamer=lambda client: client,
@@ -164,22 +166,24 @@ class TelegramThumbnailTests(unittest.IsolatedAsyncioTestCase):
     def test_build_thumbnail_url_for_media_and_album(self):
         build_url = self.routes.build_telegram_thumbnail_url
 
-        self.assertEqual(
-            build_url({"entry_type": "file", "message_id": 10, "mime_type": "image/png"}),
-            "/api/telegram/thumbnail/10",
-        )
-        self.assertEqual(
-            build_url({"entry_type": "file", "message_id": 11, "mime_type": "video/mp4"}),
-            "/api/telegram/thumbnail/11",
-        )
-        self.assertEqual(
-            build_url({
+        items = [
+            ({"entry_type": "file", "message_id": 10, "mime_type": "image/png"}, 10),
+            ({"entry_type": "file", "message_id": 11, "mime_type": "video/mp4"}, 11),
+            ({
                 "entry_type": "folder",
                 "message_id": 12,
                 "group_mime_types": ["application/pdf", "image/jpeg"],
-            }),
-            "/api/telegram/thumbnail/12",
-        )
+            }, 12),
+        ]
+        from auth import verify_resource_ticket
+
+        for item, message_id in items:
+            parsed = urlsplit(build_url(item))
+            expected_path = f"/api/telegram/thumbnail/{message_id}"
+            self.assertEqual(parsed.path, expected_path)
+            ticket = parse_qs(parsed.query)["ticket"][0]
+            self.assertTrue(verify_resource_ticket(ticket, expected_path))
+
         self.assertIsNone(
             build_url({"entry_type": "file", "message_id": 13, "mime_type": "application/pdf"})
         )
@@ -231,6 +235,97 @@ class TelegramThumbnailTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 200)
         self.assertEqual(response.headers.get("Content-Type"), "image/webp")
+
+    async def test_invalid_stream_capability_does_not_call_telegram(self):
+        message_id = 44
+        self.routes.get_tg_media_record_by_message_id = lambda _message_id: {
+            "message_id": message_id,
+            "file_unique_id": "telegram-file-unique-id",
+        }
+
+        async def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("invalid capabilities must be rejected before Telegram")
+
+        self.routes.get_main_bot_file_properties = fail_if_called
+        request = FakeRequest(message_id)
+        request.headers = {}
+
+        with self.assertRaises(self.routes.InvalidHash):
+            await self.routes.media_streamer(request, message_id, "0" * 32)
+
+    async def test_health_requires_completed_startup_and_connected_bot(self):
+        from service_runtime import set_service_ready
+
+        set_service_ready(True)
+        self.routes.StreamBot = SimpleNamespace(is_connected=False)
+        response = await self.routes.api_health_handler(None)
+        self.assertEqual(response.status, 503)
+
+        self.routes.StreamBot = SimpleNamespace(is_connected=True)
+        response = await self.routes.api_health_handler(None)
+        self.assertEqual(response.status, 200)
+        set_service_ready(False)
+
+    async def test_docker_logs_fall_back_to_application_log(self):
+        request = SimpleNamespace(query={"lines": "2"})
+        with patch.object(self.routes, "DOCKER_CONTROL_ENABLED", False), patch.object(
+            self.routes,
+            "read_log_lines",
+            return_value=["first", "second"],
+        ):
+            response = await self.routes.docker_logs_handler(request)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body["source"], "application")
+        self.assertEqual(response.body["logs"], "first\nsecond")
+        self.assertEqual(response.body["lines"], 2)
+
+    async def test_config_handler_appends_redacted_multi_bot_tokens(self):
+        existing = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+        addition = "234567:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+        primary = "345678:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+
+        class ConfigRequest:
+            async def json(self):
+                return {"MULTI_BOT_TOKENS": [addition]}
+
+        stored_updates = []
+
+        def fake_get_config(key, default=None):
+            return {
+                "MULTI_BOT_TOKENS": [existing],
+                "BOT_TOKEN": primary,
+            }.get(key, default)
+
+        with patch.object(self.routes, "get_config", side_effect=fake_get_config), patch.object(
+            self.routes,
+            "set_configs",
+            side_effect=lambda updates: stored_updates.extend(updates),
+        ):
+            response = await self.routes.update_config_handler(ConfigRequest())
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body["updated_count"], 1)
+        self.assertEqual(stored_updates[0][0], "MULTI_BOT_TOKENS")
+        self.assertEqual(stored_updates[0][1], [existing, addition])
+
+    async def test_config_handler_reports_secret_count_without_values(self):
+        tokens = [
+            "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+            "234567:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+        ]
+        request = SimpleNamespace(query={"category": "stream"})
+        with patch.object(
+            self.routes,
+            "get_all_configs",
+            return_value={"MULTI_BOT_TOKENS": tokens, "ENABLE_STREAM": True},
+        ):
+            response = await self.routes.get_config_handler(request)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body["data"]["MULTI_BOT_TOKENS"], [])
+        self.assertEqual(response.body["secret_counts"]["MULTI_BOT_TOKENS"], 2)
+        self.assertNotIn("MULTI_BOT_TOKENS", response.body["offline_only_keys"])
 
 
 if __name__ == "__main__":

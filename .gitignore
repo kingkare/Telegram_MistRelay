@@ -47,6 +47,8 @@ db/bot.session
 db/bot.session-journal
 db/*.session
 db/*.session-journal
+db/*.session*
+db/sessions/
 *.session
 *.session-journal
 
@@ -71,6 +73,8 @@ web/*.log
 web/.env
 web/.env.local
 web/.env.*.local
+web/test-results/
+.playwright/
 
 # ============================================================================
 # Python缓存和临时文件
@@ -95,6 +99,7 @@ htmlcov/
 # ============================================================================
 
 .cursor/
+.claude/settings.local.json
 .vscode/
 .idea/
 *.swp
@@ -138,3 +143,4 @@ docker-compose.override.yml
 Thumbs.db
 .DS_Store
 cache/
+rclone/

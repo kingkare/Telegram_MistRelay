@@ -12,12 +12,12 @@ from pyrogram import Client
 
 logger = logging.getLogger("bot")
 
-sessions_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions")
+sessions_dir = os.environ.get("MISTRELAY_SESSION_DIR", "/app/db/sessions")
 if Var.USE_SESSION_FILE:
     logger.info("Using session files")
     logger.info("Session folder path: {}".format(sessions_dir))
-    if not os.path.isdir(sessions_dir):
-        os.makedirs(sessions_dir)
+    os.makedirs(sessions_dir, mode=0o700, exist_ok=True)
+    os.chmod(sessions_dir, 0o700)
 
 # 使用Python模块路径而不是文件系统路径（在Docker中更可靠）
 StreamBot = Client(

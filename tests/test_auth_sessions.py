@@ -22,6 +22,18 @@ class AuthSessionTests(unittest.TestCase):
         )
         db.DB_PATH = self.db_path
         db.init_db()
+        with db.db_conn() as connection:
+            connection.executemany(
+                """
+                INSERT INTO users
+                    (id, username, password_hash, role, created_at, updated_at)
+                VALUES (?, ?, ?, 'admin', 'test', 'test')
+                """,
+                [
+                    (1, "test-user-1", "unused-test-hash"),
+                    (2, "test-user-2", "unused-test-hash"),
+                ],
+            )
 
     def test_schema_is_idempotent_and_indexed(self):
         db.init_db()

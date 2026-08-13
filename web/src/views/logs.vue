@@ -93,7 +93,7 @@
 import { ref, onMounted, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Download, Delete, Search } from '@element-plus/icons-vue'
-import { getLogFiles, getLogContent, getLogDownloadUrl } from '@/api'
+import { downloadLogFile, getLogFiles, getLogContent } from '@/api'
 import type { LogFile } from '@/api'
 
 const logFiles = ref<LogFile[]>([])
@@ -176,9 +176,13 @@ function viewFile(name: string) {
   fetchLogs()
 }
 
-function handleDownload() {
+async function handleDownload() {
   if (!currentFileName.value) return
-  window.open(getLogDownloadUrl(currentFileName.value), '_blank')
+  try {
+    await downloadLogFile(currentFileName.value)
+  } catch {
+    ElMessage.error('下载日志失败')
+  }
 }
 
 function clearDisplay() {

@@ -49,13 +49,11 @@ function resolveServerUrl(path: string): string {
 }
 ```
 
-如果客户端的播放器或下载器无法携带 `Authorization` 请求头，可在打开流媒体 URL 时追加 `token` 查询参数：
+流媒体 URL 已包含消息 hash，不要向 URL 追加管理员 JWT：
 
 ```ts
-function buildStreamUrl(entry: TelegramDriveFile, token: string): string {
-  const url = new URL(entry.stream_url!, serverOrigin)
-  url.searchParams.set('token', token)
-  return url.toString()
+function buildStreamUrl(entry: TelegramDriveFile): string {
+  return new URL(entry.stream_url!, serverOrigin).toString()
 }
 ```
 

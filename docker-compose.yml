@@ -5,22 +5,65 @@ services:
       # 如果构建时遇到DNS问题，可以在构建时设置DNS
       # 注意：build阶段的DNS需要在Docker daemon级别配置，或使用build args
     container_name: mistrelay
-    restart: unless-stopped
-    network_mode: host
-    privileged: true # 允许读取系统硬件信息（用于dashboard监控）
-    # DNS配置（运行时）
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-      - 114.114.114.114
+    # Keep disabled during credential rotation; enable a restart policy only after activation tests pass.
+    restart: "no"
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
     volumes:
-      - ./db:/app/db  # 数据库和配置文件目录(持久化)
-      - ./downloads:/root/downloads  # 下载目录(可根据需要修改)
-      - ./cache/thumbnails:/app/cache/thumbnails  # 缩略图缓存目录
-      - /var/run/docker.sock:/var/run/docker.sock  # Docker socket(用于系统管理模块控制容器,需要root权限)
+      - type: bind
+        source: ./db
+        target: /app/db
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./downloads
+        target: /data/downloads
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./cache/thumbnails
+        target: /app/cache/thumbnails
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=64m
+      - /run:rw,noexec,nosuid,nodev,mode=0755,size=16m
+      - /app/aria2:rw,noexec,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=16m
     environment:
       - TZ=Asia/Shanghai
-    # 如果需要直链功能，需要映射Web服务器端口（默认8080）
-    # 如果使用network_mode: host，则不需要ports映射
-    # ports:
-    #   - "8080:8080"  # 直链Web服务器端口（如果启用直链功能）
+      - PYTHONDONTWRITEBYTECODE=1
+      - HOME=/home/mistrelay
+      - XDG_CACHE_HOME=/tmp/.cache
+      - MISTRELAY_FILE_ROOT=/data/downloads
+      - MISTRELAY_SESSION_DIR=/app/db/sessions
+      - MISTRELAY_ADMIN_PASSWORD_FILE=/app/db/admin-password
+      - MISTRELAY_LOG_RETENTION_DAYS=90
+      - MISTRELAY_TRUSTED_PROXY_CIDRS=172.25.0.1/32
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 7s
+      retries: 3
+      start_period: 60s
+    cpus: 2.0
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "10"
+    stop_grace_period: 20s
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+          gateway: 172.25.0.1

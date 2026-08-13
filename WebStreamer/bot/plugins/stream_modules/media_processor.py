@@ -22,6 +22,16 @@ from db import save_tg_media
 # 媒体组缓存：用于收集同一媒体组的所有消息
 media_group_cache = defaultdict(list)
 media_group_tasks = {}
+MAX_PENDING_MEDIA_GROUPS = 100
+MAX_MEDIA_GROUP_ITEMS = 20
+
+
+def is_allowed_user(message: Message) -> bool:
+    """Authorize only immutable numeric Telegram user IDs, failing closed."""
+    if not Var.ALLOWED_USERS or not getattr(message, "from_user", None):
+        return False
+    user_id = str(message.from_user.id)
+    return user_id in Var.ALLOWED_USERS
 
 
 async def process_media_group(messages: list, queue_reply_msg=None):
@@ -45,7 +55,7 @@ async def process_media_group(messages: list, queue_reply_msg=None):
             logger.debug(f"删除排队通知失败: {e}")
     
     # 权限检查
-    if Var.ALLOWED_USERS and not ((str(first_msg.from_user.id) in Var.ALLOWED_USERS) or (first_msg.from_user.username in Var.ALLOWED_USERS)):
+    if not is_allowed_user(first_msg):
         return
     
     # BIN_CHANNEL检查
@@ -233,7 +243,7 @@ async def process_single_media(m: Message, queue_reply_msg=None):
             logger.debug(f"删除排队通知失败: {e}")
     
     # 权限检查
-    if Var.ALLOWED_USERS and not ((str(m.from_user.id) in Var.ALLOWED_USERS) or (m.from_user.username in Var.ALLOWED_USERS)):
+    if not is_allowed_user(m):
         permission_msg = (
             f'🚫 <b>权限不足</b>\n\n'
             f'⚠️ 你没有权限使用这个机器人'
@@ -344,16 +354,30 @@ async def media_receive_handler(_, m: Message):
     处理Telegram媒体文件，生成直链（作为下载的前置功能）
     支持单个媒体文件和媒体组（保持消息完整性）
     """
-    # 延迟导入避免循环依赖
-    from .queue_manager import enqueue_message_task
-    
     if not Var.ENABLE_STREAM:
         return
+
+    # Authorize before touching group caches, queue state, or notification tasks.
+    if not is_allowed_user(m):
+        logger.warning(
+            "拒绝未授权 Telegram 媒体入队 user_id=%s",
+            getattr(getattr(m, "from_user", None), "id", None),
+        )
+        return
+
+    # 延迟导入避免循环依赖
+    from .queue_manager import enqueue_message_task
     
     # 检查是否是媒体组
     if m.media_group_id:
         # 媒体组：收集所有消息，延迟处理
         group_id = f"{m.chat.id}_{m.media_group_id}"
+        if group_id not in media_group_cache and len(media_group_cache) >= MAX_PENDING_MEDIA_GROUPS:
+            await m.reply("消息队列繁忙，请稍后重试", quote=True)
+            return
+        if len(media_group_cache[group_id]) >= MAX_MEDIA_GROUP_ITEMS:
+            logger.warning("拒绝超大 Telegram 媒体组 group_id=%s", group_id)
+            return
         media_group_cache[group_id].append(m)
         
         # 取消之前的任务（如果有）
@@ -371,10 +395,12 @@ async def media_receive_handler(_, m: Message):
                     del media_group_tasks[group_id]
                 # 将媒体组处理任务加入队列，而不是直接执行
                 # 注意：排队通知会在enqueue_message_task中自动发送
-                enqueue_message_task(process_media_group, messages)
+                if not enqueue_message_task(process_media_group, messages):
+                    await messages[0].reply("消息队列已满，请稍后重试", quote=True)
         
         task = asyncio.create_task(delayed_process())
         media_group_tasks[group_id] = task
     else:
         # 单个媒体文件：加入队列处理，而不是立即处理
-        enqueue_message_task(process_single_media, m)
+        if not enqueue_message_task(process_single_media, m):
+            await m.reply("消息队列已满，请稍后重试", quote=True)

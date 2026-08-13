@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 项目根目录
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 echo -e "${BLUE}========================================${NC}"
@@ -33,6 +33,12 @@ if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/
     exit 1
 fi
 
+if command -v docker-compose &> /dev/null; then
+    COMPOSE=(docker-compose)
+else
+    COMPOSE=(docker compose)
+fi
+
 # 检查Node.js是否安装
 if ! command -v node &> /dev/null; then
     echo -e "${RED}错误: 未找到Node.js，请先安装Node.js${NC}"
@@ -46,41 +52,60 @@ if ! command -v npm &> /dev/null; then
 fi
 
 # 清理函数
+FRONTEND_PID=""
+BACKEND_STARTED=false
+
 cleanup() {
+    local status=$?
+    trap - EXIT INT TERM
+
     echo ""
     echo -e "${YELLOW}正在清理资源...${NC}"
     # 停止前端开发服务器
-    if [ ! -z "$FRONTEND_PID" ]; then
+    if [ -n "$FRONTEND_PID" ] && ps -p "$FRONTEND_PID" > /dev/null 2>&1; then
         echo -e "${YELLOW}停止前端开发服务器 (PID: $FRONTEND_PID)${NC}"
-        kill $FRONTEND_PID 2>/dev/null || true
+        kill "$FRONTEND_PID" 2>/dev/null || true
+        wait "$FRONTEND_PID" 2>/dev/null || true
     fi
-    # 停止Docker容器
-    echo -e "${YELLOW}停止Docker容器...${NC}"
-    docker-compose down 2>/dev/null || docker compose down 2>/dev/null || true
+    # 只停止由本次脚本启动的后端，避免影响原本就在运行的服务。
+    if [ "$BACKEND_STARTED" = true ]; then
+        echo -e "${YELLOW}停止Docker容器...${NC}"
+        "${COMPOSE[@]}" down >/dev/null 2>&1 || true
+    fi
     echo -e "${GREEN}清理完成${NC}"
-    exit 0
+    exit "$status"
 }
 
 # 注册清理函数
-trap cleanup SIGINT SIGTERM EXIT
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+backend_is_running() {
+    local container_id
+    container_id="$("${COMPOSE[@]}" ps -q mistrelay 2>/dev/null)"
+    [ -n "$container_id" ] && [ "$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null)" = "true" ]
+}
 
 # 1. 启动Docker后端服务
 echo -e "${BLUE}[1/2] 启动Docker后端服务...${NC}"
-if docker-compose ps | grep -q "mistrelay.*Up" || docker compose ps | grep -q "mistrelay.*Up"; then
+if backend_is_running; then
     echo -e "${YELLOW}后端服务已在运行中${NC}"
 else
     echo -e "${GREEN}构建并启动Docker容器...${NC}"
-    docker-compose up -d --build 2>/dev/null || docker compose up -d --build
-    
+    "${COMPOSE[@]}" up -d --build
+    BACKEND_STARTED=true
+
     # 等待容器启动
     echo -e "${YELLOW}等待后端服务启动...${NC}"
     sleep 5
-    
+
     # 检查容器状态
-    if docker-compose ps | grep -q "mistrelay.*Up" || docker compose ps | grep -q "mistrelay.*Up"; then
+    if backend_is_running; then
         echo -e "${GREEN}✓ 后端服务启动成功${NC}"
     else
-        echo -e "${RED}✗ 后端服务启动失败，请检查日志: docker-compose logs${NC}"
+        echo -e "${RED}✗ 后端服务启动失败，最近日志如下:${NC}"
+        "${COMPOSE[@]}" logs --no-color --tail=100 mistrelay || true
         exit 1
     fi
 fi
@@ -127,7 +152,7 @@ echo ""
 echo -e "${YELLOW}提示:${NC}"
 echo -e "  - 前端会自动代理API请求到后端"
 echo -e "  - 按 Ctrl+C 停止所有服务"
-echo -e "  - 查看后端日志: ${BLUE}docker-compose logs -f${NC}"
+echo -e "  - 查看后端日志: ${BLUE}${COMPOSE[*]} logs -f${NC}"
 echo ""
 
 # 等待用户中断

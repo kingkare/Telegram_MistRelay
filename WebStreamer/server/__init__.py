@@ -4,6 +4,8 @@
 # Coding : Jyothis Jayanth [@EverythingSuckz]
 
 import logging
+import os
+from urllib.parse import urlsplit
 from aiohttp import web
 from aiohttp.http_exceptions import BadStatusLine, BadHttpMessage
 from .stream_routes import routes
@@ -79,16 +81,89 @@ _AUTH_WHITELIST = frozenset({
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/refresh",
-    "/api/status",
+    "/api/health",
 })
 
 _AUTH_WHITELIST_PREFIXES = ()
 
+_RESOURCE_TICKET_PREFIXES = (
+    "/api/telegram/thumbnail/",
+)
+
+_DEFAULT_CORS_ORIGINS = frozenset({
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+})
+
+_WEBSOCKET_PROTOCOL_PREFIX = "mistrelay.jwt."
+
+
+def _configured_cors_origins() -> frozenset[str]:
+    configured = {
+        origin.strip().rstrip("/")
+        for origin in os.environ.get("MISTRELAY_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    }
+    return _DEFAULT_CORS_ORIGINS | configured
+
+
+def _is_allowed_origin(request: web.Request, origin: str | None) -> bool:
+    if not origin:
+        return True
+    normalized_origin = origin.rstrip("/")
+    if normalized_origin in _configured_cors_origins():
+        return True
+    try:
+        parsed = urlsplit(normalized_origin)
+        return parsed.scheme in {"http", "https"} and parsed.netloc == request.host
+    except (TypeError, ValueError):
+        return False
+
+
+def _websocket_token(request: web.Request) -> tuple[str | None, str | None]:
+    if request.headers.get("Upgrade", "").lower() != "websocket":
+        return None, None
+    protocols = request.headers.get("Sec-WebSocket-Protocol", "")
+    if len(protocols) > 4096:
+        return None, None
+    for protocol in (value.strip() for value in protocols.split(",")):
+        if protocol.startswith(_WEBSOCKET_PROTOCOL_PREFIX):
+            return protocol[len(_WEBSOCKET_PROTOCOL_PREFIX):], protocol
+    return None, None
+
+
+def _apply_security_headers(request: web.Request, response: web.StreamResponse) -> web.StreamResponse:
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), geolocation=(), microphone=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; "
+        "script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; media-src 'self' blob:; "
+        "font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:"
+    )
+    response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    if request.path.startswith("/api/auth/") or request.path.startswith("/api/config"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@web.middleware
+async def security_headers_middleware(request, handler):
+    response = await handler(request)
+    if isinstance(response, web.WebSocketResponse):
+        return response
+    return _apply_security_headers(request, response)
+
 
 def _apply_cors_headers(request: web.Request, response: web.StreamResponse) -> web.StreamResponse:
     origin = request.headers.get("Origin")
-
-    response.headers["Access-Control-Allow-Origin"] = origin or "*"
+    if origin and _is_allowed_origin(request, origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Accept, Origin, X-Requested-With, Range"
     response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, Content-Length, Content-Range, Accept-Ranges, X-MistRelay-Min-Threads"
@@ -100,10 +175,15 @@ def _apply_cors_headers(request: web.Request, response: web.StreamResponse) -> w
 @web.middleware
 async def cors_middleware(request, handler):
     """为独立 Web 前端提供跨域访问支持。"""
+    origin = request.headers.get("Origin")
+    if origin and not _is_allowed_origin(request, origin):
+        return web.json_response({"success": False, "error": "Origin 不被允许"}, status=403)
     if request.method == "OPTIONS":
         return _apply_cors_headers(request, web.Response(status=204))
 
     response = await handler(request)
+    if isinstance(response, web.WebSocketResponse):
+        return response
     return _apply_cors_headers(request, response)
 
 
@@ -119,9 +199,17 @@ async def auth_middleware(request, handler):
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
 
-    # WebSocket 连接通过 query parameter 传递 token
     if not token:
-        token = request.query.get("token")
+        token, websocket_protocol = _websocket_token(request)
+        if websocket_protocol:
+            request["websocket_protocol"] = websocket_protocol
+
+    if not token and any(path.startswith(prefix) for prefix in _RESOURCE_TICKET_PREFIXES):
+        from auth import verify_resource_ticket
+        ticket = request.query.get("ticket", "")
+        if ticket and verify_resource_ticket(ticket, path):
+            request["resource_ticket"] = True
+            return await handler(request)
 
     if not token:
         return web.json_response({"success": False, "error": "未登录"}, status=401)
@@ -142,6 +230,7 @@ def web_server():
     web_app = web.Application(client_max_size=30000000)
 
     # 添加中间件(顺序很重要：先 CORS，再压缩、认证、错误处理)
+    web_app.middlewares.append(security_headers_middleware)
     web_app.middlewares.append(cors_middleware)
     web_app.middlewares.append(compression_middleware)
     web_app.middlewares.append(auth_middleware)

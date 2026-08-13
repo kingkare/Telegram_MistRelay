@@ -31,6 +31,8 @@ export default defineConfig({
         '**/.git/**',
         '**/dist/**',
         '**/build/**',
+        '**/test-results/**',
+        '**/.playwright/**',
         '**/src-tauri/**',
         '**/*.md'
       ],

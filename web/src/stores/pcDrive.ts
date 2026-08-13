@@ -98,6 +98,13 @@ export const usePcDriveStore = defineStore('pcDrive', {
       return this.load()
     },
 
+    resetFilters() {
+      this.search = ''
+      this.typeFilter = ''
+      this.page = 1
+      return this.load()
+    },
+
     setSort(sortBy: string, sortDesc: boolean) {
       this.sortBy = sortBy
       this.sortDesc = sortDesc
@@ -124,6 +131,8 @@ export const usePcDriveStore = defineStore('pcDrive', {
         mediaGroupId: folder.media_group_id,
         name: this.currentFolderName,
       }]
+      this.search = ''
+      this.typeFilter = ''
       this.page = 1
       return this.load()
     },

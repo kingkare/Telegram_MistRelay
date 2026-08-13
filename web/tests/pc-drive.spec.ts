@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { createTelegramDriveFixture, pcDriveViewportWidths } from './fixtures/telegram-drive'
+import { createTelegramDriveFixture, pcDriveViewports } from './fixtures/telegram-drive'
 
 const driveItems = createTelegramDriveFixture(10000)
 
@@ -20,7 +20,7 @@ async function mockPcDriveApi(page: import('@playwright/test').Page) {
     })
   })
 
-  await page.route('**/api/status', async route => {
+  await page.route('**/api/health', async route => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -86,9 +86,9 @@ async function countOverflowingCards(page: import('@playwright/test').Page): Pro
 }
 
 test.describe('PC drive layout with large Telegram drive data', () => {
-  for (const width of pcDriveViewportWidths) {
-    test(`renders without obvious layout overflow at ${width}px`, async ({ page }, testInfo) => {
-      await page.setViewportSize({ width, height: 820 })
+  for (const viewport of pcDriveViewports) {
+    test(`renders the complete shell at ${viewport.width}px`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height })
       await mockPcDriveApi(page)
 
       const startedAt = Date.now()
@@ -98,14 +98,38 @@ test.describe('PC drive layout with large Telegram drive data', () => {
 
       await expect(page.locator('.pc-media-card')).toHaveCount(40)
       await expect(page.locator('.pc-drive-pagination')).toContainText('10000')
+      await expect(page.locator('.pc-sidebar-account')).toContainText('pc-user')
 
-      const screenshot = await page.locator('.pc-content').screenshot({
-        path: testInfo.outputPath(`pc-drive-${width}.png`),
-        animations: 'disabled',
+      const shellGeometry = await page.locator('.pc-shell').evaluate((shell) => {
+        const sidebar = shell.querySelector<HTMLElement>('.pc-sidebar')!
+        const toolbar = shell.querySelector<HTMLElement>('.pc-toolbar')!
+        const content = shell.querySelector<HTMLElement>('.pc-content')!
+        const grid = shell.querySelector<HTMLElement>('.pc-media-grid')!
+        const contentStyle = getComputedStyle(content)
+        return {
+          sidebarWidth: Math.round(sidebar.getBoundingClientRect().width),
+          toolbarHeight: Math.round(toolbar.getBoundingClientRect().height),
+          contentPadding: Number.parseFloat(contentStyle.paddingLeft),
+          columns: getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length,
+          contentOverflowsHorizontally: content.scrollWidth > content.clientWidth + 1,
+          pageOverflowsHorizontally: document.documentElement.scrollWidth > window.innerWidth + 1,
+        }
       })
-      expect(screenshot.byteLength).toBeGreaterThan(12000)
+
+      expect(shellGeometry).toEqual({
+        sidebarWidth: 184,
+        toolbarHeight: 56,
+        contentPadding: 18,
+        columns: viewport.columns,
+        contentOverflowsHorizontally: false,
+        pageOverflowsHorizontally: false,
+      })
       await expect(page.locator('.pc-content')).toBeInViewport()
       expect(await countOverflowingCards(page)).toBe(0)
+      await expect(page.locator('.pc-shell')).toHaveScreenshot(`pc-drive-${viewport.width}.png`, {
+        animations: 'disabled',
+        maxDiffPixelRatio: 0.01,
+      })
     })
   }
 })

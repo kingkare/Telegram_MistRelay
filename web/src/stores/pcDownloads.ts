@@ -379,7 +379,6 @@ export const usePcDownloadsStore = defineStore('pcDownloads', {
         return
       }
 
-      await this.ensureEventListeners()
       this.patchTask(taskId, {
         status: 'downloading',
         error: undefined,
@@ -387,6 +386,7 @@ export const usePcDownloadsStore = defineStore('pcDownloads', {
       })
 
       try {
+        await this.ensureEventListeners()
         const request: StartDownloadTaskRequest = {
           id: task.id,
           sourceUrl: task.sourceUrl,

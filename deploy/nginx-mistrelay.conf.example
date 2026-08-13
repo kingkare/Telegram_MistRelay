@@ -1,0 +1,86 @@
+# Replace the server name and certificate paths before enabling this file.
+# This file is included from nginx.conf's http context.
+
+map $http_upgrade $mistrelay_connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+# Do not log URI, query string or Referer: thumbnail tickets and stream
+# capabilities are bearer material and may appear in any of them.
+log_format mistrelay '$remote_addr - $remote_user [$time_local] '
+                     '"$request_method $server_protocol" $status $body_bytes_sent '
+                     '"$http_user_agent"';
+
+limit_req_zone $binary_remote_addr zone=mistrelay_login:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=mistrelay_general:10m rate=30r/s;
+limit_conn_zone $binary_remote_addr zone=mistrelay_connections:10m;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name mistrelay.example.com;
+    access_log /var/log/nginx/mistrelay.access.log mistrelay;
+    error_log /var/log/nginx/mistrelay.error.log error;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name mistrelay.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/mistrelay.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/mistrelay.example.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    server_tokens off;
+    access_log /var/log/nginx/mistrelay.access.log mistrelay;
+    error_log /var/log/nginx/mistrelay.error.log error;
+    client_max_body_size 32m;
+    client_header_timeout 15s;
+    client_body_timeout 60s;
+    keepalive_timeout 30s;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    location = /api/auth/login {
+        limit_req zone=mistrelay_login burst=4 nodelay;
+        limit_req_status 429;
+
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # Overwrite, rather than append, so the application receives one trusted address.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Sec-WebSocket-Protocol $http_sec_websocket_protocol;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $mistrelay_connection_upgrade;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
+    location / {
+        limit_req zone=mistrelay_general burst=60 nodelay;
+        limit_req_status 429;
+        limit_conn mistrelay_connections 20;
+        limit_conn_status 429;
+
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Sec-WebSocket-Protocol $http_sec_websocket_protocol;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $mistrelay_connection_upgrade;
+        proxy_buffering off;
+        proxy_request_buffering on;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

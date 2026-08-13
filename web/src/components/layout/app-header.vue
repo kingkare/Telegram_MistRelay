@@ -58,7 +58,7 @@
           <el-input v-model="pwdForm.oldPassword" type="password" show-password placeholder="请输入旧密码" />
         </el-form-item>
         <el-form-item label="新密码" prop="newPassword">
-          <el-input v-model="pwdForm.newPassword" type="password" show-password placeholder="至少6位" />
+          <el-input v-model="pwdForm.newPassword" type="password" show-password placeholder="至少16位" />
         </el-form-item>
         <el-form-item label="确认密码" prop="confirmPassword">
           <el-input v-model="pwdForm.confirmPassword" type="password" show-password placeholder="再次输入新密码" />
@@ -158,7 +158,7 @@ const pwdRules = {
   oldPassword: [{ required: true, message: '请输入旧密码', trigger: 'blur' }],
   newPassword: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '密码长度不能少于6位', trigger: 'blur' },
+    { min: 16, max: 512, message: '密码长度必须为16-512位', trigger: 'blur' },
   ],
   confirmPassword: [
     { required: true, message: '请确认新密码', trigger: 'blur' },

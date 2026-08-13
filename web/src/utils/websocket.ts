@@ -6,14 +6,18 @@
 import { getAuthToken, toAbsoluteServerUrl } from '@/utils/runtime'
 
 export function buildWsUrl(path: string, extraParams: Record<string, string> = {}): string {
-  const token = getAuthToken()
-  const params = new URLSearchParams({ token, ...extraParams })
+  const params = new URLSearchParams(extraParams)
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
 
   const url = new URL(toAbsoluteServerUrl(normalizedPath))
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   url.search = params.toString()
   return url.toString()
+}
+
+export function buildWsProtocols(): string[] {
+  const token = getAuthToken()
+  return token ? [`mistrelay.jwt.${token}`] : []
 }
 
 export type WSMessageType = 
@@ -68,7 +72,7 @@ class WebSocketClient {
     const connectUrl = this.url || buildWsUrl('/api/ws/status')
 
     try {
-      this.ws = new WebSocket(connectUrl)
+      this.ws = new WebSocket(connectUrl, buildWsProtocols())
       
       this.ws.onopen = () => {
         console.log('WebSocket 连接已建立')

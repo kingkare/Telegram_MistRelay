@@ -1,50 +1,48 @@
 <template>
   <div class="pc-client pc-shell">
-    <aside class="pc-sidebar" aria-label="PC navigation">
+    <aside class="pc-sidebar" aria-label="PC 客户端导航">
       <div class="pc-brand">
-        <span class="pc-brand-mark" aria-hidden="true">
-          <el-icon :size="19"><Promotion /></el-icon>
-        </span>
+        <img class="pc-brand-mark" :src="appMark" alt="">
         <span class="pc-brand-copy">
-          <span class="pc-brand-name">MistRelay</span>
-          <span class="pc-brand-edition">DESKTOP</span>
+          <strong>MistRelay</strong>
+          <span>DESKTOP</span>
         </span>
       </div>
 
-      <nav class="pc-nav">
+      <nav class="pc-nav" aria-label="主要功能">
         <RouterLink
           v-for="item in navItems"
           :key="item.name"
           :to="item.to"
           class="pc-sidebar-link"
-          active-class="is-active"
+          :class="{ 'is-active': route.name === item.name }"
+          :title="item.label"
+          :aria-label="item.label"
         >
-          <component :is="item.icon" class="pc-nav-icon" />
-          <span>{{ item.label }}</span>
+          <component :is="item.icon" class="pc-nav-icon" aria-hidden="true" />
+          <span class="pc-nav-label">{{ item.label }}</span>
         </RouterLink>
       </nav>
 
       <div class="pc-sidebar-footer">
-        <div class="pc-sidebar-account">
-          <span class="pc-sidebar-avatar">{{ accountInitial }}</span>
+        <RouterLink
+          to="/pc/settings"
+          class="pc-sidebar-account"
+          title="账户与服务器设置"
+          aria-label="账户与服务器设置"
+        >
+          <span class="pc-sidebar-avatar" aria-hidden="true">{{ accountInitial }}</span>
           <span class="pc-sidebar-account-copy">
             <strong>{{ accountName }}</strong>
             <span :title="serverLabel">{{ serverLabel }}</span>
           </span>
-        </div>
+        </RouterLink>
       </div>
     </aside>
 
     <section class="pc-main">
       <header class="pc-toolbar">
-        <div class="pc-page-heading">
-          <span class="pc-page-context">MistRelay</span>
-          <h1 class="pc-page-title">{{ currentTitle }}</h1>
-        </div>
-        <div class="pc-toolbar-status" :title="serverLabel">
-          <span class="pc-status-dot" aria-hidden="true"></span>
-          <span>{{ serverLabel }}</span>
-        </div>
+        <h1 class="pc-page-title">{{ currentTitle }}</h1>
       </header>
 
       <main class="pc-content">
@@ -55,13 +53,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { Clock, Download, FolderOpened, Promotion, Setting } from '@element-plus/icons-vue'
+import { computed, onMounted } from 'vue'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
+import { Clock, Download, FolderOpened, Setting } from '@element-plus/icons-vue'
+import appMark from '@/assets/pc-theme/app-mark.svg'
 import { useAuthStore } from '@/stores/auth'
 import { getServerBaseUrl } from '@/utils/runtime'
 
 const route = useRoute()
+const router = useRouter()
 const auth = useAuthStore()
 
 const navItems = [
@@ -71,11 +71,9 @@ const navItems = [
   { name: 'PcSettings', label: '设置', to: '/pc/settings', icon: Setting },
 ]
 
-const currentTitle = computed(() => {
-  const current = navItems.find(item => item.name === route.name)
-  return current?.label || 'MistRelay'
-})
-
+const currentTitle = computed(() => (
+  navItems.find(item => item.name === route.name)?.label || 'MistRelay'
+))
 const accountName = computed(() => auth.user?.username || 'MistRelay')
 const accountInitial = computed(() => accountName.value.trim().slice(0, 1).toUpperCase() || 'M')
 const serverLabel = computed(() => {
@@ -87,27 +85,29 @@ const serverLabel = computed(() => {
     return serverUrl.replace(/^https?:\/\//i, '')
   }
 })
+
+onMounted(async () => {
+  if (!auth.isLoggedIn || auth.user) return
+  await auth.fetchUser()
+  if (!auth.isLoggedIn) await router.replace('/pc/login')
+})
 </script>
 
 <style scoped>
 .pc-brand {
   display: flex;
   align-items: center;
-  gap: 11px;
-  min-height: 48px;
-  padding: 0 8px 15px;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 8px 12px;
   border-bottom: 1px solid var(--pc-color-border);
 }
 
 .pc-brand-mark {
-  display: inline-grid;
-  place-items: center;
   width: 28px;
   height: 28px;
-  border-radius: var(--pc-radius-md);
-  background: var(--pc-gradient-brand);
-  color: #ffffff;
-  box-shadow: 0 5px 12px rgba(89, 101, 215, 0.24);
+  border-radius: 7px;
+  box-shadow: 0 4px 10px rgba(58, 71, 158, 0.18);
   flex: 0 0 auto;
 }
 
@@ -117,26 +117,24 @@ const serverLabel = computed(() => {
   gap: 1px;
 }
 
-.pc-brand-name {
-  min-width: 0;
+.pc-brand-copy strong {
   color: var(--pc-color-text);
   font-size: 15px;
-  font-weight: 750;
-  line-height: 1.2;
+  font-weight: 700;
+  line-height: 19px;
 }
 
-.pc-brand-edition {
-  color: var(--pc-color-text-muted);
+.pc-brand-copy span {
+  color: var(--pc-color-text-subtle);
   font-size: 9px;
-  font-weight: 700;
-  line-height: 1.2;
-  letter-spacing: 0;
+  font-weight: 600;
+  line-height: 12px;
 }
 
 .pc-nav {
   display: grid;
-  gap: 5px;
-  margin-top: 18px;
+  gap: 4px;
+  margin-top: 12px;
 }
 
 .pc-nav-icon {
@@ -147,16 +145,30 @@ const serverLabel = computed(() => {
 
 .pc-sidebar-footer {
   margin-top: auto;
-  padding-top: 14px;
+  padding-top: 12px;
   border-top: 1px solid var(--pc-color-border);
 }
 
 .pc-sidebar-account {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   min-width: 0;
-  padding: 4px 6px;
+  padding: 7px 8px;
+  border-radius: var(--pc-radius-md);
+  color: inherit;
+  text-decoration: none;
+  transition: background-color 140ms ease;
+}
+
+.pc-sidebar-account:hover,
+.pc-sidebar-account:focus-visible {
+  background: var(--pc-color-surface-soft);
+}
+
+.pc-sidebar-account:focus-visible {
+  outline: 3px solid var(--pc-color-focus);
+  outline-offset: 2px;
 }
 
 .pc-sidebar-avatar {
@@ -164,19 +176,19 @@ const serverLabel = computed(() => {
   place-items: center;
   width: 30px;
   height: 30px;
-  border: 1px solid #d9dcf5;
+  border: 1px solid #d8dcf1;
   border-radius: 50%;
-  background: var(--pc-color-accent-soft);
-  color: var(--pc-color-accent);
+  background: var(--pc-color-primary-soft);
+  color: var(--pc-color-primary-strong);
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   flex: 0 0 auto;
 }
 
 .pc-sidebar-account-copy {
   display: grid;
   min-width: 0;
-  gap: 2px;
+  gap: 1px;
 }
 
 .pc-sidebar-account-copy strong,
@@ -190,103 +202,45 @@ const serverLabel = computed(() => {
 .pc-sidebar-account-copy strong {
   color: var(--pc-color-text);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
+  line-height: 16px;
 }
 
 .pc-sidebar-account-copy span {
   color: var(--pc-color-text-muted);
   font-size: 10px;
-}
-
-.pc-page-heading {
-  display: flex;
-  align-items: baseline;
-  min-width: 0;
-  gap: 8px;
-}
-
-.pc-page-context {
-  color: var(--pc-color-text-muted);
-  font-size: 12px;
-}
-
-.pc-page-context::after {
-  margin-left: 8px;
-  color: var(--pc-color-border-strong);
-  content: "/";
+  line-height: 14px;
 }
 
 .pc-page-title {
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
   color: var(--pc-color-text);
   font-size: 18px;
-  font-weight: 750;
-  line-height: 1.2;
-}
-
-.pc-toolbar-status {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  max-width: 280px;
-  margin-left: auto;
-  color: var(--pc-color-text-muted);
-  font-size: 12px;
-}
-
-.pc-toolbar-status span:last-child {
-  min-width: 0;
-  overflow: hidden;
+  font-weight: 700;
+  line-height: 24px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.pc-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--pc-color-success);
-  box-shadow: 0 0 0 3px rgba(60, 155, 115, 0.12);
-  flex: 0 0 auto;
-}
-
-@media (max-width: 720px) {
+@media (max-width: 900px) {
   .pc-brand {
-    min-height: auto;
-    padding: 0;
-    border-bottom: 0;
+    justify-content: center;
+    padding-right: 0;
+    padding-left: 0;
   }
 
-  .pc-nav {
-    display: flex;
-    justify-content: flex-end;
-    min-width: 0;
-    margin-top: 0;
-    overflow-x: auto;
-  }
-
-  .pc-sidebar-link {
-    flex: 0 0 auto;
-    padding: 0 9px;
-  }
-
-  .pc-sidebar-link::before {
-    top: auto;
-    right: 10px;
-    bottom: 1px;
-    left: 10px;
-    width: auto;
-    height: 2px;
-    transform: scaleX(0.5);
-  }
-
-  .pc-sidebar-link.is-active::before {
-    transform: scaleX(1);
-  }
-
-  .pc-page-context {
+  .pc-brand-copy,
+  .pc-nav-label,
+  .pc-sidebar-account-copy {
     display: none;
+  }
+
+  .pc-sidebar-account {
+    justify-content: center;
+    padding-right: 0;
+    padding-left: 0;
   }
 }
 </style>

@@ -5,13 +5,12 @@ BOT_TOKEN: xxxxxx:xxxxxxxxxxxx      # Telegram Bot Token (从 @BotFather 获取)
 
 #Telegram 管理员 ID
 ADMIN_ID: xxxxxxxxx                 # 管理员的Telegram ID (数字)
-FORWARD_ID:                         # 可选，文件转发目标ID
 
 # 默认是否上传到 Telegram 频道网盘 true 或者 false
 UP_TELEGRAM: true
 
 #下载保存路径
-SAVE_PATH: ./downloads
+SAVE_PATH: /data/downloads
 # 下载目录自动清理: 默认启用,清理超过 24 小时的本地下载文件
 DOWNLOAD_CLEANUP_ENABLED: true
 DOWNLOAD_RETENTION_HOURS: 24
@@ -22,7 +21,7 @@ PROXY_IP:
 PROXY_PORT:
 
 # aria2c RPC配置
-RPC_SECRET: xxxxxxx                 # RPC密钥（建议修改为自定义强密码）
+RPC_SECRET: replace-with-openssl-rand-hex-32-output
 RPC_URL: localhost:6800/jsonrpc     # 使用Docker部署时必须使用localhost或127.0.0.1
 
 # 直链与 TG 频道网盘配置（默认启用，作为 TG 媒体文件下载和上传的前置能力）
@@ -38,8 +37,8 @@ STREAM_PORT: 8080
 # 设置为 :: 仅绑定IPv6
 # 设置为具体IP地址则只绑定该地址
 STREAM_BIND_ADDRESS: 0.0.0.0
-# 哈希长度（5-64之间）
-STREAM_HASH_LENGTH: 6
+# 公开直链能力哈希长度（32-64之间）
+STREAM_HASH_LENGTH: 32
 # 是否使用SSL
 STREAM_HAS_SSL: false
 # 是否隐藏端口（需要端口为80或443）
@@ -52,12 +51,16 @@ STREAM_KEEP_ALIVE: false
 STREAM_PING_INTERVAL: 1200
 # 是否使用会话文件
 STREAM_USE_SESSION_FILE: false
-# 允许使用直链的用户列表（用逗号分隔，留空则允许所有人）
-STREAM_ALLOWED_USERS: 
+# 允许使用直链的数字用户 ID（用逗号分隔；留空时拒绝所有人）
+STREAM_ALLOWED_USERS: ''
 # 是否自动将直链添加到aria2下载队列（历史兼容，默认关闭；TG网盘媒体不会本地下载）
 STREAM_AUTO_DOWNLOAD: false
 # 是否发送直链信息给用户（默认不启用，设置为 true 后才会发送直链信息给用户）
 SEND_STREAM_LINK: false
+# 消息队列最大并发处理数量
+MAX_CONCURRENT_MESSAGES: 5
+# 等待队列硬上限（运行时限制为 1-1000）
+MAX_MESSAGE_QUEUE_SIZE: 100
 # 多机器人负载均衡配置（可选）
 # 配置额外的BOT_TOKEN以实现负载均衡，提高并发处理能力
 # 注意：这些是额外的token，默认的BOT_TOKEN（上面的BOT_TOKEN）会作为第一个客户端（索引0）

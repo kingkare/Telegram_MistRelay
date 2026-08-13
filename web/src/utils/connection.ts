@@ -13,8 +13,8 @@ export interface ConnectionCheckResult {
 export async function checkServerConnection(serverBaseUrl?: string): Promise<ConnectionCheckResult> {
   const normalizedServerBaseUrl = normalizeServerBaseUrl(serverBaseUrl ?? getServerBaseUrl())
   const statusUrl = normalizedServerBaseUrl
-    ? `${normalizedServerBaseUrl}/api/status`
-    : toAbsoluteServerUrl('/api/status')
+    ? `${normalizedServerBaseUrl}/api/health`
+    : toAbsoluteServerUrl('/api/health')
 
   const controller = new AbortController()
   const timeoutId = window.setTimeout(() => controller.abort(), 8000)

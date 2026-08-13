@@ -62,7 +62,7 @@ const albumItems = [
   },
 ]
 
-async function installSmokeTauriHarness(page: Page) {
+export async function installSmokeTauriHarness(page: Page) {
   await page.addInitScript(() => {
     window.localStorage.clear()
 
@@ -151,8 +151,8 @@ async function installSmokeTauriHarness(page: Page) {
   })
 }
 
-async function mockBackend(page: Page) {
-  await page.route('**/api/status', async route => {
+export async function mockBackend(page: Page) {
+  await page.route('**/api/health', async route => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -225,8 +225,8 @@ async function mockBackend(page: Page) {
 
     await route.fulfill({
       status: 200,
-      contentType: 'application/octet-stream',
-      body: 'smoke-download',
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><rect width="1200" height="800" fill="#e9eef8"/><path d="M120 620 420 280l180 210 150-150 330 280Z" fill="#6b78d8"/><circle cx="900" cy="210" r="84" fill="#d5a54b"/></svg>',
     })
   })
 
@@ -260,27 +260,93 @@ test('PC main user flow smoke test', async ({ page }) => {
   await page.getByText('夏日相册').click()
   await expect(page.getByText('相册照片 01.jpg')).toBeVisible()
 
-  await page.getByText('相册照片 01.jpg').click()
-  await expect(page.locator('.pc-preview')).toBeVisible()
+  const albumPhotoCard = page.locator('.pc-drive-card').filter({ hasText: '相册照片 01.jpg' })
+  await albumPhotoCard.click()
+  const preview = page.locator('.pc-preview')
+  await expect(preview).toBeVisible()
+  await expect(preview).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(page.locator('.pc-preview-toolbar button[title="关闭"]')).toBeFocused()
   await page.locator('.pc-preview-toolbar button[title="下载"]').click()
   await page.locator('.pc-preview-toolbar button[title="关闭"]').click()
+  await expect(albumPhotoCard).toBeFocused()
 
   await page.getByRole('link', { name: '下载' }).click()
   await expect(page.getByText('smoke-download.jpg')).toBeVisible()
-  await expect(page.getByText('已完成')).toBeVisible()
+  await expect(page.locator('.pc-download-task').getByText('已完成')).toBeVisible()
 
   await page.getByRole('link', { name: '网盘' }).click()
-  await page.getByText('返回').click()
-  await page.locator('.pc-drive-card').filter({ hasText: '删除取消.mp4' }).locator('button[title="删除"]').click()
-  await page.getByRole('button', { name: '取消' }).click()
-  await expect(page.getByText('删除取消.mp4')).toBeVisible()
+  await page.getByRole('button', { name: '返回网盘' }).click()
+  const deleteCard = page.locator('.pc-drive-card').filter({ hasText: '删除取消.mp4' })
+  await deleteCard.hover()
+  await deleteCard.locator('button[title="删除"]').click()
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(deleteCard).toBeVisible()
 
-  await page.getByRole('link', { name: '设置' }).click()
+  const deleteButton = deleteCard.locator('button[title="删除"]')
+  await deleteButton.focus()
+  await deleteButton.press('Enter')
+  const keyboardDeleteDialog = page.locator('.el-message-box').last()
+  await expect(keyboardDeleteDialog).toBeVisible()
+  await expect(page.locator('.pc-preview')).toHaveCount(0)
+  await keyboardDeleteDialog.getByRole('button', { name: '取消', exact: true }).click()
+
+  await deleteCard.click()
+  await expect(preview).toBeVisible()
+  await expect(page.locator('#pc-preview-title')).toHaveText('删除取消.mp4')
+  await preview.locator('video').focus()
+  await page.keyboard.press('ArrowRight')
+  await expect(page.locator('#pc-preview-title')).toHaveText('删除取消.mp4')
+  await page.locator('.pc-preview-toolbar button[title="删除"]').click()
+  const previewDeleteDialog = page.locator('.el-message-box').last()
+  await expect(previewDeleteDialog).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(previewDeleteDialog).toBeHidden()
+  await expect(preview).toBeVisible()
+  await page.locator('.pc-preview-toolbar button[title="关闭"]').click()
+
+  await page.getByRole('link', { name: '最近' }).click()
+  await page.getByText('夏日相册').click()
+  await expect(page).toHaveURL(/\/pc\/drive/)
+  await expect(page.getByText('相册照片 01.jpg')).toBeVisible()
+
+  await page.getByRole('link', { name: '最近' }).click()
+  await page.getByText('海边照片.jpg').click()
+  await expect(page.locator('.pc-preview')).toBeVisible()
+  await expect(page.locator('.pc-preview-toolbar button[title="删除"]')).toHaveCount(0)
+  await page.locator('.pc-preview-toolbar button[title="关闭"]').click()
+
+  await page.getByRole('link', { name: '设置', exact: true }).click()
+  await page.getByRole('button', { name: '下载', exact: true }).click()
   const threadInput = page.locator('.pc-settings-number').filter({ hasText: '单文件线程数' }).locator('input')
   await threadInput.fill('6')
-  await expect.poll(async () => page.evaluate(() => window.localStorage.getItem('mistrelay.pc.threadsPerFile'))).toBe('6')
-
   const concurrentInput = page.locator('.pc-settings-number').filter({ hasText: '全局并发数' }).locator('input')
   await concurrentInput.fill('3')
+  await page.getByRole('button', { name: '保存下载设置' }).click()
+  await expect.poll(async () => page.evaluate(() => window.localStorage.getItem('mistrelay.pc.threadsPerFile'))).toBe('6')
   await expect.poll(async () => page.evaluate(() => window.localStorage.getItem('mistrelay.pc.maxConcurrentTasks'))).toBe('3')
+
+  await page.getByRole('button', { name: '连接与账户' }).click()
+  await page.getByPlaceholder('https://example.com').fill('http://new.example.test')
+  await page.getByRole('button', { name: '测试并切换' }).click()
+  await page.getByRole('button', { name: '确认切换' }).click()
+  await expect(page).toHaveURL(/\/pc\/login/)
+  await expect.poll(async () => page.evaluate(() => window.localStorage.getItem('token'))).toBeNull()
+  await expect.poll(async () => page.evaluate(() => window.localStorage.getItem('mistrelay.serverBaseUrl'))).toBe('http://new.example.test')
+})
+
+test('keeps the PC session when the initial user check has a network error', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem('token', 'offline-token')
+    window.localStorage.setItem('mistrelay.refreshToken', 'offline-refresh')
+    Object.assign(window, { __TAURI__: {} })
+  })
+  await page.route('**/api/auth/me', route => route.abort('connectionfailed'))
+  await page.route('**/api/telegram/browse**', route => route.abort('connectionfailed'))
+
+  await page.goto('/pc/drive')
+
+  await expect(page).toHaveURL(/\/pc\/drive$/)
+  await expect(page.locator('.pc-shell')).toBeVisible()
+  await expect.poll(async () => page.evaluate(() => window.localStorage.getItem('token'))).toBe('offline-token')
 })

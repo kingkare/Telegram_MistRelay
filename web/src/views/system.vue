@@ -257,11 +257,11 @@ import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, RefreshRight, VideoPlay, VideoPause, Delete, Download, Search } from '@element-plus/icons-vue'
-import { getDockerStatus, restartDocker, getDockerLogs, getLogFiles, getLogContent, getLogDownloadUrl } from '@/api'
+import { downloadLogFile, getDockerStatus, restartDocker, getDockerLogs, getLogFiles, getLogContent } from '@/api'
 import type { DockerStatus } from '@/types/api'
 import type { LogFile } from '@/api'
 import { formatDate } from '@/utils/formatters'
-import { buildWsUrl } from '@/utils/websocket'
+import { buildWsProtocols, buildWsUrl } from '@/utils/websocket'
 
 const route = useRoute()
 const router = useRouter()
@@ -339,7 +339,7 @@ function startLogStream() {
   const url = buildWsUrl('/api/system/docker/logs/ws', { tail: String(dockerLogLines.value) })
 
   try {
-    ws.value = new WebSocket(url)
+    ws.value = new WebSocket(url, buildWsProtocols())
 
     ws.value.onopen = () => {
       wsConnected.value = true
@@ -403,8 +403,8 @@ function fetchDockerLogs() {
   loadingDockerLogs.value = true
   getDockerLogs(dockerLogLines.value)
     .then(data => {
-      if (data.success && data.logs) {
-        dockerLogs.value = data.logs
+      if (data.success) {
+        dockerLogs.value = data.logs || ''
       } else {
         dockerLogs.value = ''
         ElMessage.warning(data.error || '无法获取日志')
@@ -488,9 +488,13 @@ function viewFile(name: string) {
   fetchAppLogs()
 }
 
-function handleDownload() {
+async function handleDownload() {
   if (!currentFileName.value) return
-  window.open(getLogDownloadUrl(currentFileName.value), '_blank')
+  try {
+    await downloadLogFile(currentFileName.value)
+  } catch {
+    ElMessage.error('下载日志失败')
+  }
 }
 
 function clearAppLogDisplay() {

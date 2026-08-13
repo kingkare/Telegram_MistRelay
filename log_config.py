@@ -7,12 +7,16 @@ from datetime import datetime
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'db', 'logs')
 LOG_FILE = os.path.join(LOG_DIR, 'mistrelay.log')
 
-# 单个日志文件最大 10MB，保留最近 5 个备份
+# 单个日志文件最大 10MB，保留最近 30 个备份
 MAX_BYTES = 10 * 1024 * 1024
-BACKUP_COUNT = 5
+BACKUP_COUNT = 30
 
-# 日志保留时长：24 小时
-LOG_MAX_AGE_SECONDS = 24 * 3600
+# 安全审计默认保留 90 天，可通过环境变量缩短或延长。
+try:
+    LOG_MAX_AGE_DAYS = max(1, int(os.environ.get("MISTRELAY_LOG_RETENTION_DAYS", "90")))
+except ValueError:
+    LOG_MAX_AGE_DAYS = 90
+LOG_MAX_AGE_SECONDS = LOG_MAX_AGE_DAYS * 24 * 3600
 
 _initialized = False
 
@@ -43,7 +47,7 @@ def setup_logging(level=logging.INFO):
         return
     _initialized = True
 
-    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, mode=0o700, exist_ok=True)
     cleanup_old_logs()
 
     file_formatter = logging.Formatter(
@@ -59,6 +63,10 @@ def setup_logging(level=logging.INFO):
     )
     file_handler.setLevel(level)
     file_handler.setFormatter(file_formatter)
+    try:
+        os.chmod(LOG_FILE, 0o600)
+    except OSError:
+        pass
 
     root = logging.getLogger()
     root.setLevel(level)

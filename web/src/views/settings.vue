@@ -1,14 +1,5 @@
 <template>
   <div class="settings-page">
-    <div class="page-header">
-      <el-button type="info" @click="handleReloadConfig" :loading="reloading" :disabled="reloading">
-        从config.yml重新导入配置
-      </el-button>
-      <div style="margin-left: 10px; color: #909399; font-size: 12px;">
-        提示：配置保存后会自动从数据库读取，无需手动重载
-      </div>
-    </div>
-
     <el-tabs v-model="activeTab" type="border-card">
       <el-tab-pane label="客户端连接" name="client">
         <el-card shadow="hover">
@@ -70,7 +61,7 @@
           <template #header>
             <div class="card-header">
               <span>Telegram Bot配置</span>
-              <el-button type="primary" @click="saveConfig('telegram')" :loading="saving" :disabled="reloading">
+              <el-button type="primary" @click="saveConfig('telegram')" :loading="saving">
                 保存配置
               </el-button>
             </div>
@@ -87,21 +78,18 @@
               </div>
             </template>
           </el-alert>
-          <el-form :model="configs.telegram" label-width="180px" :rules="rules" :disabled="reloading">
+          <el-form :model="configs.telegram" label-width="180px" :rules="rules">
             <el-form-item label="API ID" prop="API_ID">
-              <el-input-number v-model="configs.telegram.API_ID" :min="0" style="width: 100%" />
+              <el-input-number v-model="configs.telegram.API_ID" :min="0" style="width: 100%" :disabled="isOfflineOnly('API_ID')" />
             </el-form-item>
             <el-form-item label="API Hash" prop="API_HASH">
-              <el-input v-model="configs.telegram.API_HASH" type="password" show-password />
+              <el-input v-model="configs.telegram.API_HASH" type="password" show-password :disabled="isOfflineOnly('API_HASH')" :placeholder="secretStatus('API_HASH')" />
             </el-form-item>
             <el-form-item label="Bot Token" prop="BOT_TOKEN">
-              <el-input v-model="configs.telegram.BOT_TOKEN" type="password" show-password />
+              <el-input v-model="configs.telegram.BOT_TOKEN" type="password" show-password :disabled="isOfflineOnly('BOT_TOKEN')" :placeholder="secretStatus('BOT_TOKEN')" />
             </el-form-item>
             <el-form-item label="管理员ID" prop="ADMIN_ID">
-              <el-input-number v-model="configs.telegram.ADMIN_ID" :min="0" style="width: 100%" />
-            </el-form-item>
-            <el-form-item label="转发ID" prop="FORWARD_ID">
-              <el-input v-model="configs.telegram.FORWARD_ID" />
+              <el-input-number v-model="configs.telegram.ADMIN_ID" :min="0" style="width: 100%" :disabled="isOfflineOnly('ADMIN_ID')" />
             </el-form-item>
             <el-form-item label="上传到Telegram">
               <el-switch v-model="configs.telegram.UP_TELEGRAM" />
@@ -132,7 +120,7 @@
               </div>
             </template>
           </el-alert>
-          <el-form :model="configs.download" label-width="180px" :disabled="reloading">
+          <el-form :model="configs.download" label-width="180px">
             <el-form-item label="保存路径">
               <el-input v-model="configs.download.SAVE_PATH" />
             </el-form-item>
@@ -157,10 +145,10 @@
               </div>
             </el-form-item>
             <el-form-item label="代理IP">
-              <el-input v-model="configs.download.PROXY_IP" placeholder="留空则不使用代理" />
+              <el-input v-model="configs.download.PROXY_IP" placeholder="留空则不使用代理" :disabled="isOfflineOnly('PROXY_IP')" />
             </el-form-item>
             <el-form-item label="代理端口">
-              <el-input v-model="configs.download.PROXY_PORT" placeholder="留空则不使用代理" />
+              <el-input v-model="configs.download.PROXY_PORT" placeholder="留空则不使用代理" :disabled="isOfflineOnly('PROXY_PORT')" />
             </el-form-item>
             <el-divider />
             <el-form-item label="跳过小文件">
@@ -211,10 +199,10 @@
           </el-alert>
           <el-form :model="configs.aria2" label-width="180px">
             <el-form-item label="RPC密钥">
-              <el-input v-model="configs.aria2.RPC_SECRET" type="password" show-password />
+              <el-input v-model="configs.aria2.RPC_SECRET" type="password" show-password :disabled="isOfflineOnly('RPC_SECRET')" :placeholder="secretStatus('RPC_SECRET')" />
             </el-form-item>
             <el-form-item label="RPC URL">
-              <el-input v-model="configs.aria2.RPC_URL" />
+              <el-input v-model="configs.aria2.RPC_URL" :disabled="isOfflineOnly('RPC_URL')" />
             </el-form-item>
           </el-form>
         </el-card>
@@ -236,7 +224,7 @@
               <el-switch v-model="configs.stream.ENABLE_STREAM" />
             </el-form-item>
             <el-form-item label="日志频道ID">
-              <el-input v-model="configs.stream.BIN_CHANNEL" />
+              <el-input v-model="configs.stream.BIN_CHANNEL" :disabled="isOfflineOnly('BIN_CHANNEL')" />
             </el-form-item>
             <el-form-item label="Web服务器端口">
               <el-input-number v-model="configs.stream.STREAM_PORT" :min="1" :max="65535" style="width: 100%" />
@@ -263,10 +251,10 @@
               <el-input-number v-model="configs.stream.STREAM_PING_INTERVAL" :min="60" style="width: 100%" />
             </el-form-item>
             <el-form-item label="使用会话文件">
-              <el-switch v-model="configs.stream.STREAM_USE_SESSION_FILE" />
+              <el-switch v-model="configs.stream.STREAM_USE_SESSION_FILE" :disabled="isOfflineOnly('STREAM_USE_SESSION_FILE')" />
             </el-form-item>
             <el-form-item label="允许使用直链的用户">
-              <el-input v-model="configs.stream.STREAM_ALLOWED_USERS" placeholder="逗号分隔，留空则允许所有人" />
+              <el-input v-model="configs.stream.STREAM_ALLOWED_USERS" placeholder="数字用户 ID，逗号分隔；留空则拒绝所有人" :disabled="isOfflineOnly('STREAM_ALLOWED_USERS')" />
             </el-form-item>
             <el-form-item label="自动下载兼容开关">
               <el-switch v-model="configs.stream.STREAM_AUTO_DOWNLOAD" />
@@ -282,11 +270,10 @@
                 v-model="multiBotTokensText"
                 type="textarea"
                 :rows="4"
-                placeholder="每行一个Token，或逗号分隔"
-                @input="updateMultiBotTokens"
+                placeholder="新增 Token，每行一个或逗号分隔"
               />
               <div class="el-form-item__help">
-                当前配置了 {{ (configs.stream.MULTI_BOT_TOKENS || []).length }} 个额外的Bot Token
+                {{ secretStatus('MULTI_BOT_TOKENS') }}
               </div>
             </el-form-item>
           </el-form>
@@ -549,14 +536,14 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getConfig, updateConfig, reloadConfig, getDockerStatus, restartDocker, getDockerLogs, getLogFiles, getLogContent, getLogDownloadUrl, type LogFile } from '@/api'
+import { downloadLogFile, getConfig, updateConfig, getDockerStatus, restartDocker, getDockerLogs, getLogFiles, getLogContent, type LogFile } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { checkServerConnection } from '@/utils/connection'
 import { getServerBaseUrl, isValidServerBaseUrl, setServerBaseUrl } from '@/utils/runtime'
 import { Refresh, RefreshRight, VideoPlay, VideoPause, Delete, Download, Search } from '@element-plus/icons-vue'
 import type { DockerStatus } from '@/types/api'
 import { formatDate } from '@/utils/formatters'
-import { buildWsUrl } from '@/utils/websocket'
+import { buildWsProtocols, buildWsUrl } from '@/utils/websocket'
 import { useRoute, useRouter } from 'vue-router'
 
 const route = useRoute()
@@ -570,7 +557,6 @@ const initialTab = typeof route.query.tab === 'string' && validTabs.includes(rou
   : 'client'
 const activeTab = ref<SettingsTab>(initialTab)
 const saving = ref(false)
-const reloading = ref(false)
 const clientServerUrl = ref(getServerBaseUrl())
 const testingConnection = ref(false)
 const savingClientConnection = ref(false)
@@ -578,6 +564,20 @@ const connectionState = ref<'idle' | 'success' | 'error'>('idle')
 const connectionStatusText = ref('')
 const configCategories = ['telegram', 'download', 'aria2', 'stream'] as const
 type ConfigCategory = typeof configCategories[number]
+const redactedKeys = ref(new Set<string>())
+const offlineOnlyKeys = ref(new Set<string>())
+const secretCounts = ref<Record<string, number>>({})
+
+function isOfflineOnly(key: string): boolean {
+  return offlineOnlyKeys.value.has(key)
+}
+
+function secretStatus(key: string): string {
+  if (key === 'MULTI_BOT_TOKENS' && secretCounts.value[key]) {
+    return `已配置 ${secretCounts.value[key]} 个`
+  }
+  return redactedKeys.value.has(key) ? '已配置' : '未配置'
+}
 
 const effectiveServerUrlLabel = computed(() => clientServerUrl.value || '同源 /api')
 const connectionStatusLabel = computed(() => {
@@ -597,11 +597,10 @@ const configs = ref({
     API_HASH: '',
     BOT_TOKEN: '',
     ADMIN_ID: 0,
-    FORWARD_ID: '',
     UP_TELEGRAM: true
   },
   download: {
-    SAVE_PATH: '/root/downloads',
+    SAVE_PATH: '/data/downloads',
     PROXY_IP: '',
     PROXY_PORT: '',
     SKIP_SMALL_FILES: false,
@@ -730,6 +729,9 @@ async function fetchConfigs() {
     for (const category of configCategories) {
       const response = await getConfig(category)
       if (response.success && response.data) {
+        redactedKeys.value = new Set([...redactedKeys.value, ...(response.redacted_keys || [])])
+        offlineOnlyKeys.value = new Set([...offlineOnlyKeys.value, ...(response.offline_only_keys || [])])
+        secretCounts.value = { ...secretCounts.value, ...(response.secret_counts || {}) }
         // 合并配置，保留默认值
         ;(configs.value as Record<ConfigCategory, Record<string, any>>)[category] = {
           ...(configs.value[category] as Record<string, any>),
@@ -744,11 +746,6 @@ async function fetchConfigs() {
 }
 
 async function saveConfig(category: ConfigCategory) {
-  if (reloading.value) {
-    ElMessage.warning('配置正在重载中，请稍候...')
-    return
-  }
-
   saving.value = true
   try {
     const categoryConfig = configs.value[category]
@@ -770,48 +767,9 @@ async function saveConfig(category: ConfigCategory) {
     }
   } catch (err: any) {
     console.error('保存配置失败:', err)
-    ElMessage.error(err.message || '配置保存失败')
+    ElMessage.error(err.response?.data?.error || err.message || '配置保存失败')
   } finally {
     saving.value = false
-  }
-}
-
-async function handleReloadConfig() {
-  try {
-    await ElMessageBox.confirm(
-      '确定要从config.yml重新导入配置到数据库吗？这将会覆盖数据库中的现有配置。',
-      '确认导入配置',
-      {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        type: 'info'
-      }
-    )
-
-    // 开始重载，锁定页面
-    reloading.value = true
-
-    try {
-      const response = await reloadConfig()
-      if (response.success) {
-        ElMessage.success(response.message || '配置已从config.yml重新导入到数据库')
-        // 重新获取配置
-        await fetchConfigs()
-      } else {
-        ElMessage.error(response.error || '配置导入失败')
-      }
-    } catch (err: any) {
-      console.error('导入配置失败:', err)
-      ElMessage.error(err.message || '配置导入失败')
-    } finally {
-      // 重载完成，解锁页面
-      reloading.value = false
-    }
-  } catch (err: any) {
-    if (err !== 'cancel') {
-      console.error('重载配置失败:', err)
-      ElMessage.error(err.message || '配置重载失败')
-    }
   }
 }
 
@@ -873,7 +831,7 @@ function startLogStream() {
   const url = buildWsUrl('/api/system/docker/logs/ws', { tail: String(dockerLogLines.value) })
 
   try {
-    ws.value = new WebSocket(url)
+    ws.value = new WebSocket(url, buildWsProtocols())
 
     ws.value.onopen = () => {
       wsConnected.value = true
@@ -937,8 +895,8 @@ function fetchDockerLogs() {
   loadingDockerLogs.value = true
   getDockerLogs(dockerLogLines.value)
     .then(data => {
-      if (data.success && data.logs) {
-        dockerLogs.value = data.logs
+      if (data.success) {
+        dockerLogs.value = data.logs || ''
       } else {
         dockerLogs.value = ''
         ElMessage.warning(data.error || '无法获取日志')
@@ -1022,9 +980,13 @@ function viewFile(name: string) {
   fetchAppLogs()
 }
 
-function handleDownload() {
+async function handleDownload() {
   if (!currentFileName.value) return
-  window.open(getLogDownloadUrl(currentFileName.value), '_blank')
+  try {
+    await downloadLogFile(currentFileName.value)
+  } catch {
+    ElMessage.error('下载日志失败')
+  }
 }
 
 function clearAppLogDisplay() {

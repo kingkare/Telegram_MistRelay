@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import datetime
 import logging
 import re
@@ -13,6 +12,7 @@ setup_logging(level=logging.INFO)
 import python_socks
 
 from telethon import TelegramClient, events, Button
+from telethon.sessions import MemorySession
 import coloredlogs
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault, Message
@@ -20,6 +20,7 @@ from telethon.tl.types import BotCommand, BotCommandScopeDefault, Message
 from async_aria2_client import AsyncAria2Client
 from db import init_db
 from download_cleanup import start_download_cleanup_loop
+from service_runtime import set_service_ready
 from configer import (
     API_ID, API_HASH, PROXY_IP, PROXY_PORT, BOT_TOKEN, ADMIN_ID, RPC_SECRET, RPC_URL,
     ENABLE_STREAM
@@ -76,14 +77,16 @@ else:
     docker_rpc_url = RPC_URL
 
 proxy = (python_socks.ProxyType.HTTP, PROXY_IP, PROXY_PORT) if PROXY_IP is not None else None
-bot = TelegramClient('./db/bot', API_ID, API_HASH, proxy=proxy).start(bot_token=BOT_TOKEN)
+# Bot sessions are cheap to recreate from the token. Keeping the auth key only in
+# memory prevents another filesystem read bug from exposing a reusable session.
+bot = TelegramClient(MemorySession(), API_ID, API_HASH, proxy=proxy).start(bot_token=BOT_TOKEN)
 client = AsyncAria2Client(RPC_SECRET, f'ws://{docker_rpc_url}', bot)
 
 # 将aria2客户端设置为全局变量，供直链功能使用
 aria2_client = client
 
 
-@bot.on(events.NewMessage(pattern="/start"))
+@bot.on(events.NewMessage(pattern="/start", from_users=ADMIN_ID))
 async def handler(event):
     welcome_msg = (
         f"🤖 <b>MistRelay 下载机器人</b>\n\n"
@@ -101,12 +104,6 @@ async def handler(event):
     await event.reply("📋 功能菜单", parse_mode='html', buttons=get_menu())
 
 
-@bot.on(events.NewMessage(pattern="/web", from_users=ADMIN_ID))
-async def handler(event):
-    base_key = base64.b64encode(RPC_SECRET.encode("utf-8")).decode('utf-8')
-    await event.respond(f'http://ariang.js.org/#!/settings/rpc/set/ws/{RPC_URL.replace(":", "/", 1)}/{base_key}')
-
-
 @bot.on(events.NewMessage(pattern="/info", from_users=ADMIN_ID))
 async def handler(event):
     result = await client.get_global_option()
@@ -117,20 +114,7 @@ async def handler(event):
     )
 
 
-@bot.on(events.NewMessage(pattern="/path", from_users=ADMIN_ID))
-async def handler(event):
-    text = event.raw_text
-    text = text.replace('/path ', '').strip()
-    params = [{"dir": text}]
-    data = await client.change_global_option(params)
-    if data['result'] == 'OK':
-        await event.respond(f'默认路径设置成功 {text}\n'
-                            f'注意: docker启动的话，要在配置文件docker-compose.yml中配置挂载目录')
-    else:
-        await event.respond(f'默认路径设置失败 {text}')
-
-
-@bot.on(events.NewMessage(pattern="/help"))
+@bot.on(events.NewMessage(pattern="/help", from_users=ADMIN_ID))
 async def handler(event):
     help_text = (
         f"📖 <b>MistRelay 使用帮助</b>\n\n"
@@ -139,8 +123,7 @@ async def handler(event):
         f"• <code>/menu</code> - 显示功能菜单\n"
         f"• <code>/help</code> - 显示此帮助信息\n"
         f"• <code>/info</code> - 查看系统信息\n"
-        f"• <code>/web</code> - 获取ariaNg在线控制地址\n"
-        f"• <code>/path [目录]</code> - 设置下载目录\n\n"
+        f"• <code>/info</code> - 查看下载服务状态\n\n"
         f"<b>📥 下载方式：</b>\n"
         f"• 发送HTTP链接\n"
         f"• 发送磁力链接（magnet:）\n"
@@ -167,7 +150,12 @@ async def handler(event):
 @bot.on(events.NewMessage(from_users=ADMIN_ID))
 async def send_welcome(event):
     text = event.raw_text
-    log.info(str(datetime.datetime.utcnow()) + ':' + text)
+    log.info(
+        "%s: admin message received (length=%d, media=%s)",
+        datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        len(text or ""),
+        bool(event.media),
+    )
     
     # 任务查看菜单
     if text == '⬇️正在下载':
@@ -245,7 +233,7 @@ async def send_welcome(event):
                 uris=[url],
             )
     elif text.startswith('magnet'):
-        pattern_res = re.findall('magnet:\?xt=urn:btih:[0-9a-fA-F]{40,}.*', text)
+        pattern_res = re.findall(r'magnet:\?xt=urn:btih:[0-9a-fA-F]{40,}.*', text)
         for text in pattern_res:
             await client.add_uri(
                 uris=[text],
@@ -692,6 +680,9 @@ async def show_load_status(event):
 
 @events.register(events.CallbackQuery)
 async def BotCallbackHandler(event):
+    if int(event.sender_id or 0) != int(ADMIN_ID):
+        await event.answer("Unauthorized", alert=True)
+        return
     d = str(event.data, encoding="utf-8")
     [type, gid] = d.split('.', 1)
     if type == 'pause-task':
@@ -751,6 +742,7 @@ def get_menu():
 
 # 入口
 async def main():
+    set_service_ready(False)
     # 初始化本地 SQLite 数据库（用于记录下载与媒体信息）
     try:
         init_db()
@@ -758,7 +750,8 @@ async def main():
         from db import ensure_default_admin
         ensure_default_admin()
     except Exception as e:
-        log.warning(f"初始化本地下载数据库失败: {e}")
+        log.error(f"初始化本地下载数据库失败，拒绝继续启动: {e}")
+        raise
 
     # 启动日志定时清理任务（每小时检查一次，删除超过 24 小时的日志）
     async def _log_cleanup_loop():
@@ -777,8 +770,6 @@ async def main():
         BotCommand(command="menu", description='显示功能菜单'),
         BotCommand(command="help", description='查看帮助信息'),
         BotCommand(command="info", description='查看系统信息'),
-        BotCommand(command="web", description='获取ariaNg在线地址'),
-        BotCommand(command="path", description='设置下载目录'),
     ]
     await bot(
         SetBotCommandsRequest(
@@ -839,21 +830,22 @@ async def main():
                     except Exception as e:
                         log.warning(f'提前设置aria2客户端失败: {e}')
                     
-                    stream_server = web.AppRunner(web_server())
+                    # Nginx keeps a query/path-redacted access log. Disable aiohttp's
+                    # raw request log so thumbnail tickets and stream capabilities
+                    # are not persisted a second time.
+                    stream_server = web.AppRunner(web_server(), access_log=None)
                     await stream_server.setup()
                     
                     # 支持IPv6双栈：如果绑定地址是0.0.0.0，同时绑定IPv6
                     if Var.BIND_ADDRESS == "0.0.0.0":
+                        site_ipv4 = web.TCPSite(stream_server, "0.0.0.0", Var.PORT)
+                        await site_ipv4.start()
                         try:
-                            site_ipv4 = web.TCPSite(stream_server, "0.0.0.0", Var.PORT)
                             site_ipv6 = web.TCPSite(stream_server, "::", Var.PORT)
-                            await site_ipv4.start()
                             await site_ipv6.start()
                             log.info(f'Web服务器启动成功（IPv4+IPv6双栈）: {Var.URL}')
                         except OSError as e:
                             log.warning(f'IPv6绑定失败，仅使用IPv4: {e}')
-                            site_ipv4 = web.TCPSite(stream_server, "0.0.0.0", Var.PORT)
-                            await site_ipv4.start()
                             log.info(f'Web服务器启动成功（仅IPv4）: {Var.URL}')
                     else:
                         site = web.TCPSite(stream_server, Var.BIND_ADDRESS, Var.PORT)
@@ -861,7 +853,7 @@ async def main():
                         log.info(f'Web服务器启动成功: {Var.URL}')
                 except Exception as e:
                     log.error(f'启动Web服务器失败: {e}', exc_info=True)
-                    log.warning('Web服务器启动失败，但主应用将继续运行')
+                    raise RuntimeError('Web服务器启动失败') from e
             
             # 配置 Pyrogram 日志级别，屏蔽速率限制等待的警告消息
             # 这些警告是正常的速率限制行为，不需要显示
@@ -977,6 +969,8 @@ async def main():
             
             # 然后初始化Telegram客户端（可能被限流阻塞）
             await initialize_clients()
+            if not channel_accessible_clients:
+                raise RuntimeError("没有机器人能够访问配置的 BIN_CHANNEL")
             
             # 将aria2客户端传递给直链功能
             try:
@@ -994,13 +988,19 @@ async def main():
             log.info(f'自动下载兼容开关: {auto_download_status}')
         except Exception as e:
             log.error(f'启动直链功能失败: {e}', exc_info=True)
-            log.warning('直链功能启动失败，但主应用将继续运行')
+            raise RuntimeError('直链功能启动失败') from e
+
+    set_service_ready(True)
 
 
 async def cleanup():
+    set_service_ready(False)
     """清理资源"""
     if stream_server:
-        await stream_server.cleanup()
+        try:
+            await stream_server.cleanup()
+        except Exception as e:
+            log.warning(f"清理 Web 服务器时出错: {e}")
     if ENABLE_STREAM:
         try:
             # 停止所有客户端（包括多客户端模式下的额外客户端）
@@ -1016,12 +1016,11 @@ async def cleanup():
             log.warning(f"清理客户端时出错: {e}")
 
 
-loop = asyncio.get_event_loop()
-try:
-    loop.create_task(main())
-    loop.run_forever()
-except KeyboardInterrupt:
-    pass
-finally:
-    loop.run_until_complete(cleanup())
-    loop.stop()
+if __name__ == "__main__":
+    from service_runtime import run_event_loop
+
+    loop = asyncio.get_event_loop()
+    try:
+        run_event_loop(loop, main, cleanup)
+    except KeyboardInterrupt:
+        pass

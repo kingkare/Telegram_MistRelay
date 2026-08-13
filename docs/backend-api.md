@@ -28,18 +28,23 @@ export TOKEN="<jwt-token>"
 后端只对以 `/api/` 开头的路径启用 JWT 鉴权。以下接口免鉴权：
 
 - `POST /api/auth/login`
-- `GET /api/status`
+- `POST /api/auth/refresh`
+- `POST /api/auth/logout`
+- `GET /api/health`
 
 其余 `/api/*` 接口都需要 token。
 
 传递方式：
 
-- 普通 JSON API：推荐 `Authorization: Bearer <token>`
-- 文件下载、浏览器直链、WebSocket：也可以用 `?token=<token>`
+- HTTP API 和文件下载：`Authorization: Bearer <token>`
+- WebSocket：子协议 `mistrelay.jwt.<token>`
+- 管理员 JWT 不接受 `?token=` 查询参数，避免凭据进入访问日志和浏览器历史
+- TG 缩略图使用浏览接口返回的短时、单路径 `ticket`，流媒体地址使用消息 hash
 
 JWT 特性：
 
-- 过期时间固定为 24 小时
+- Access token 过期时间固定为 15 分钟
+- Refresh token 默认 30 天，服务端只保存哈希，并在每次刷新时轮换
 - JWT 签名密钥在进程启动时随机生成
 - 服务重启后，旧 token 会全部失效，需要重新登录
 
@@ -65,7 +70,7 @@ JWT 特性：
 
 ### 1.3 CORS
 
-服务端对所有请求统一添加 CORS 响应头：
+服务端只允许同源请求、Tauri 客户端和 `MISTRELAY_CORS_ORIGINS` 明确列出的 Origin：
 
 - `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS`
 - `Access-Control-Allow-Headers: Authorization, Content-Type, Accept, Origin, X-Requested-With, Range`
@@ -110,7 +115,8 @@ JWT 特性：
 | `POST` | `/api/auth/login` | 否 | 登录获取 JWT |
 | `GET` | `/api/auth/me` | 是 | 获取当前用户 |
 | `POST` | `/api/auth/password` | 是 | 修改密码 |
-| `GET` | `/api/status` | 否 | 服务状态 |
+| `GET` | `/api/health` | 否 | 最小存活/就绪状态 |
+| `GET` | `/api/status` | 是 | 详细服务与 Bot 状态 |
 | `GET` | `/api/system/docker/status` | 是 | Docker 状态 |
 | `POST` | `/api/system/docker/restart` | 是 | 重启 Docker 容器 |
 | `GET` | `/api/system/docker/logs` | 是 | Docker 日志 |
@@ -118,7 +124,7 @@ JWT 特性：
 | `GET` | `/api/system/docker/logs/ws` | 是 | Docker 日志 WebSocket |
 | `GET` | `/api/config` | 是 | 获取配置 |
 | `POST` | `/api/config` | 是 | 更新配置 |
-| `POST` | `/api/config/reload` | 是 | 从配置文件重载 |
+| `POST` | `/api/config/reload` | 是 | 在线导入已禁用，固定返回 `403` |
 | `GET` | `/api/downloads` | 是 | 下载记录 |
 | `GET` | `/api/downloads/statistics` | 是 | 下载统计 |
 | `DELETE` | `/api/downloads/all` | 是 | 清空下载记录 |
@@ -518,7 +524,7 @@ curl "$BASE_URL/api/auth/me" \
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `old_password` | string | 是 | 旧密码 |
-| `new_password` | string | 是 | 新密码，最少 6 位 |
+| `new_password` | string | 是 | 新密码，长度 16-512 位 |
 
 成功响应：
 
@@ -543,24 +549,27 @@ curl "$BASE_URL/api/auth/me" \
 curl -X POST "$BASE_URL/api/auth/password" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"old_password":"old","new_password":"newpass123"}'
+  -d '{"old_password":"old-password","new_password":"new-unique-password-123"}'
 ```
 
 ## 4. 系统与 Docker 接口
 
-### 4.1 `GET /api/status`
+默认加固 Compose 不挂载 Docker socket，因此 `4.2-4.5` 的 Docker 状态、重启和日志接口会返回不可用，不能控制宿主 Docker。只有明确修改部署并承担等同宿主 root 的风险后，这些兼容接口才可能工作；生产环境不应这样做。
 
-公开状态检查接口，前端连接检测和登录前探活都会使用它。
+### 4.1 `GET /api/health`
+
+公开的最小存活/就绪检查，前端连接检测和容器健康检查使用它。启动未完成时返回 `503`，不会暴露 Bot 名称或负载。
 
 - 鉴权：否
 - 请求参数：无
-- 成功响应：见 `ServerStatus`
 
 示例：
 
 ```bash
-curl "$BASE_URL/api/status"
+curl "$BASE_URL/api/health"
 ```
+
+详细状态使用 `GET /api/status`，需要 `Authorization: Bearer <token>`，成功响应见 `ServerStatus`。
 
 ### 4.2 `GET /api/system/docker/status`
 
@@ -687,7 +696,7 @@ curl "$BASE_URL/api/system/docker/logs?lines=200" \
 示例：
 
 ```bash
-wscat -c "ws://localhost:8080/api/system/docker/logs/ws?token=$TOKEN&tail=100"
+wscat -s "mistrelay.jwt.$TOKEN" -c "ws://localhost:8080/api/system/docker/logs/ws?tail=100"
 ```
 
 ### 4.6 `GET /api/system/resources`
@@ -753,15 +762,18 @@ curl "$BASE_URL/api/system/resources" \
   "success": true,
   "data": {
     "API_ID": 123456,
-    "BOT_TOKEN": "123:abc",
+    "BOT_TOKEN": "",
     "UP_TELEGRAM": true
-  }
+  },
+  "redacted_keys": ["BOT_TOKEN"],
+  "offline_only_keys": ["API_ID", "BOT_TOKEN"]
 }
 ```
 
 说明：
 
 - 返回的是“键值字典”，不是数组
+- `API_HASH`、Bot Token、额外 Bot Token 和 `RPC_SECRET` 只返回空值与 `redacted_keys` 元数据，不返回秘密
 - 服务端会根据 `value_type` 自动把值转换为 `int`、`bool`、`list`、`json` 或 `string`
 
 示例：
@@ -797,13 +809,13 @@ curl "$BASE_URL/api/config?category=telegram" \
 }
 ```
 
-部分失败时：
+请求含任何非法或离线专用字段时，整个请求不会写入：
 
 ```json
 {
   "success": false,
   "error": "部分配置更新失败: UNKNOWN_KEY: 未知的配置项",
-  "updated_count": 1,
+  "updated_count": 0,
   "needs_restart": false
 }
 ```
@@ -823,7 +835,6 @@ curl "$BASE_URL/api/config?category=telegram" \
 | `API_HASH` | `string` | `telegram` | Telegram API Hash | 是 |
 | `BOT_TOKEN` | `string` | `telegram` | Telegram Bot Token | 是 |
 | `ADMIN_ID` | `int` | `telegram` | Telegram 管理员 ID | 是 |
-| `FORWARD_ID` | `string` | `telegram` | 转发 ID | 否 |
 | `UP_TELEGRAM` | `bool` | `telegram` | 是否上传到 Telegram 频道网盘 | 否 |
 | `SAVE_PATH` | `string` | `download` | 下载保存路径 | 否 |
 | `PROXY_IP` | `string` | `download` | 代理 IP | 否 |
@@ -840,7 +851,7 @@ curl "$BASE_URL/api/config?category=telegram" \
 | `BIN_CHANNEL` | `string` | `stream` | 日志频道 ID | 是 |
 | `STREAM_PORT` | `int` | `stream` | Web 端口 | 是 |
 | `STREAM_BIND_ADDRESS` | `string` | `stream` | 绑定地址 | 是 |
-| `STREAM_HASH_LENGTH` | `int` | `stream` | 哈希长度 | 是 |
+| `STREAM_HASH_LENGTH` | `int` | `stream` | 哈希长度，运行时最小 32 | 是 |
 | `STREAM_HAS_SSL` | `bool` | `stream` | 是否使用 SSL | 是 |
 | `STREAM_NO_PORT` | `bool` | `stream` | 是否隐藏端口 | 是 |
 | `STREAM_FQDN` | `string` | `stream` | 完全限定域名 | 是 |
@@ -851,6 +862,8 @@ curl "$BASE_URL/api/config?category=telegram" \
 | `STREAM_AUTO_DOWNLOAD` | `bool` | `stream` | 历史兼容：是否自动加入下载队列 | 否 |
 | `SEND_STREAM_LINK` | `bool` | `stream` | 是否发送直链消息 | 否 |
 | `MULTI_BOT_TOKENS` | `list` | `stream` | 多机器人 token 列表 | 是 |
+
+凭据、频道、代理、RPC、文件根目录、监听地址、公开域名、哈希长度和链接发送等安全敏感字段只能在停机维护窗口用 `rotate_credentials.py` 修改；在线提交不同值会返回 `400`，且不会部分保存其他字段。
 
 示例：
 
@@ -863,26 +876,16 @@ curl -X POST "$BASE_URL/api/config" \
 
 ### 5.3 `POST /api/config/reload`
 
-从 `config.yml` 重新导入配置到数据库。
+在线配置导入已禁用。该接口固定返回 `403`，凭据恢复必须使用 owner-only 输入文件和 `rotate_credentials.py`。
 
 - 鉴权：是
 - 请求体：无
 
-成功响应：
-
-```json
-{
-  "success": true,
-  "message": "配置已从config.yml重新导入到数据库，下次使用时将从数据库读取最新配置",
-  "imported": true
-}
-```
-
-失败状态码：
+响应状态码：
 
 | 状态码 | 场景 |
 | --- | --- |
-| `500` | 重新导入失败 |
+| `403` | 在线 YAML 导入被安全策略禁止 |
 
 示例：
 
@@ -890,6 +893,8 @@ curl -X POST "$BASE_URL/api/config" \
 curl -X POST "$BASE_URL/api/config/reload" \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+旧 `config.yml` 仅能在首次部署时通过显式的一次性 `bootstrap_legacy.py` 离线导入；数据库缺失或异常不会触发自动 YAML 回退。
 
 ## 6. 已废弃的第三方网盘接口
 
@@ -1162,7 +1167,7 @@ curl "$BASE_URL/api/uploads?limit=100&status=failed&upload_target=telegram" \
 示例：
 
 ```bash
-wscat -c "ws://localhost:8080/api/ws/status?token=$TOKEN"
+wscat -s "mistrelay.jwt.$TOKEN" -c "ws://localhost:8080/api/ws/status"
 ```
 
 ### 8.8 `GET /api/queue`
@@ -1709,7 +1714,8 @@ curl "$BASE_URL/api/files/list?path=/downloads" \
 示例：
 
 ```bash
-curl -L "$BASE_URL/api/files/download?path=/downloads/movie.mp4&token=$TOKEN" \
+curl -L "$BASE_URL/api/files/download?path=/movie.mp4" \
+  -H "Authorization: Bearer $TOKEN" \
   -o movie.mp4
 ```
 
@@ -1934,7 +1940,8 @@ curl "$BASE_URL/api/logs/files" \
 示例：
 
 ```bash
-curl -L "$BASE_URL/api/logs/download/mistrelay.log?token=$TOKEN" \
+curl -L "$BASE_URL/api/logs/download/mistrelay.log" \
+  -H "Authorization: Bearer $TOKEN" \
   -o mistrelay.log
 ```
 
@@ -1947,7 +1954,7 @@ curl -L "$BASE_URL/api/logs/download/mistrelay.log?token=$TOKEN" \
 行为：
 
 - 如果 `/app/web/dist/index.html` 存在，直接返回该文件
-- 如果前端未构建，则退化为执行 `GET /api/status` 的逻辑并返回状态 JSON
+- 如果前端未构建，则退化为执行 `GET /api/health` 的逻辑并返回最小状态 JSON
 
 ### 12.2 `GET /{path:.+}`
 

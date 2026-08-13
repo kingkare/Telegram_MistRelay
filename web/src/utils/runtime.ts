@@ -172,39 +172,12 @@ export function clearAuthTokens(): void {
   clearRefreshToken()
 }
 
-export function buildAuthorizedApiUrl(
-  path: string,
-  params: Record<string, string | number | boolean | null | undefined> = {},
-): string {
-  const url = new URL(toAbsoluteServerUrl(path))
-  const token = getAuthToken()
-
-  Object.entries(params).forEach(([key, value]) => {
-    if (value === undefined || value === null || value === '') return
-    url.searchParams.set(key, String(value))
-  })
-
-  if (token) {
-    url.searchParams.set('token', token)
-  }
-
-  return url.toString()
-}
-
 export function buildAuthorizedStreamUrl(streamUrl: string): string {
   if (!streamUrl) return ''
 
-  const absoluteUrl = /^https?:\/\//i.test(streamUrl)
+  return /^https?:\/\//i.test(streamUrl)
     ? streamUrl
     : toAbsoluteServerUrl(streamUrl)
-  const url = new URL(absoluteUrl, window.location.origin)
-  const token = getAuthToken()
-
-  if (token) {
-    url.searchParams.set('token', token)
-  }
-
-  return url.toString()
 }
 
 export function getLoginRouteUrl(): string {

@@ -1,112 +1,133 @@
 <template>
   <section class="pc-downloads-view">
-    <div class="pc-downloads-header">
-      <div class="pc-downloads-heading">
-        <h1>下载</h1>
-        <p>{{ concurrencyText }}</p>
-      </div>
-      <div class="pc-downloads-header-actions">
-        <el-button :icon="RefreshRight" @click="downloads.drainQueue">继续队列</el-button>
-        <el-button
-          :icon="Delete"
-          :disabled="downloads.finishedTasks.length === 0"
-          @click="clearFinished"
-        >
-          清理完成项
-        </el-button>
-      </div>
-    </div>
-
-    <div class="pc-downloads-stats">
-      <div v-for="item in stats" :key="item.label" class="pc-card pc-download-stat">
-        <span>{{ item.label }}</span>
-        <strong>{{ item.value }}</strong>
-      </div>
-    </div>
-
     <div class="pc-downloads-toolbar">
-      <el-segmented v-model="activeFilter" :options="filterOptions" />
+      <div class="pc-downloads-filter-scroll">
+        <el-segmented
+          v-model="activeFilter"
+          class="pc-downloads-filter"
+          :options="filterOptions"
+          data-testid="pc-download-filter"
+        />
+      </div>
+
+      <div class="pc-downloads-summary">
+        <span class="pc-downloads-concurrency">
+          <span
+            class="pc-downloads-running-dot"
+            :class="{ 'is-active': downloads.activeCount > 0 }"
+            aria-hidden="true"
+          ></span>
+          {{ concurrencyText }}
+        </span>
+        <el-tooltip content="清除已完成任务" placement="bottom">
+          <el-button
+            class="pc-downloads-clear-button"
+            :icon="Delete"
+            :disabled="downloads.completedTasks.length === 0"
+            aria-label="清除已完成任务"
+            @click="clearCompleted"
+          />
+        </el-tooltip>
+      </div>
     </div>
 
-    <div v-if="filteredTasks.length" class="pc-download-task-list">
-      <article v-for="task in filteredTasks" :key="task.id" class="pc-card pc-download-task">
-        <div class="pc-download-task-main">
-          <div class="pc-download-file-icon" aria-hidden="true">
-            <el-icon :size="22"><Document /></el-icon>
+    <div
+      v-if="filteredTasks.length"
+      class="pc-download-task-list"
+      data-testid="pc-download-task-list"
+    >
+      <article v-for="task in filteredTasks" :key="task.id" class="pc-download-task">
+        <div class="pc-download-file-icon" aria-hidden="true">
+          <el-icon :size="18"><Document /></el-icon>
+        </div>
+
+        <div class="pc-download-task-body">
+          <div class="pc-download-task-title-row">
+            <h2 :title="task.fileName">{{ task.fileName }}</h2>
+            <el-tag :type="getStatusTagType(task.status)" effect="light" size="small">
+              {{ getStatusLabel(task.status) }}
+            </el-tag>
           </div>
-          <div class="pc-download-task-body">
-            <div class="pc-download-task-title-row">
-              <h2>{{ task.fileName }}</h2>
-              <el-tag :type="getStatusTagType(task.status)" effect="light">
-                {{ getStatusLabel(task.status) }}
-              </el-tag>
-            </div>
-            <div class="pc-download-path" :title="task.savePath">
-              {{ truncatePath(task.savePath, 96) }}
-            </div>
-            <el-progress
-              class="pc-download-progress"
-              :percentage="getProgressPercentage(task)"
-              :status="getProgressStatus(task.status)"
-              :stroke-width="8"
-            />
-            <div class="pc-download-meta">
-              <span>{{ formatSize(task.downloadedBytes) }} / {{ formatSize(task.totalBytes) }}</span>
-              <span>{{ formatSpeed(task.speedBytesPerSecond) }}</span>
-              <span>{{ task.threads }} 线程</span>
-              <span>{{ formatUpdatedAt(task.updatedAt) }}</span>
-            </div>
-            <div v-if="task.error?.message" class="pc-download-error">
-              {{ task.error.message }}
-            </div>
+          <div class="pc-download-path" :title="task.savePath">
+            {{ truncatePath(task.savePath, 96) }}
+          </div>
+          <el-progress
+            class="pc-download-progress"
+            :percentage="getProgressPercentage(task)"
+            :status="getProgressStatus(task.status)"
+            :stroke-width="6"
+          />
+          <div class="pc-download-meta">
+            <span>{{ formatSize(task.downloadedBytes) }} / {{ formatSize(task.totalBytes) }}</span>
+            <span>{{ formatSpeed(task.speedBytesPerSecond) }}</span>
+            <span>{{ task.threads }} 线程</span>
+            <span>{{ formatUpdatedAt(task.updatedAt) }}</span>
+          </div>
+          <div v-if="task.error?.message" class="pc-download-error">
+            {{ task.error.message }}
           </div>
         </div>
 
         <div class="pc-download-task-actions">
-          <el-button
-            v-if="canCancel(task)"
-            :icon="Close"
-            @click="cancelTask(task)"
-          >
-            取消
-          </el-button>
-          <el-button
-            v-if="canRetry(task)"
-            :icon="RefreshRight"
-            @click="retryTask(task)"
-          >
-            重试
-          </el-button>
-          <el-button
-            v-if="task.status === 'completed'"
-            :icon="Document"
-            @click="openFile(task)"
-          >
-            打开
-          </el-button>
-          <el-button
-            v-if="task.status === 'completed'"
-            :icon="FolderOpened"
-            @click="openFolder(task)"
-          >
-            文件夹
-          </el-button>
-          <el-button
-            v-if="task.status !== 'downloading'"
-            :icon="Delete"
-            text
-            type="danger"
-            @click="removeTask(task)"
-          >
-            移除
-          </el-button>
+          <el-tooltip v-if="canCancel(task)" content="取消下载" placement="top">
+            <el-button
+              class="pc-download-action-button"
+              :icon="Close"
+              circle
+              aria-label="取消下载"
+              @click="cancelTask(task)"
+            />
+          </el-tooltip>
+          <el-tooltip v-if="canRetry(task)" content="重新下载" placement="top">
+            <el-button
+              class="pc-download-action-button"
+              :icon="RefreshRight"
+              circle
+              aria-label="重新下载"
+              @click="retryTask(task)"
+            />
+          </el-tooltip>
+          <el-tooltip v-if="task.status === 'completed'" content="打开文件" placement="top">
+            <el-button
+              class="pc-download-action-button"
+              :icon="View"
+              circle
+              aria-label="打开文件"
+              @click="openFile(task)"
+            />
+          </el-tooltip>
+          <el-tooltip v-if="task.status === 'completed'" content="打开所在文件夹" placement="top">
+            <el-button
+              class="pc-download-action-button"
+              :icon="FolderOpened"
+              circle
+              aria-label="打开所在文件夹"
+              @click="openFolder(task)"
+            />
+          </el-tooltip>
+          <el-tooltip v-if="task.status !== 'downloading'" content="移除记录" placement="top">
+            <el-button
+              class="pc-download-action-button is-danger"
+              :icon="Delete"
+              circle
+              aria-label="移除记录"
+              @click="removeTask(task)"
+            />
+          </el-tooltip>
         </div>
       </article>
     </div>
 
-    <div v-else class="pc-empty-state pc-downloads-empty">
-      <div class="pc-anime-asset pc-anime-download-complete pc-downloads-empty-art" aria-hidden="true"></div>
-      <div class="pc-downloads-empty-title">暂无下载任务</div>
+    <PcStatePanel
+      v-else-if="downloads.tasks.length === 0"
+      class="pc-downloads-empty"
+      asset="download-idle"
+      title="暂无下载任务"
+    />
+
+    <div v-else class="pc-downloads-filter-empty" data-testid="pc-download-filter-empty">
+      <span>当前筛选下没有任务</span>
+      <el-button @click="activeFilter = 'all'">查看全部</el-button>
     </div>
   </section>
 </template>
@@ -114,7 +135,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Close, Delete, Document, FolderOpened, RefreshRight } from '@element-plus/icons-vue'
+import { Close, Delete, Document, FolderOpened, RefreshRight, View } from '@element-plus/icons-vue'
 import {
   usePcDownloadsStore,
   type DownloadTaskStatus,
@@ -122,6 +143,7 @@ import {
 } from '@/stores/pcDownloads'
 import { usePcPreferencesStore } from '@/stores/pcPreferences'
 import { formatDate, formatSize, truncatePath } from '@/utils/formatters'
+import PcStatePanel from '@/components/pc/pc-state-panel.vue'
 
 type DownloadFilter = 'all' | DownloadTaskStatus
 
@@ -144,15 +166,8 @@ const filteredTasks = computed(() => {
   return downloads.tasks.filter(task => task.status === activeFilter.value)
 })
 
-const stats = computed(() => [
-  { label: '下载中', value: downloads.activeCount },
-  { label: '排队', value: downloads.totalQueued },
-  { label: '已完成', value: downloads.completedTasks.length },
-  { label: '需处理', value: downloads.failedTasks.length + downloads.interruptedTasks.length },
-])
-
 const concurrencyText = computed(() => (
-  `${downloads.activeCount}/${preferences.maxConcurrentTasks} 个任务运行中`
+  `${downloads.activeCount}/${preferences.maxConcurrentTasks} 运行中 · ${downloads.totalQueued} 排队`
 ))
 
 function getStatusLabel(status: DownloadTaskStatus): string {
@@ -267,16 +282,17 @@ async function removeTask(task: PcDownloadTask) {
   }
 }
 
-async function clearFinished() {
+async function clearCompleted() {
   try {
-    await ElMessageBox.confirm('清理已完成、失败和已取消任务？', '清理任务', {
-      confirmButtonText: '清理',
+    await ElMessageBox.confirm('清除全部已完成的下载任务？', '清除已完成任务', {
+      confirmButtonText: '清除',
       cancelButtonText: '返回',
       type: 'warning',
     })
-    downloads.clearFinished()
+    downloads.clearCompleted()
+    ElMessage.success('已清除完成项')
   } catch (error) {
-    const message = getErrorMessage(error, '清理失败')
+    const message = getErrorMessage(error, '清除失败')
     if (message) ElMessage.error(message)
   }
 }
@@ -285,122 +301,93 @@ async function clearFinished() {
 <style scoped>
 .pc-downloads-view {
   display: grid;
-  gap: 16px;
-}
-
-.pc-downloads-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.pc-downloads-heading {
+  gap: 14px;
   min-width: 0;
-}
-
-.pc-downloads-heading h1 {
-  margin: 0;
-  font-size: 22px;
-  line-height: 1.25;
-}
-
-.pc-downloads-heading p {
-  margin: 4px 0 0;
-  color: var(--pc-color-text-muted);
-  font-size: 13px;
-}
-
-.pc-downloads-header-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: flex-end;
-}
-
-.pc-downloads-stats {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.pc-download-stat {
-  position: relative;
-  display: grid;
-  gap: 4px;
-  min-height: 72px;
-  padding: 13px 14px 12px 17px;
-  overflow: hidden;
-}
-
-.pc-download-stat::before {
-  position: absolute;
-  inset: 12px auto 12px 0;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--pc-color-primary);
-  content: "";
-}
-
-.pc-download-stat:nth-child(2)::before {
-  background: var(--pc-color-warning);
-}
-
-.pc-download-stat:nth-child(3)::before {
-  background: var(--pc-color-success);
-}
-
-.pc-download-stat:nth-child(4)::before {
-  background: var(--pc-color-accent);
-}
-
-.pc-download-stat span {
-  color: var(--pc-color-text-muted);
-  font-size: 12px;
-}
-
-.pc-download-stat strong {
-  font-size: 22px;
-  line-height: 1.2;
 }
 
 .pc-downloads-toolbar {
   display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+}
+
+.pc-downloads-filter-scroll {
   min-width: 0;
   overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.pc-downloads-filter {
+  min-width: max-content;
+}
+
+.pc-downloads-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.pc-downloads-concurrency {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--pc-color-text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pc-downloads-running-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pc-color-text-subtle);
+}
+
+.pc-downloads-running-dot.is-active {
+  background: var(--pc-color-success);
+}
+
+.pc-downloads-clear-button {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
 }
 
 .pc-download-task-list {
-  display: grid;
-  gap: 10px;
+  overflow: hidden;
+  border: 1px solid var(--pc-color-border);
+  border-radius: var(--pc-radius-md);
+  background: var(--pc-color-surface);
 }
 
 .pc-download-task {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
-  padding: 15px;
-  transition: border-color 160ms ease, box-shadow 160ms ease;
+  grid-template-columns: 36px minmax(0, 1fr) 128px;
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+  padding: 13px 12px;
+  border-bottom: 1px solid var(--pc-color-border);
+  transition: background-color 140ms ease;
+}
+
+.pc-download-task:last-child {
+  border-bottom: 0;
 }
 
 .pc-download-task:hover {
-  border-color: #d2d5ed;
-  box-shadow: 0 6px 18px rgba(55, 61, 94, 0.07);
-}
-
-.pc-download-task-main {
-  display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
-  gap: 12px;
-  min-width: 0;
+  background: var(--pc-color-surface-soft);
 }
 
 .pc-download-file-icon {
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
+  width: 34px;
+  height: 34px;
   border: 1px solid var(--pc-color-border);
   border-radius: var(--pc-radius-md);
   background: var(--pc-color-primary-soft);
@@ -422,15 +409,20 @@ async function clearFinished() {
   min-width: 0;
   margin: 0;
   overflow: hidden;
-  font-size: 15px;
-  font-weight: 650;
+  color: var(--pc-color-text);
+  font-size: 14px;
+  font-weight: 600;
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.pc-download-task-title-row :deep(.el-tag) {
+  flex: 0 0 auto;
+}
+
 .pc-download-path {
-  margin-top: 4px;
+  margin-top: 3px;
   overflow: hidden;
   color: var(--pc-color-text-muted);
   font-size: 12px;
@@ -440,20 +432,26 @@ async function clearFinished() {
 }
 
 .pc-download-progress {
-  margin-top: 10px;
+  margin-top: 8px;
+}
+
+.pc-download-progress :deep(.el-progress__text) {
+  min-width: 35px;
+  font-size: 11px !important;
 }
 
 .pc-download-meta {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, auto));
-  gap: 12px;
-  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  margin-top: 6px;
   color: var(--pc-color-text-muted);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .pc-download-error {
-  margin-top: 8px;
+  margin-top: 6px;
   color: var(--pc-color-danger);
   font-size: 12px;
   line-height: 1.4;
@@ -461,58 +459,58 @@ async function clearFinished() {
 
 .pc-download-task-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
+  align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  min-width: 236px;
+  gap: 6px;
+  width: 128px;
+  min-height: 32px;
+}
+
+.pc-download-action-button {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  margin: 0;
+  padding: 0;
+}
+
+.pc-download-action-button.is-danger {
+  color: var(--pc-color-danger);
 }
 
 .pc-downloads-empty {
   min-height: 360px;
 }
 
-.pc-downloads-empty-art {
-  width: min(280px, 62vw);
+.pc-downloads-filter-empty {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  min-height: 240px;
+  border: 1px dashed var(--pc-color-border-strong);
+  border-radius: var(--pc-radius-md);
+  color: var(--pc-color-text-muted);
+  font-size: 13px;
 }
 
-.pc-downloads-empty-title {
-  color: var(--pc-color-text);
-  font-size: 15px;
-  font-weight: 650;
-}
+@media (max-width: 860px) {
+  .pc-downloads-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
 
-@media (max-width: 960px) {
-  .pc-downloads-header,
+  .pc-downloads-summary {
+    justify-content: space-between;
+  }
+
   .pc-download-task {
-    grid-template-columns: 1fr;
+    grid-template-columns: 36px minmax(0, 1fr);
   }
 
-  .pc-downloads-header {
-    display: grid;
-  }
-
-  .pc-downloads-header-actions,
   .pc-download-task-actions {
+    grid-column: 2;
     justify-content: flex-start;
-  }
-
-  .pc-downloads-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .pc-download-task-actions {
-    min-width: 0;
-  }
-}
-
-@media (max-width: 640px) {
-  .pc-download-task-main {
-    grid-template-columns: 1fr;
-  }
-
-  .pc-download-meta {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: auto;
   }
 }
 </style>
