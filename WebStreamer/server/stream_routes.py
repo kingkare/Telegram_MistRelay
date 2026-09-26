@@ -3918,15 +3918,13 @@ async def telegram_botfather_account_delete_handler(request: web.Request):
             return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
 
         account_id_str = request.match_info.get("id", "")
-        if not account_id_str.isdigit():
-            return web.json_response({"success": False, "error": "无效的协议号 ID"}, status=400)
+        phone_param = request.query.get("phone", "")
+        if not account_id_str and not phone_param:
+            return web.json_response({"success": False, "error": "无效的协议号标识"}, status=400)
 
         from botfather_creator import remove_protocol_account
-        deleted = remove_protocol_account(int(account_id_str))
-        if not deleted:
-            return web.json_response({"success": False, "error": f"未找到 ID={account_id_str} 的协议号"}, status=404)
-
-        return web.json_response({"success": True, "message": f"协议号 #{account_id_str} 已从资产池移除"})
+        deleted = remove_protocol_account(account_id_str, phone_hint=phone_param)
+        return web.json_response({"success": True, "message": f"协议号已从资产池彻底移除"})
     except Exception as e:
         logger.error(f"删除协议号失败: {e}", exc_info=True)
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -4507,26 +4505,6 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
         play_speed_mb_s = round((buffer_bytes / (1024 * 1024)) / play_elapsed_sec, 2)
         play_bitrate_mbps = round(play_speed_mb_s * 8, 2)
 
-        ratio_1080p = round(play_bitrate_mbps / 8.0, 2)
-        ratio_4k = round(play_bitrate_mbps / 25.0, 2)
-
-        if play_bitrate_mbps >= 18.0:
-            stutter_risk = "none"
-            stutter_label = "无卡顿风险 (4K/1080p 秒开极流畅)"
-            max_res = "4K UHD (2160p)"
-        elif play_bitrate_mbps >= 8.0:
-            stutter_risk = "low"
-            stutter_label = "低卡顿风险 (1080p 原画实时流畅)"
-            max_res = "1080p FHD"
-        elif play_bitrate_mbps >= 4.0:
-            stutter_risk = "moderate"
-            stutter_label = "720p 流畅 (1080p 建议预缓冲)"
-            max_res = "720p HD"
-        else:
-            stutter_risk = "high"
-            stutter_label = "带宽受限 (建议开启多连接并发)"
-            max_res = "480p SD"
-
         # ==================== 测试 2: 单连接极限下载测试 (Direct Download Throughput) ====================
         chunk_dl_size = 524288  # 512 KB 块
         # 支持 10M (20块), 100M (200块), 1G (2048块) 真实分片拉取
@@ -4551,7 +4529,58 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
             except Exception:
                 pass
 
-        await asyncio.gather(*[_warm_bot(b) for b in set(dl_bots[:min(total_dl_chunks, 16)])], return_exceptions=True)
+        await asyncio.gather(*[_warm_bot(b) for b in set(dl_bots[:min(total_dl_chunks, len(dl_bots))])], return_exceptions=True)
+
+        # 若处于集群模式且媒体体积足够，进一步拉取 4 个连续分片测量服务端多 Bot 聚合播放码率 (Sustained Streaming Bitrate)
+        if is_cluster_mode and len(dl_bots) > 1 and target_file["file_size"] >= play_chunk_size * 6:
+            stripe_play_bots = dl_bots[:min(8, len(dl_bots))]
+            async def _fetch_play_part(p_idx, b_idx):
+                try:
+                    b_cli = bot_mod.multi_clients[b_idx]
+                    b_str = get_byte_streamer(b_cli)
+                    b_fid = await b_str.get_file_properties(msg_id, force_refresh=False)
+                    b_loc = await b_str.get_location(b_fid)
+                    return await b_str._try_get_file_chunk(
+                        b_cli, b_idx, b_fid, b_loc,
+                        offset=buffer_bytes + p_idx * play_chunk_size, chunk_size=play_chunk_size,
+                        max_retries=2, slot_idx=0, timeout=12.0
+                    )
+                except Exception:
+                    return False, None, b_idx, None
+
+            t_stripe_start = time.perf_counter()
+            p_tasks = [_fetch_play_part(i, stripe_play_bots[i % len(stripe_play_bots)]) for i in range(len(stripe_play_bots))]
+            p_res = await asyncio.gather(*p_tasks, return_exceptions=True)
+            t_stripe_done = time.perf_counter()
+            stripe_bytes = 0
+            for item in p_res:
+                if isinstance(item, tuple) and item[0] and hasattr(item[1], "bytes"):
+                    stripe_bytes += len(item[1].bytes)
+            if stripe_bytes > 0:
+                stripe_elapsed = max(0.001, t_stripe_done - t_stripe_start)
+                stripe_speed = (stripe_bytes / (1024 * 1024)) / stripe_elapsed
+                play_speed_mb_s = round(max(play_speed_mb_s, stripe_speed), 2)
+                play_bitrate_mbps = round(play_speed_mb_s * 8, 2)
+
+        ratio_1080p = round(play_bitrate_mbps / 8.0, 2)
+        ratio_4k = round(play_bitrate_mbps / 25.0, 2)
+
+        if play_bitrate_mbps >= 18.0:
+            stutter_risk = "none"
+            stutter_label = "无卡顿风险 (4K/1080p 秒开极流畅)"
+            max_res = "4K UHD (2160p)"
+        elif play_bitrate_mbps >= 8.0:
+            stutter_risk = "low"
+            stutter_label = "低卡顿风险 (1080p 原画实时流畅)"
+            max_res = "1080p FHD"
+        elif play_bitrate_mbps >= 4.0:
+            stutter_risk = "moderate"
+            stutter_label = "720p 流畅 (1080p 建议预缓冲)"
+            max_res = "720p HD"
+        else:
+            stutter_risk = "high"
+            stutter_label = "带宽受限 (建议开启多连接并发)"
+            max_res = "480p SD"
 
         async def _fetch_dl_chunk(p_idx: int):
             if max_safe_offset > 0:
@@ -4596,7 +4625,7 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
         else:
             max_duration_sec = 35.0
 
-        concurrency = min(len(dl_bots) * 2, 16) if (is_cluster_mode and len(dl_bots) > 1) else (2 if sample_mb > 10 else 1)
+        concurrency = min(len(dl_bots) * 2, 40) if (is_cluster_mode and len(dl_bots) > 1) else (2 if sample_mb > 10 else 1)
         sem = asyncio.Semaphore(concurrency)
         stop_event = asyncio.Event()
 

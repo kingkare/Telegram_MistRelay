@@ -836,25 +836,12 @@ const batchImportLoading = ref(false)
 const batchImportResult = ref<BatchImportAccountsResult | null>(null)
 const checkAccountLoading = ref<number | null>(null)
 
+const hasFetchedAccounts = ref(false)
+
 const protocolAccounts = computed<ProtocolAccount[]>(() => {
+  if (hasFetchedAccounts.value) return accountsList.value
   if (accountsList.value.length > 0) return accountsList.value
   if (taskStatus.value.accounts && taskStatus.value.accounts.length > 0) return taskStatus.value.accounts
-  if (taskStatus.value.cached_sessions && taskStatus.value.cached_sessions.length > 0) {
-    return taskStatus.value.cached_sessions.map((item: any, idx: number) => ({
-      id: idx + 1,
-      phone: item.phone,
-      session_type: "pyrogram_string",
-      has_code_url: false,
-      masked_code_url: "",
-      bot_count: 5,
-      max_bots: 20,
-      remaining_quota: 15,
-      status: "active" as const,
-      last_used_at: null,
-      remark: "已缓存协议号",
-      created_at: "",
-    }))
-  }
   return []
 })
 
@@ -994,13 +981,19 @@ async function handleDeleteAccount(acc: ProtocolAccount) {
   }
 
   try {
-    const res = await deleteProtocolAccount(acc.id)
+    const res = await deleteProtocolAccount(acc.id, acc.phone)
     if (res.success) {
       ElMessage.success(`已移除协议号 ${acc.phone}`)
       accountsList.value = accountsList.value.filter(a => a.id !== acc.id && a.phone !== acc.phone)
       selectedRelayAccountIds.value = selectedRelayAccountIds.value.filter(id => id !== acc.id)
       if (selectedSingleAccountId.value === acc.id) {
         selectedSingleAccountId.value = accountsList.value.length > 0 ? accountsList.value[0].id : null
+      }
+      if (taskStatus.value.accounts) {
+        taskStatus.value.accounts = taskStatus.value.accounts.filter((a: any) => a.id !== acc.id && a.phone !== acc.phone)
+      }
+      if (taskStatus.value.cached_sessions) {
+        taskStatus.value.cached_sessions = taskStatus.value.cached_sessions.filter((a: any) => a.phone !== acc.phone)
       }
       await fetchAccounts()
     } else {
@@ -1194,6 +1187,7 @@ async function fetchAccounts() {
   accountsLoading.value = true
   try {
     const res = await getProtocolAccounts()
+    hasFetchedAccounts.value = true
     if (res.success && res.data) {
       accountsList.value = res.data
       if (selectedRelayAccountIds.value.length === 0) {

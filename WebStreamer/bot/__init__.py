@@ -270,6 +270,33 @@ def release_bot_slot(index: int) -> None:
             work_loads[index] -= 1
 
 
+active_user_streams: int = 0
+_stream_id_counter: int = 0
+
+
+def acquire_stream_slot() -> int:
+    """注册一个新的客户端真实 HTTP 流传输会话并返回自增 stream_id"""
+    global active_user_streams, _stream_id_counter
+    with _scheduler_lock:
+        active_user_streams += 1
+        _stream_id_counter += 1
+        return _stream_id_counter
+
+
+def release_stream_slot(stream_id: int | None = None) -> None:
+    """释放客户端真实 HTTP 流传输会话"""
+    global active_user_streams
+    with _scheduler_lock:
+        if active_user_streams > 0:
+            active_user_streams -= 1
+
+
+def get_active_stream_count() -> int:
+    """获取当前活跃的真实客户端 HTTP 流会话数"""
+    with _scheduler_lock:
+        return max(0, active_user_streams)
+
+
 def record_bot_bytes(index: int, byte_count: int) -> None:
     if byte_count <= 0:
         return

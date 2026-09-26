@@ -313,9 +313,10 @@ class ByteStreamer:
         location,
         offset: int,
         chunk_size: int,
-        max_retries: int = 3,
+        max_retries: int = 2,
         slot_idx: Optional[int] = None,
-        timeout: float = 15.0,
+        timeout: float = 8.0,
+        message_id: Optional[int] = None,
     ):
         if slot_idx is None:
             self._rr_counter += 1
@@ -338,20 +339,23 @@ class ByteStreamer:
                 return True, r, client, None
 
             except (asyncio.TimeoutError, TimeoutError) as e:
+                logger.warning(f"客户端 {client_index} 拉取分片超时 (offset={offset})")
                 if retry_attempt < max_retries - 1:
-                    await asyncio.sleep(0.3 * (retry_attempt + 1))
+                    await asyncio.sleep(0.2 * (retry_attempt + 1))
                 else:
                     mark_bot_failure(client_index, e)
                     return False, None, client, None
 
             except (OSError, ConnectionError, AuthBytesInvalid, TypeError, AttributeError, Exception) as e:
                 error_msg = str(e)
+                logger.warning(f"客户端 {client_index} 拉取分片失败 (offset={offset}): {type(e).__name__}: {error_msg}")
                 is_encryption_error = (
                     isinstance(e, AuthBytesInvalid) or
                     "AUTH_KEY_UNREGISTERED" in error_msg or
                     ("encrypt" in error_msg.lower() and isinstance(e, (TypeError, ValueError))) or
                     "Value after * must be an iterable" in error_msg
                 )
+                is_file_ref_expired = "FILE_REFERENCE" in error_msg
 
                 if retry_attempt < max_retries - 1:
                     if is_encryption_error:
@@ -359,7 +363,14 @@ class ByteStreamer:
                             await self.generate_media_session(client, file_id, slot_idx=cur_slot, force_recreate=True)
                         except Exception:
                             pass
-                    await asyncio.sleep(0.3 * (retry_attempt + 1))
+                    elif is_file_ref_expired and message_id is not None:
+                        try:
+                            refreshed_file_id = await self.get_file_properties(message_id, force_refresh=True)
+                            location = await self.get_location(refreshed_file_id)
+                            file_id = refreshed_file_id
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.2 * (retry_attempt + 1))
                 else:
                     mark_bot_failure(client_index, e)
                     return False, None, client, None
@@ -371,6 +382,7 @@ class ByteStreamer:
         bot_streamer = ByteStreamer.for_client(bot_client)
         if bot_idx == self._find_own_index() or message_id is None:
             return bot_client, bot_streamer, default_file_id, default_location
+        # 每个从机器人必须通过自己的会话获取专属 file_reference，否则 Telegram 会拒绝并抛出 FILE_REFERENCE_EXPIRED
         bot_file_id = await bot_streamer.get_file_properties(message_id, force_refresh=False)
         bot_location = await bot_streamer.get_location(bot_file_id)
         return bot_client, bot_streamer, bot_file_id, bot_location
@@ -409,42 +421,53 @@ class ByteStreamer:
                 release_bot_slot(current_index)
                 slot_acquired = False
 
+        from WebStreamer.bot import (
+            bot_runtime,
+            acquire_stream_slot,
+            release_stream_slot,
+            get_active_stream_count,
+        )
+
+        stream_id = None
+        is_probe = (part_count <= 2)
+        if not is_probe:
+            stream_id = acquire_stream_slot()
+
         acquire_current_slot()
         default_location = await self.get_location(file_id)
         target_dc = getattr(file_id, "dc_id", None)
 
         all_bots = get_available_bot_indices(current_index, set(), target_dc=target_dc) if (part_count > 1 and message_id is not None) else [current_index]
-        total_active_streams = max(1, sum(work_loads.values()))
-
-        # 自适应混合调度策略：
-        # 1) 单流播放/测速模式 (total_active_streams <= 1 且 part_count > 1，例如 Web 端 HTML5 播放器单连接):
-        #    利用同 DC 的空闲 Worker 组成多 Bot 条带池 (Multi-Bot Striping)，单连接跑满 100~300Mbps！
-        #    关键保证：优先仅选用目标 DC 的原生同区节点（零跨洋延迟、无需重做 Auth().create()）；
-        #    每个 Bot 在条带中仅承担 1 个分片在途请求，彻底消除单 TCP 会话上的排队队头阻塞。
-        # 2) 多连接并发模式 (total_active_streams > 1，例如第三方播放器 PotPlayer/VLC 开启多线程 Range 并发，或多个用户同时播放):
-        #    每条 HTTP 连接独占自身专属的分配 Bot (stripe_bots = [current_index])，
-        #    在单 Bot 内开启平滑双缓冲预取 (prefetch_window = 2)，零锁争抢，多连接完美并行拉满用户宽带！
-        from WebStreamer.bot import bot_runtime
-
-        native_dc_bots = [b for b in all_bots if bot_runtime.get(b, {}).get("home_dc") == target_dc]
-        warm_dc_bots = [
-            b for b in all_bots
-            if b not in native_dc_bots and (target_dc is not None and target_dc in bot_runtime.get(b, {}).get("warm_dcs", ()))
-        ]
 
         acquired_stripe_slots = set()
-        if total_active_streams <= 1 and part_count > 1 and message_id is not None and len(all_bots) > 1:
-            candidate_bots = native_dc_bots + warm_dc_bots
-            stripe_bots = (candidate_bots or all_bots)[:4]
-            # 每个条带 Bot 分配 1 个在途预取分片，既实现无缝多 Bot 并发，又杜绝单会话拥塞
-            prefetch_window = len(stripe_bots)
+
+        if is_probe or len(all_bots) <= 1 or message_id is None:
+            # 探针请求（读取 MP4 文件头/元数据）或单 Bot 模式：直接走主 Bot 单分片极速通道
+            stripe_bots = [current_index]
+            prefetch_window = min(part_count, 2)
+        else:
+            # 真实客户端流播/满速下载：服务端 1-to-N 全量多 Bot 聚合切片
+            active_streams = max(1, get_active_stream_count())
+            total_bots = len(all_bots)
+            quota = max(1, total_bots // active_streams)
+
+            if active_streams <= 1:
+                # 单连接接入（Web/第三方播放器/单流下载）：直接调动集群全部可用 Bot 全量并行拉取！
+                stripe_bots = list(all_bots)
+            else:
+                # 多流并发（多个用户或播放器发起多个连接）：按活跃流数动态均分 Bot 池，零锁竞争
+                start_offset = (((stream_id or 1) - 1) * quota) % total_bots
+                stripe_bots = [all_bots[(start_offset + i) % total_bots] for i in range(quota)]
+                if current_index not in stripe_bots and len(stripe_bots) < total_bots:
+                    stripe_bots[0] = current_index
+
+            # 单流预取滑动窗口大小：每个 Bot 承担 1 个在途分片（最小 2，上限等于所选 Bot 数）
+            prefetch_window = min(part_count, max(2, len(stripe_bots)))
+
             for b in stripe_bots:
                 if b != current_index:
                     acquire_bot_slot(b)
                     acquired_stripe_slots.add(b)
-        else:
-            stripe_bots = [current_index]
-            prefetch_window = 2 if part_count > 1 else 1
 
         bot_ctx_cache: Dict[int, Tuple[Client, "ByteStreamer", FileId, object]] = {
             current_index: (self.client, self, file_id, default_location)
@@ -458,9 +481,20 @@ class ByteStreamer:
             async with lock:
                 if bot_idx in bot_ctx_cache:
                     return bot_ctx_cache[bot_idx]
-                ctx = await self._prepare_bot_context(bot_idx, message_id, file_id, default_location)
-                bot_ctx_cache[bot_idx] = ctx
-                return ctx
+                try:
+                    ctx = await self._prepare_bot_context(bot_idx, message_id, file_id, default_location)
+                    bot_ctx_cache[bot_idx] = ctx
+                    return ctx
+                except Exception as e:
+                    logger.warning(f"从机 {bot_idx} 初始化分片上下文失败: {e}")
+                    return None
+
+        # 并行预热当前条带所有节点的上下文与 FileId 缓存，消除逐个初始化延迟
+        if len(stripe_bots) > 1 and message_id is not None:
+            try:
+                await asyncio.gather(*[_get_ctx(b) for b in stripe_bots], return_exceptions=True)
+            except Exception:
+                pass
 
         async def _fetch_part(part_idx: int):
             part_offset = offset + (part_idx - 1) * chunk_size
@@ -469,9 +503,12 @@ class ByteStreamer:
             slot_idx = ((part_idx - 1) // len(active_bots)) % MEDIA_SESSIONS_PER_BOT
 
             try:
-                b_client, b_streamer, b_file_id, b_location = await _get_ctx(assigned_bot)
+                ctx = await _get_ctx(assigned_bot)
+                if ctx is None:
+                    ctx = bot_ctx_cache[current_index]
+                b_client, b_streamer, b_file_id, b_location = ctx
                 success, r, _, _ = await b_streamer._try_get_file_chunk(
-                    b_client, assigned_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=2, slot_idx=slot_idx, timeout=15.0
+                    b_client, assigned_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=2, slot_idx=slot_idx, timeout=8.0, message_id=message_id
                 )
                 if success and isinstance(r, raw.types.upload.File):
                     return True, r, assigned_bot, part_offset
@@ -485,9 +522,12 @@ class ByteStreamer:
                 if next_bot is None:
                     break
                 try:
-                    b_client, b_streamer, b_file_id, b_location = await _get_ctx(next_bot)
+                    ctx = await _get_ctx(next_bot)
+                    if ctx is None:
+                        ctx = bot_ctx_cache[current_index]
+                    b_client, b_streamer, b_file_id, b_location = ctx
                     success, r, _, _ = await b_streamer._try_get_file_chunk(
-                        b_client, next_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=1, timeout=12.0
+                        b_client, next_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=1, timeout=6.0, message_id=message_id
                     )
                     if success and isinstance(r, raw.types.upload.File):
                         return True, r, next_bot, part_offset
@@ -513,7 +553,7 @@ class ByteStreamer:
                 assigned_bot = active_bots[(current_part - 1) % len(active_bots)]
 
                 try:
-                    success, r, used_bot, part_offset = await asyncio.wait_for(task, timeout=25.0)
+                    success, r, used_bot, part_offset = await asyncio.wait_for(task, timeout=12.0)
                 except Exception as e:
                     logger.warning(f"分片 {current_part} (Bot {assigned_bot}) 预取等待超时或异常 ({e})，执行兜底重试...")
                     success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
@@ -562,6 +602,8 @@ class ByteStreamer:
             release_current_slot()
             for b in acquired_stripe_slots:
                 release_bot_slot(b)
+            if stream_id is not None:
+                release_stream_slot(stream_id)
 
     async def clean_cache(self) -> None:
         while True:

@@ -126,6 +126,8 @@ if "pyrogram" not in sys.modules:
     pyrogram_raw_types.InputPhotoFileLocation = SimpleNamespace
     pyrogram_raw_types.InputPeerPhotoFileLocation = SimpleNamespace
     pyrogram_raw_types.InputStickerSetThumb = SimpleNamespace
+    upload_file_cls = type("UploadFile", (), {})
+    pyrogram_raw_types.upload = SimpleNamespace(File=upload_file_cls)
     pyrogram_raw.types = pyrogram_raw_types
     
     pyrogram_raw_types_messages = types.ModuleType("pyrogram.raw.types.messages")

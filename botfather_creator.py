@@ -184,43 +184,47 @@ def sanitize_account_record(row: Dict) -> Dict:
     }
 
 
-def remove_protocol_account(account_identifier: Union[int, str]) -> bool:
+def remove_protocol_account(account_identifier: Union[int, str], phone_hint: Optional[str] = None) -> bool:
     """
     从 SQLite 协议号资产池、内存缓存及所有磁盘 JSON 缓存中彻底移除指定协议号。
     彻底杜绝移除协议号后又被旧 JSON 缓存重新复活的问题。
-    支持传入账号 ID (int/str) 或手机号 (str)。
+    支持传入账号 ID (int/str) 或手机号 (str)，并可附带 phone_hint 双重保障。
     """
-    phone = None
+    phone = phone_hint.strip() if phone_hint else None
     account_id = None
     if isinstance(account_identifier, int) or (isinstance(account_identifier, str) and account_identifier.isdigit()):
         account_id = int(account_identifier)
         acc = db.get_protocol_account_by_id(account_id)
-        if acc:
+        if acc and not phone:
             phone = acc.get("phone")
     else:
-        phone = str(account_identifier).strip()
-        acc = db.get_protocol_account_by_phone(phone)
-        if acc:
+        ident_str = str(account_identifier).strip()
+        if not phone:
+            phone = ident_str
+        acc = db.get_protocol_account_by_phone(ident_str)
+        if acc and not account_id:
             account_id = acc.get("id")
 
     deleted = False
     if account_id:
-        deleted = db.delete_protocol_account(account_id)
-    elif phone:
-        try:
-            with db.db_conn() as conn:
-                cur = conn.execute("DELETE FROM tg_protocol_accounts WHERE phone = ? OR phone = ?", (phone, phone.lstrip("+")))
-                deleted = cur.rowcount > 0
-        except Exception as e:
-            logger.debug(f"通过手机号删除协议号失败: {e}")
+        deleted = db.delete_protocol_account(account_id) or deleted
 
-    # 清理内存缓存和所有磁盘 JSON 缓存
+    # 无论是否通过 ID 删成功，只要有 phone，彻底删除数据库中所有匹配记录（带+和不带+）
     phones_to_remove = set()
     if phone:
         norm_phone = phone.strip()
         if re.fullmatch(r"\d{8,15}", norm_phone):
             norm_phone = "+" + norm_phone
         phones_to_remove.update({phone, norm_phone, phone.lstrip("+"), norm_phone.lstrip("+")})
+
+        try:
+            with db.db_conn() as conn:
+                for p in phones_to_remove:
+                    cur = conn.execute("DELETE FROM tg_protocol_accounts WHERE phone = ?", (p,))
+                    if cur.rowcount > 0:
+                        deleted = True
+        except Exception as e:
+            logger.debug(f"通过手机号删除协议号失败: {e}")
 
     for p in phones_to_remove:
         _PHONE_SESSION_CACHE.pop(p, None)

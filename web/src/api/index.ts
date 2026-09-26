@@ -547,8 +547,9 @@ export function getImportAccountTaskStatus(taskId: string): Promise<ImportTaskSt
   return api.get<ImportTaskStatusResponse>(`/telegram/botfather/accounts/import-task/${taskId}`).then(r => r.data)
 }
 
-export function deleteProtocolAccount(accountId: number): Promise<{ success: boolean; message?: string; error?: string }> {
-  return api.delete<{ success: boolean; message?: string; error?: string }>(`/telegram/botfather/accounts/${accountId}`).then(r => r.data)
+export function deleteProtocolAccount(accountId: number | string, phone?: string): Promise<{ success: boolean; message?: string; error?: string }> {
+  const query = phone ? `?phone=${encodeURIComponent(phone)}` : ""
+  return api.delete<{ success: boolean; message?: string; error?: string }>(`/telegram/botfather/accounts/${accountId}${query}`).then(r => r.data)
 }
 
 export function checkProtocolAccount(accountId: number): Promise<CheckProtocolAccountResponse> {
