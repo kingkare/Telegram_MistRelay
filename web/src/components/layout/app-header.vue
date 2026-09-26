@@ -108,11 +108,16 @@ onUnmounted(() => {
 
 const breadcrumb = computed(() => {
   const routeMap: Record<string, string> = {
-    '/downloads': '下载管理',
+    '/dashboard': '仪表板',
+    '/downloads': '任务中心',
     '/tasks': '任务队列',
     '/settings': '系统设置',
-    '/system': '系统管理',
-    '/drive': 'TG频道网盘',
+    '/system': '容器管理',
+    '/logs': '系统日志',
+    '/drive': 'TG网盘',
+    '/cache': '缓存管理',
+    '/bots': '集群管理',
+    '/botfather': '自动铸机',
   }
   return routeMap[route.path]
 })
@@ -210,10 +215,10 @@ function handleCommand(command: string) {
 
 <style scoped>
 .header {
-  @apply bg-white/80;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border-bottom: 1px solid rgba(229, 231, 235, 0.5);
+  background: rgba(255, 255, 255, 0.78) !important;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(255, 143, 171, 0.2);
   height: 64px !important;
   width: 100% !important;
   position: sticky;
@@ -223,12 +228,12 @@ function handleCommand(command: string) {
   margin: 0;
   padding: 0;
   flex-shrink: 0;
-  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+  box-shadow: 0 4px 20px -6px rgba(255, 143, 171, 0.08), 0 2px 8px -2px rgba(56, 189, 248, 0.06);
   transition: all 0.3s ease;
 }
 
 .header:hover {
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 8px 24px -6px rgba(255, 143, 171, 0.14), 0 4px 12px -2px rgba(56, 189, 248, 0.1);
 }
 
 .header-content {
@@ -261,7 +266,7 @@ function handleCommand(command: string) {
 }
 
 :deep(.el-breadcrumb__inner.is-link:hover) {
-  color: #667eea;
+  color: #ff7597;
   transform: translateX(2px);
 }
 
@@ -276,7 +281,7 @@ function handleCommand(command: string) {
 }
 
 :deep(.el-breadcrumb__inner.is-link:hover) .breadcrumb-icon {
-  color: #667eea;
+  color: #ff7597;
   transform: scale(1.1);
 }
 
@@ -289,17 +294,19 @@ function handleCommand(command: string) {
   @apply flex items-center gap-3;
   min-width: 220px;
   padding: 8px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(229, 231, 235, 0.9);
-  background: rgba(255, 255, 255, 0.82);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 143, 171, 0.22);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(8px);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.25s ease;
 }
 
 .connection-pill:hover {
-  border-color: rgba(102, 126, 234, 0.25);
-  box-shadow: 0 8px 20px rgba(102, 126, 234, 0.08);
+  border-color: rgba(255, 117, 151, 0.45);
+  box-shadow: 0 8px 20px rgba(255, 117, 151, 0.14), 0 4px 10px rgba(56, 189, 248, 0.1);
   transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.92);
 }
 
 .connection-dot {
@@ -311,8 +318,8 @@ function handleCommand(command: string) {
 }
 
 .connection-dot--success {
-  background: #10b981;
-  box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.12);
+  background: #38bdf8;
+  box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.25), 0 0 10px rgba(56, 189, 248, 0.5);
 }
 
 .connection-dot--error {
@@ -353,17 +360,17 @@ function handleCommand(command: string) {
 
 .user-info {
   @apply flex items-center gap-3 cursor-pointer;
-  padding: 8px 16px;
-  border-radius: 12px;
+  padding: 6px 14px;
+  border-radius: 14px;
   transition: all 0.3s ease;
-  border: 1px solid transparent;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(249, 250, 251, 0.9));
+  border: 1px solid rgba(255, 143, 171, 0.18);
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .user-info:hover {
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.05));
-  border-color: rgba(102, 126, 234, 0.2);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.15);
+  background: linear-gradient(135deg, rgba(255, 117, 151, 0.12), rgba(56, 189, 248, 0.08));
+  border-color: rgba(255, 117, 151, 0.35);
+  box-shadow: 0 6px 18px rgba(255, 117, 151, 0.18);
   transform: translateY(-1px);
 }
 
@@ -371,13 +378,13 @@ function handleCommand(command: string) {
   background: var(--gradient-primary);
   @apply text-white;
   flex-shrink: 0;
-  box-shadow: 0 4px 8px rgba(102, 126, 234, 0.3);
+  box-shadow: 0 4px 12px rgba(255, 117, 151, 0.35);
   transition: all 0.3s ease;
 }
 
 .user-info:hover .avatar {
-  box-shadow: 0 6px 12px rgba(102, 126, 234, 0.4);
-  transform: scale(1.05);
+  box-shadow: 0 6px 16px rgba(255, 117, 151, 0.5);
+  transform: scale(1.05) rotate(3deg);
 }
 
 .user-details {
@@ -406,16 +413,18 @@ function handleCommand(command: string) {
 }
 
 .user-info:hover .dropdown-icon {
-  color: #667eea;
+  color: #ff7597;
   transform: translateY(2px);
 }
 
 .user-menu {
   @apply mt-2;
   min-width: 180px;
-  border-radius: 12px;
-  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.12);
-  border: 1px solid rgba(229, 231, 235, 0.8);
+  border-radius: 14px;
+  box-shadow: 0 16px 36px rgba(255, 117, 151, 0.16), 0 8px 16px rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(255, 143, 171, 0.22);
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(16px);
   overflow: hidden;
 }
 
@@ -426,17 +435,17 @@ function handleCommand(command: string) {
 }
 
 .menu-item:hover {
-  background: linear-gradient(90deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.05));
+  background: linear-gradient(90deg, rgba(255, 117, 151, 0.12), rgba(56, 189, 248, 0.08));
 }
 
 .menu-item :deep(.el-icon) {
   font-size: 18px;
-  color: #667eea;
+  color: #ff7597;
   transition: transform 0.2s ease;
 }
 
 .menu-item:hover :deep(.el-icon) {
-  transform: scale(1.1);
+  transform: scale(1.15);
 }
 
 .menu-item :deep(span) {

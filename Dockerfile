@@ -53,7 +53,7 @@ WORKDIR /app
 # Copy the rest of the application files
 # 前端已通过多阶段构建集成到镜像中
 COPY activation_preflight.py app.py async_aria2_client.py bootstrap_legacy.py configer.py db.py util.py monitor.py log_config.py auth.py download_cleanup.py legacy_config.py path_security.py request_security.py rotate_credentials.py security_validation.py service_runtime.py requirements.txt start.sh ./
-COPY thumbnail_generator.py ./
+COPY thumbnail_generator.py thumbnail_worker.py cache_manager.py session_adapter.py botfather_creator.py ./
 COPY aria2_client/ ./aria2_client/
 COPY WebStreamer/ ./WebStreamer/
 

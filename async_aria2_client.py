@@ -23,6 +23,7 @@ from aria2_client.constants import (
     upload_work_loads,
     pyrogram_clients,
     channel_accessible_clients,
+    channel_write_clients,
     logger
 )
 from aria2_client.utils import format_progress_bar

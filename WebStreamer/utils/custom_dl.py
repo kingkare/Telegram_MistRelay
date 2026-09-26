@@ -2,7 +2,7 @@ import math
 import asyncio
 import logging
 from WebStreamer import Var
-from typing import Dict, Union, Optional
+from typing import Dict, Union, Optional, Tuple, List
 from WebStreamer.bot import (
     work_loads,
     multi_clients,
@@ -13,6 +13,7 @@ from WebStreamer.bot import (
     mark_bot_success,
     mark_bot_failure,
     record_bot_bytes,
+    mark_bot_warm_dc,
 )
 from pyrogram import Client, utils, raw
 from .file_properties import get_file_ids
@@ -23,58 +24,116 @@ from pyrogram.file_id import FileId, FileType, ThumbnailSource
 
 logger = logging.getLogger("streamer")
 
-# 用于同步授权导出的锁字典（按DC ID）
-export_auth_locks: Dict[int, asyncio.Lock] = {}
+# 按 (id(client), dc_id, slot_idx) 加锁，使多个 Bot 及同一 Bot 的多个独立连接可并行握手
+export_auth_locks: Dict[Tuple[int, int, int], asyncio.Lock] = {}
+
+# 全局缓存每个 Client 对应的 ByteStreamer 实例，供服务端单流多 Bot 条带化并发拉取复用
+streamer_registry: Dict[Client, "ByteStreamer"] = {}
+
+# 每个 Bot 在每个媒体 DC 上建立的独立 Session 数量（每个 Session 拥有独立的 Auth().create() 密钥）
+MEDIA_SESSIONS_PER_BOT = 1
+
+# 每个 Bot 在单流条带化拉取时并发预取的 1MB 分片深度（保持为 2，消除单 TCP 会话上多请求排队阻塞）
+PER_BOT_PREFETCH_DEPTH = 2
+
 
 def get_next_available_client(current_index: int, exclude_indices: Optional[set] = None) -> Optional[int]:
-    """
-    获取下一个可用的客户端索引
-    优先选择能访问频道的客户端，排除当前客户端和已失败的客户端
-    """
     if exclude_indices is None:
         exclude_indices = set()
     exclude_indices.add(current_index)
     return select_stream_bot(exclude_indices=exclude_indices, prefer_channel=True)
 
+
+def get_available_bot_indices(
+    primary_index: int,
+    exclude_indices: Optional[set] = None,
+    target_dc: Optional[int] = None,
+) -> List[int]:
+    excluded = set(exclude_indices or ())
+    if channel_accessible_clients:
+        candidates = [idx for idx in sorted(channel_accessible_clients) if idx in multi_clients and idx not in excluded]
+    else:
+        candidates = [idx for idx in sorted(multi_clients.keys()) if idx not in excluded]
+
+    if not candidates and primary_index in multi_clients:
+        return [primary_index]
+
+    if target_dc is not None:
+        from WebStreamer.bot import bot_runtime, work_loads
+
+        def dc_affinity_key(idx: int):
+            st = bot_runtime.get(idx, {})
+            h_dc = st.get("home_dc")
+            w_dcs = st.get("warm_dcs", ())
+            if h_dc == target_dc:
+                dc_tier = 0
+            elif target_dc in w_dcs:
+                dc_tier = 1
+            else:
+                dc_tier = 2
+            load = work_loads.get(idx, 0)
+            is_primary = 0 if idx == primary_index else 1
+            return (dc_tier, is_primary, load, idx)
+
+        candidates.sort(key=dc_affinity_key)
+    elif primary_index in candidates:
+        pos = candidates.index(primary_index)
+        candidates = candidates[pos:] + candidates[:pos]
+
+    return candidates
+
+
+def _is_session_usable(media_session: Optional[Session]) -> bool:
+    if media_session is None:
+        return False
+    try:
+        if getattr(media_session, "is_started", None) and media_session.is_started.is_set():
+            return True
+        if (
+            hasattr(media_session, "connection") and media_session.connection and
+            hasattr(media_session.connection, "protocol") and media_session.connection.protocol and
+            hasattr(media_session.connection.protocol, "encrypt") and
+            media_session.connection.protocol.encrypt is not None
+        ):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 class ByteStreamer:
     def __init__(self, client: Client):
-        """A custom class that holds the cache of a specific client and class functions.
-        attributes:
-            client: the client that the cache is for.
-            cached_file_ids: a dict of cached file IDs.
-            cached_file_properties: a dict of cached file properties.
-        
-        functions:
-            generate_file_properties: returns the properties for a media of a specific message contained in Tuple.
-            generate_media_session: returns the media session for the DC that contains the media file.
-            yield_file: yield a file from telegram servers for streaming.
-            
-        This is a modified version of the <https://github.com/eyaadh/megadlbot_oss/blob/master/mega/telegram/utils/custom_download.py>
-        Thanks to Eyaadh <https://github.com/eyaadh>
-        """
         self.clean_timer = 30 * 60
         self.client: Client = client
         self.cached_file_ids: Dict[int, FileId] = {}
+        self._cache_lock = asyncio.Lock()
+        self._inflight_sem = asyncio.Semaphore(PER_BOT_PREFETCH_DEPTH)
+        self._rr_counter = 0
+        streamer_registry[client] = self
         asyncio.create_task(self.clean_cache())
 
+    @classmethod
+    def for_client(cls, client: Client) -> "ByteStreamer":
+        inst = streamer_registry.get(client)
+        if inst is None:
+            inst = cls(client)
+        return inst
+
     async def get_file_properties(self, message_id: int, force_refresh: bool = False) -> FileId:
-        """
-        Returns the properties of a media of a specific message in a FIleId class.
-        if the properties are cached, then it'll return the cached results.
-        or it'll generate the properties from the Message ID and cache them.
-        """
         if force_refresh:
-            self.cached_file_ids.pop(message_id, None)
+            async with self._cache_lock:
+                self.cached_file_ids.pop(message_id, None)
+                await self.generate_file_properties(message_id)
+                return self.cached_file_ids[message_id]
+
         if message_id not in self.cached_file_ids:
-            await self.generate_file_properties(message_id)
-            logger.debug(f"Cached file properties for message with ID {message_id}")
+            async with self._cache_lock:
+                if message_id not in self.cached_file_ids:
+                    await self.generate_file_properties(message_id)
+                    logger.debug(f"Cached file properties for message with ID {message_id}")
         return self.cached_file_ids[message_id]
-    
+
     async def generate_file_properties(self, message_id: int) -> FileId:
-        """
-        Generates the properties of a media file on a specific message.
-        returns ths properties in a FIleId class.
-        """
         file_id = await get_file_ids(self.client, Var.BIN_CHANNEL, message_id)
         logger.debug(f"Generated file ID and Unique ID for message with ID {message_id}")
         if not file_id:
@@ -84,137 +143,120 @@ class ByteStreamer:
         logger.debug(f"Cached media message with ID {message_id}")
         return self.cached_file_ids[message_id]
 
-    async def generate_media_session(self, client: Client, file_id: FileId) -> Session:
-        """
-        Generates the media session for the DC that contains the media file.
-        This is required for getting the bytes from Telegram servers.
-        """
+    async def generate_media_session(
+        self,
+        client: Client,
+        file_id: FileId,
+        slot_idx: Optional[int] = None,
+        force_recreate: bool = False,
+    ) -> Session:
+        dc_id = file_id.dc_id
+        if not hasattr(client, "_media_session_pool"):
+            client._media_session_pool = {}
+        pool: Dict[int, Session] = client._media_session_pool.setdefault(dc_id, {})
 
-        media_session = client.media_sessions.get(file_id.dc_id, None)
+        if slot_idx is None:
+            # 优先挑已就绪的槽位轮询；同时异步预热未创建的槽位
+            self._rr_counter += 1
+            target_slot = self._rr_counter % MEDIA_SESSIONS_PER_BOT
+            if _is_session_usable(pool.get(target_slot)):
+                return pool[target_slot]
+            # 若 target_slot 尚未建立，但 slot 0 已就绪，则后台异步建 target_slot，本次先用已就绪连接或直接建立
+            slot_idx = target_slot
 
-        # 检查缓存的会话是否仍然有效
-        if media_session is not None:
-            try:
-                # 检查会话的连接状态和加密参数
-                if (hasattr(media_session, 'connection') and media_session.connection and
-                    hasattr(media_session.connection, 'protocol') and media_session.connection.protocol and
-                    hasattr(media_session.connection.protocol, 'encrypt') and 
-                    media_session.connection.protocol.encrypt is not None):
-                    logger.debug(f"Using cached media session for DC {file_id.dc_id}")
-                    return media_session
-                # 如果会话无效，清除它
-                logger.debug(f"Cached media session for DC {file_id.dc_id} is invalid, recreating...")
+        if not force_recreate and _is_session_usable(pool.get(slot_idx)):
+            return pool[slot_idx]
+
+        lock_key = (id(client), dc_id, slot_idx)
+        if lock_key not in export_auth_locks:
+            export_auth_locks[lock_key] = asyncio.Lock()
+        lock = export_auth_locks[lock_key]
+
+        async with lock:
+            if not force_recreate and _is_session_usable(pool.get(slot_idx)):
+                return pool[slot_idx]
+
+            old_session = pool.pop(slot_idx, None)
+            if old_session is not None:
                 try:
-                    await media_session.stop()
+                    await old_session.stop()
                 except Exception:
                     pass
-                if file_id.dc_id in client.media_sessions:
-                    del client.media_sessions[file_id.dc_id]
-                media_session = None
-            except Exception as e:
-                logger.warning(f"Error checking cached media session: {e}", exc_info=True)
-                try:
-                    await media_session.stop()
-                except Exception:
-                    pass
-                if file_id.dc_id in client.media_sessions:
-                    del client.media_sessions[file_id.dc_id]
-                media_session = None
 
-        if media_session is None:
-            if file_id.dc_id != await client.storage.dc_id():
-                # 获取或创建该DC的锁，防止并发导出授权
-                if file_id.dc_id not in export_auth_locks:
-                    export_auth_locks[file_id.dc_id] = asyncio.Lock()
-                
-                lock = export_auth_locks[file_id.dc_id]
-                
-                # 使用锁来防止并发导出授权
-                async with lock:
-                    # 再次检查是否在等待期间已经创建了会话
-                    if file_id.dc_id in client.media_sessions:
-                        cached_session = client.media_sessions[file_id.dc_id]
-                        try:
-                            if (hasattr(cached_session, 'connection') and cached_session.connection and
-                                hasattr(cached_session.connection, 'protocol') and cached_session.connection.protocol and
-                                hasattr(cached_session.connection.protocol, 'encrypt') and 
-                                cached_session.connection.protocol.encrypt is not None):
-                                logger.debug(f"Using newly created media session for DC {file_id.dc_id}")
-                                return cached_session
-                        except Exception:
-                            pass
-                    
-                    media_session = Session(
-                        client,
-                        file_id.dc_id,
-                        await Auth(
-                            client, file_id.dc_id, await client.storage.test_mode()
-                        ).create(),
-                        await client.storage.test_mode(),
-                        is_media=True,
-                    )
-                    await media_session.start()
+            home_dc = await client.storage.dc_id()
+            test_mode = await client.storage.test_mode()
 
-                    # 尝试导入授权，最多重试6次
-                    auth_imported = False
-                    for attempt in range(6):
-                        try:
-                            # 导出授权
-                            exported_auth = await client.invoke(
-                                raw.functions.auth.ExportAuthorization(dc_id=file_id.dc_id)
-                            )
-                            
-                            # 导入授权
-                            await media_session.invoke(
-                                raw.functions.auth.ImportAuthorization(
-                                    id=exported_auth.id, bytes=exported_auth.bytes
-                                )
-                            )
-                            auth_imported = True
-                            logger.debug(f"Successfully imported authorization for DC {file_id.dc_id} (attempt {attempt + 1})")
-                            break
-                        except AuthBytesInvalid as e:
-                            logger.warning(
-                                f"Invalid authorization bytes for DC {file_id.dc_id} (attempt {attempt + 1}/6): {e}"
-                            )
-                            if attempt < 5:
-                                # 等待一小段时间后重试，避免立即重试
-                                await asyncio.sleep(0.5 * (attempt + 1))
-                            continue
-                        except Exception as e:
-                            logger.error(f"Unexpected error during auth import for DC {file_id.dc_id}: {e}", exc_info=True)
-                            if attempt < 5:
-                                await asyncio.sleep(0.5 * (attempt + 1))
-                            continue
-                    
-                    if not auth_imported:
-                        await media_session.stop()
-                        raise AuthBytesInvalid(f"Failed to import authorization for DC {file_id.dc_id} after 6 attempts")
-                    
-                    logger.debug(f"Created media session for DC {file_id.dc_id}")
-                    client.media_sessions[file_id.dc_id] = media_session
-            else:
+            # 注意：MTProto 要求每个并发 TCP Session 必须拥有独立的 auth_key！
+            # 只有当 dc_id == home_dc 且 slot_idx == 0 时才可复用 storage.auth_key()；
+            # 其余任何跨 DC 会话或第 2 条并发连接（slot_idx >= 1）都必须创建独立 Auth().create() 并导入授权。
+            if dc_id != home_dc:
                 media_session = Session(
                     client,
-                    file_id.dc_id,
-                    await client.storage.auth_key(),
-                    await client.storage.test_mode(),
+                    dc_id,
+                    await Auth(client, dc_id, test_mode).create(),
+                    test_mode,
                     is_media=True,
                 )
                 await media_session.start()
-            logger.debug(f"Created media session for DC {file_id.dc_id}")
-            client.media_sessions[file_id.dc_id] = media_session
-        
-        return media_session
 
+                auth_imported = False
+                for attempt in range(6):
+                    try:
+                        exported_auth = await client.invoke(
+                            raw.functions.auth.ExportAuthorization(dc_id=dc_id)
+                        )
+                        await media_session.invoke(
+                            raw.functions.auth.ImportAuthorization(
+                                id=exported_auth.id, bytes=exported_auth.bytes
+                            )
+                        )
+                        auth_imported = True
+                        logger.debug(
+                            f"Successfully imported authorization for DC {dc_id} slot={slot_idx} (attempt {attempt + 1})"
+                        )
+                        break
+                    except AuthBytesInvalid as e:
+                        logger.warning(f"Invalid authorization bytes for DC {dc_id} slot={slot_idx} (attempt {attempt + 1}/6): {e}")
+                        if attempt < 5:
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    except Exception as e:
+                        logger.error(f"Unexpected error during auth import for DC {dc_id} slot={slot_idx}: {e}", exc_info=True)
+                        if attempt < 5:
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+
+                if not auth_imported:
+                    try:
+                        await media_session.stop()
+                    except Exception:
+                        pass
+                    raise AuthBytesInvalid(f"Failed to import authorization for DC {dc_id} slot={slot_idx} after 6 attempts")
+            else:
+                media_session = Session(
+                    client,
+                    dc_id,
+                    await client.storage.auth_key(),
+                    test_mode,
+                    is_media=True,
+                )
+                await media_session.start()
+
+            pool[slot_idx] = media_session
+            client.media_sessions[dc_id] = media_session
+            try:
+                own_idx = self._find_own_index()
+                mark_bot_warm_dc(own_idx, dc_id)
+            except Exception:
+                pass
+            return media_session
 
     @staticmethod
-    async def get_location(file_id: FileId) -> Union[raw.types.InputPhotoFileLocation,
-                                                     raw.types.InputDocumentFileLocation,
-                                                     raw.types.InputPeerPhotoFileLocation,]:
-        """
-        Returns the file location for the media file.
-        """
+    async def get_location(file_id: FileId) -> Union[
+        raw.types.InputPhotoFileLocation,
+        raw.types.InputDocumentFileLocation,
+        raw.types.InputPeerPhotoFileLocation,
+    ]:
         file_type = file_id.file_type
 
         if file_type == FileType.CHAT_PHOTO:
@@ -261,77 +303,76 @@ class ByteStreamer:
         location,
         offset: int,
         chunk_size: int,
-        max_retries: int = 3
+        max_retries: int = 3,
+        slot_idx: Optional[int] = None,
+        timeout: float = 6.0,
     ):
-        """
-        尝试获取文件块，支持重试和客户端切换
-        返回: (success: bool, result, new_client, new_index)
-        """
+        if slot_idx is None:
+            self._rr_counter += 1
+            slot_idx = self._rr_counter % MEDIA_SESSIONS_PER_BOT
+
         for retry_attempt in range(max_retries):
+            cur_slot = (slot_idx + retry_attempt) % MEDIA_SESSIONS_PER_BOT
             try:
-                # 生成或获取媒体会话
-                media_session = await self.generate_media_session(client, file_id)
-                
-                # 尝试获取文件块
-                r = await media_session.invoke(
-                    raw.functions.upload.GetFile(
-                        location=location, offset=offset, limit=chunk_size
-                    ),
-                )
+                async with self._inflight_sem:
+                    media_session = await self.generate_media_session(client, file_id, slot_idx=cur_slot)
+                    r = await asyncio.wait_for(
+                        media_session.invoke(
+                            raw.functions.upload.GetFile(
+                                location=location, offset=offset, limit=chunk_size
+                            ),
+                        ),
+                        timeout=timeout,
+                    )
                 mark_bot_success(client_index)
                 return True, r, client, None
-                
-            except (OSError, ConnectionError, TimeoutError, AuthBytesInvalid, TypeError, AttributeError) as e:
-                error_msg = str(e)
-                error_type = type(e).__name__
-                
-                # 检查是否是加密相关的错误
-                is_encryption_error = (
-                    isinstance(e, TypeError) and
-                    ('Value after * must be an iterable' in error_msg or
-                     'NoneType' in error_msg or
-                     'encrypt' in error_msg.lower())
-                )
-                
-                # 检查是否是连接错误
-                is_connection_error = (
-                    isinstance(e, (OSError, ConnectionError)) or
-                    'Connection lost' in error_msg or
-                    'Connection closed' in error_msg or
-                    'Broken pipe' in error_msg
-                )
-                
+
+            except (asyncio.TimeoutError, TimeoutError) as e:
                 if retry_attempt < max_retries - 1:
-                    if is_encryption_error:
-                        logger.debug(f"加密状态异常，清除会话并重试 (offset: {offset}, 尝试 {retry_attempt + 1}/{max_retries})")
-                    elif is_connection_error:
-                        logger.debug(f"连接错误，尝试重新建立媒体会话 (offset: {offset}, 尝试 {retry_attempt + 1}/{max_retries})")
-                    else:
-                        logger.debug(f"获取文件块失败，重试 (offset: {offset}, 尝试 {retry_attempt + 1}/{max_retries}): {error_type}")
-                    
-                    # 清除无效的会话缓存（加密错误和连接错误都需要清除）
-                    if file_id.dc_id in client.media_sessions:
-                        try:
-                            await client.media_sessions[file_id.dc_id].stop()
-                        except Exception as stop_error:
-                            logger.debug(f"停止媒体会话时出错（可能已断开）: {stop_error}")
-                        del client.media_sessions[file_id.dc_id]
-                    
-                    # 等待后重试（加密错误需要稍长的等待时间）
-                    wait_time = 1.5 + retry_attempt * 0.5 if is_encryption_error else 1 + retry_attempt * 0.5
-                    await asyncio.sleep(wait_time)
+                    await asyncio.sleep(0.2 * (retry_attempt + 1))
                 else:
-                    # 最后一次重试失败，返回失败
-                    if is_encryption_error:
-                        logger.warning(f"加密状态异常，重试失败 (offset: {offset}): {error_type}")
-                    elif is_connection_error:
-                        logger.warning(f"连接错误，重试失败 (offset: {offset}): {error_type}")
-                    else:
-                        logger.warning(f"获取文件块失败，已达到最大重试次数 (offset: {offset}): {error_type}")
                     mark_bot_failure(client_index, e)
                     return False, None, client, None
-        
+
+            except (OSError, ConnectionError, AuthBytesInvalid, TypeError, AttributeError, Exception) as e:
+                error_msg = str(e)
+                is_encryption_error = (
+                    (isinstance(e, TypeError) and (
+                        "Value after * must be an iterable" in error_msg or
+                        "NoneType" in error_msg or
+                        "encrypt" in error_msg.lower()
+                    )) or
+                    isinstance(e, AuthBytesInvalid) or
+                    "AUTH_KEY_UNREGISTERED" in error_msg
+                )
+
+                if retry_attempt < max_retries - 1:
+                    if is_encryption_error:
+                        try:
+                            await self.generate_media_session(client, file_id, slot_idx=cur_slot, force_recreate=True)
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.3 * (retry_attempt + 1))
+                else:
+                    mark_bot_failure(client_index, e)
+                    return False, None, client, None
+
         return False, None, client, None
+
+    async def _prepare_bot_context(self, bot_idx: int, message_id: Optional[int], default_file_id: FileId, default_location):
+        bot_client = multi_clients[bot_idx]
+        bot_streamer = ByteStreamer.for_client(bot_client)
+        if bot_idx == self._find_own_index() or message_id is None:
+            return bot_client, bot_streamer, default_file_id, default_location
+        bot_file_id = await bot_streamer.get_file_properties(message_id, force_refresh=False)
+        bot_location = await bot_streamer.get_location(bot_file_id)
+        return bot_client, bot_streamer, bot_file_id, bot_location
+
+    def _find_own_index(self) -> int:
+        for k, v in multi_clients.items():
+            if v == self.client:
+                return k
+        return 0
 
     async def yield_file(
         self,
@@ -342,174 +383,212 @@ class ByteStreamer:
         last_part_cut: int,
         part_count: int,
         chunk_size: int,
+        slot_preacquired: bool = False,
+        message_id: Optional[int] = None,
     ) -> Union[str, None]:
-        """
-        Custom generator that yields the bytes of the media file.
-        支持客户端切换：当连接失败时，自动切换到其他可用客户端继续传输
-        Modded from <https://github.com/eyaadh/megadlbot_oss/blob/master/mega/telegram/utils/custom_download.py#L20>
-        Thanks to Eyaadh <https://github.com/eyaadh>
-        """
-        client = self.client
         current_index = index
-        failed_indices = set()  # 记录失败的客户端索引
-        slot_acquired = False
+        failed_indices = set()
+        slot_acquired = slot_preacquired
 
         def acquire_current_slot():
             nonlocal slot_acquired
-            acquire_bot_slot(current_index)
-            slot_acquired = True
-            logger.debug(f"Starting to yielding file with client {current_index} (当前负载: {work_loads.get(current_index, 0)}).")
+            if not slot_acquired:
+                acquire_bot_slot(current_index)
+                slot_acquired = True
 
         def release_current_slot():
             nonlocal slot_acquired
             if slot_acquired:
                 release_bot_slot(current_index)
                 slot_acquired = False
-                logger.debug(f"客户端 {current_index} 负载已减少 (当前负载: {work_loads.get(current_index, 0)})")
 
         acquire_current_slot()
-        
-        current_part = 1
-        location = await self.get_location(file_id)
+        default_location = await self.get_location(file_id)
+        target_dc = getattr(file_id, "dc_id", None)
 
-        # 获取初始文件块，支持客户端切换
-        success, r, client, _ = await self._try_get_file_chunk(
-            client, current_index, file_id, location, offset, chunk_size, max_retries=3
-        )
-        
-        # 如果失败，尝试切换到其他客户端
-        if not success:
-            logger.warning(f"客户端 {current_index} 获取初始文件块失败，尝试切换到其他客户端")
-            failed_indices.add(current_index)
-            release_current_slot()
-            
-            # 尝试切换到其他客户端
-            max_client_switches = 3  # 最多尝试切换3个客户端
-            switch_success = False
-            
-            for switch_attempt in range(max_client_switches):
-                next_index = get_next_available_client(current_index, failed_indices)
-                if next_index is None:
-                    logger.error("没有其他可用的客户端")
-                    return
-                
-                logger.info(f"切换到客户端 {next_index} (尝试 {switch_attempt + 1}/{max_client_switches})")
-                current_index = next_index
-                client = multi_clients[current_index]
-                acquire_current_slot()
-                
-                # 更新 ByteStreamer 的客户端引用
-                self.client = client
-                
-                # 尝试获取文件块
-                success, r, client, _ = await self._try_get_file_chunk(
-                    client, current_index, file_id, location, offset, chunk_size, max_retries=2
+        all_bots = get_available_bot_indices(current_index, set(), target_dc=target_dc) if (part_count > 1 and message_id is not None) else [current_index]
+        total_active_streams = max(1, sum(work_loads.values()))
+        # 自适应混合条带化调度：
+        # 1) 当下游连接数较少 (total_active_streams < len(all_bots)) 时，单条流无法占满所有 Bot，
+        #    服务端内部直接启用跨全部 Bot 的条带化并发拉取 (Server-Side Multi-Bot Striping)，单流即可跑满所有 Bot！
+        # 2) 当下游已经发起多连接并发 (total_active_streams >= len(all_bots)) 时，每个 Bot 都已分配到独立 HTTP 流，
+        #    此时每条 HTTP 流绑定自身专属 Bot 并在单 Bot 内预取流水线 (Pipelining)，消除跨 Bot 队头阻塞 (HoL Blocking)！
+        if total_active_streams < len(all_bots) and part_count > 1 and message_id is not None:
+            # 单流条带化拉取：限制单流最大跨 4 个健康 Bot 并发条带，避免同时跨 10~20 个节点带来的木桶效应，
+            # 既能跑满 60~120MB/s（远超 4K 原盘码率），又保留充足空闲节点用于毫秒级对冲抢跑（Hedged Requests）！
+            max_single_stream_bots = min(4, len(all_bots))
+            stripe_bots = all_bots[:max_single_stream_bots]
+            per_bot_depth = 2
+            prefetch_window = max(3, len(stripe_bots) * per_bot_depth)
+        else:
+            stripe_bots = [current_index]
+            prefetch_window = 3 if total_active_streams <= len(all_bots) * 2 else 2
+            if part_count <= 1:
+                prefetch_window = 1
+
+        bot_ctx_cache: Dict[int, Tuple[Client, "ByteStreamer", FileId, object]] = {}
+        bot_ctx_locks: Dict[int, asyncio.Lock] = {b: asyncio.Lock() for b in multi_clients.keys()}
+
+        async def _get_ctx(bot_idx: int):
+            if bot_idx in bot_ctx_cache:
+                return bot_ctx_cache[bot_idx]
+            lock = bot_ctx_locks.setdefault(bot_idx, asyncio.Lock())
+            async with lock:
+                if bot_idx in bot_ctx_cache:
+                    return bot_ctx_cache[bot_idx]
+                ctx = await self._prepare_bot_context(bot_idx, message_id, file_id, default_location)
+                bot_ctx_cache[bot_idx] = ctx
+                return ctx
+
+        async def _fetch_part(part_idx: int):
+            part_offset = offset + (part_idx - 1) * chunk_size
+            active_bots = stripe_bots or [current_index]
+            assigned_bot = active_bots[(part_idx - 1) % len(active_bots)]
+            slot_idx = ((part_idx - 1) // len(active_bots)) % MEDIA_SESSIONS_PER_BOT
+
+            try:
+                b_client, b_streamer, b_file_id, b_location = await _get_ctx(assigned_bot)
+                success, r, _, _ = await b_streamer._try_get_file_chunk(
+                    b_client, assigned_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=2, slot_idx=slot_idx, timeout=5.0
                 )
-                
-                if success:
-                    switch_success = True
-                    logger.info(f"成功切换到客户端 {current_index} 并获取文件块")
+                if success and isinstance(r, raw.types.upload.File):
+                    return True, r, assigned_bot, part_offset
+            except Exception as e:
+                logger.warning(f"条带 Bot {assigned_bot} 获取分片异常 (offset={part_offset}): {e}")
+
+            part_failed = {assigned_bot}
+
+            for fallback_attempt in range(3):
+                next_bot = get_next_available_client(assigned_bot, part_failed)
+                if next_bot is None:
                     break
-                else:
-                    failed_indices.add(current_index)
-                    release_current_slot()
-            
-            if not switch_success:
-                logger.error("所有客户端都无法获取初始文件块，停止文件流传输")
-                return
-        
-        try:
-            if isinstance(r, raw.types.upload.File):
-                while True:
-                    chunk = r.bytes
-                    if not chunk:
-                        break
-                    elif part_count == 1:
-                        output_chunk = chunk[first_part_cut:last_part_cut]
-                    elif current_part == 1:
-                        output_chunk = chunk[first_part_cut:]
-                    elif current_part == part_count:
-                        output_chunk = chunk[:last_part_cut]
-                    else:
-                        output_chunk = chunk
-
-                    if output_chunk:
-                        record_bot_bytes(current_index, len(output_chunk))
-                        yield output_chunk
-
-                    current_part += 1
-                    offset += chunk_size
-
-                    if current_part > part_count:
-                        break
-
-                    # 尝试获取下一个文件块
-                    success, r, client, _ = await self._try_get_file_chunk(
-                        client, current_index, file_id, location, offset, chunk_size, max_retries=2
+                try:
+                    b_client, b_streamer, b_file_id, b_location = await _get_ctx(next_bot)
+                    success, r, _, _ = await b_streamer._try_get_file_chunk(
+                        b_client, next_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=1, timeout=4.0
                     )
-                    
-                    if not success:
-                        # 当前客户端失败，尝试切换到其他客户端
-                        logger.warning(f"客户端 {current_index} 获取文件块失败 (offset: {offset})，尝试切换到其他客户端")
-                        failed_indices.add(current_index)
-                        release_current_slot()
-                        
-                        # 尝试切换到其他客户端
-                        max_client_switches = 3
-                        switch_success = False
-                        
-                        for switch_attempt in range(max_client_switches):
-                            next_index = get_next_available_client(current_index, failed_indices)
-                            if next_index is None:
-                                logger.error(f"没有其他可用的客户端 (offset: {offset})")
-                                break
-                            
-                            logger.info(f"切换到客户端 {next_index} 继续传输 (offset: {offset}, 尝试 {switch_attempt + 1}/{max_client_switches})")
-                            current_index = next_index
-                            client = multi_clients[current_index]
-                            acquire_current_slot()
-                            
-                            # 更新 ByteStreamer 的客户端引用
-                            self.client = client
-                            
-                            # 尝试获取文件块
-                            success, r, client, _ = await self._try_get_file_chunk(
-                                client, current_index, file_id, location, offset, chunk_size, max_retries=2
-                            )
-                            
-                            if success:
-                                switch_success = True
-                                logger.info(f"成功切换到客户端 {current_index} 并继续传输 (offset: {offset})")
-                                break
-                            else:
-                                failed_indices.add(current_index)
-                                release_current_slot()
-                        
-                        if not switch_success:
-                            logger.error(f"所有客户端都无法获取文件块，停止文件流传输 (offset: {offset})")
-                            break
-        except (TimeoutError, AttributeError, TypeError, OSError, ConnectionError) as e:
-            error_msg = str(e)
-            if 'Connection lost' in error_msg or 'Connection closed' in error_msg:
-                logger.error(f"连接丢失错误 in yield_file: {e}")
-            else:
-                logger.error(f"Error in yield_file: {e}", exc_info=True)
+                    if success and isinstance(r, raw.types.upload.File):
+                        return True, r, next_bot, part_offset
+                except Exception as e:
+                    logger.warning(f"备用 Bot {next_bot} 获取分片失败 (offset={part_offset}): {e}")
+                part_failed.add(next_bot)
+
+            return False, None, assigned_bot, part_offset
+
+        async def _fetch_part_hedged(part_idx: int, exclude_bot: int):
+            part_offset = offset + (part_idx - 1) * chunk_size
+            candidate = get_next_available_client(exclude_bot, exclude_indices={exclude_bot})
+            if candidate is None:
+                candidate = current_index
+            try:
+                b_client, b_streamer, b_file_id, b_location = await _get_ctx(candidate)
+                success, r, _, _ = await b_streamer._try_get_file_chunk(
+                    b_client, candidate, b_file_id, b_location, part_offset, chunk_size, max_retries=1, timeout=4.0
+                )
+                if success and isinstance(r, raw.types.upload.File):
+                    logger.info(f"⚡ [流播对冲抢跑成功] 分片 {part_idx} 原Bot {exclude_bot} 延迟，由备用Bot {candidate} 极速补位交付")
+                    return True, r, candidate, part_offset
+            except Exception as e:
+                logger.warning(f"对冲任务在 Bot {candidate} 执行异常: {e}")
+            return False, None, candidate, part_offset
+
+        def get_window_size(p: int) -> int:
+            # 渐进式慢启动预取：起播或元数据探测仅拉取 2 个分片，随后平滑爬坡至满窗口
+            if p <= 2:
+                return min(2, prefetch_window)
+            elif p <= 4:
+                return min(4, prefetch_window)
+            return prefetch_window
+
+        prefetch_tasks: Dict[int, asyncio.Task] = {}
+
+        try:
+            initial_window = min(part_count, get_window_size(1))
+            for p in range(1, initial_window + 1):
+                prefetch_tasks[p] = asyncio.create_task(_fetch_part(p))
+
+            for current_part in range(1, part_count + 1):
+                task = prefetch_tasks.pop(current_part, None)
+                if task is None:
+                    task = asyncio.create_task(_fetch_part(current_part))
+
+                active_bots = stripe_bots or [current_index]
+                assigned_bot = active_bots[(current_part - 1) % len(active_bots)]
+
+                if not task.done():
+                    # 1.2s 对冲抢跑防御：避免单个慢节点引发队头阻塞导致浏览器 HTML5 播放缓冲见底转圈
+                    done_set, _ = await asyncio.wait({task}, timeout=1.2)
+                    if not done_set:
+                        logger.info(f"分片 {current_part} (Bot {assigned_bot}) 耗时超 1.2s，启动备用 Bot 对冲抢跑...")
+                        hedge_task = asyncio.create_task(_fetch_part_hedged(current_part, assigned_bot))
+                        done_set, pending_set = await asyncio.wait(
+                            {task, hedge_task}, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        for p in pending_set:
+                            p.cancel()
+                        winning_task = next(iter(done_set))
+                        try:
+                            success, r, used_bot, part_offset = winning_task.result()
+                        except Exception:
+                            success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
+                    else:
+                        try:
+                            success, r, used_bot, part_offset = task.result()
+                        except Exception:
+                            success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
+                else:
+                    try:
+                        success, r, used_bot, part_offset = task.result()
+                    except Exception:
+                        success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
+
+                if not success or not isinstance(r, raw.types.upload.File):
+                    logger.warning(f"分片 {current_part} 首轮获取未命中，执行兜底获取...")
+                    success, r, used_bot, part_offset = await _fetch_part(current_part)
+                    if not success or not isinstance(r, raw.types.upload.File):
+                        logger.error(f"所有客户端都无法获取文件块，停止文件流传输 (offset: {part_offset})")
+                        break
+
+                cur_target_window = get_window_size(current_part)
+                for next_p in range(current_part + 1, min(part_count, current_part + cur_target_window) + 1):
+                    if next_p not in prefetch_tasks:
+                        prefetch_tasks[next_p] = asyncio.create_task(_fetch_part(next_p))
+
+                chunk = r.bytes
+                if not chunk:
+                    break
+                elif part_count == 1:
+                    output_chunk = chunk[first_part_cut:last_part_cut]
+                elif current_part == 1:
+                    output_chunk = chunk[first_part_cut:]
+                elif current_part == part_count:
+                    output_chunk = chunk[:last_part_cut]
+                else:
+                    output_chunk = chunk
+
+                if output_chunk:
+                    record_bot_bytes(used_bot, len(output_chunk))
+                    yield output_chunk
+
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
         except Exception as e:
             error_msg = str(e)
-            if 'Connection lost' in error_msg or 'Connection closed' in error_msg:
+            if "Connection lost" in error_msg or "Connection closed" in error_msg:
                 logger.error(f"连接丢失错误 in yield_file: {e}")
             else:
                 logger.error(f"Unexpected error in yield_file: {e}", exc_info=True)
         finally:
-            logger.debug(f"Finished yielding file with {current_part} parts.")
+            for t in prefetch_tasks.values():
+                if not t.done():
+                    t.cancel()
+            if prefetch_tasks:
+                await asyncio.gather(*prefetch_tasks.values(), return_exceptions=True)
             release_current_slot()
 
-    
     async def clean_cache(self) -> None:
-        """
-        function to clean the cache to reduce memory usage
-        """
         while True:
             await asyncio.sleep(self.clean_timer)
-            self.cached_file_ids.clear()
+            async with self._cache_lock:
+                self.cached_file_ids.clear()
             logger.debug("Cleaned the cache")

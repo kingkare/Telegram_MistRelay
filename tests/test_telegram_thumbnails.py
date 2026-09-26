@@ -1,3 +1,4 @@
+import tests  # noqa: F401
 import importlib.util
 import os
 import sys
@@ -73,10 +74,21 @@ def load_stream_routes():
     sys.modules["aiohttp.http_exceptions"] = http_exceptions
 
     pyrogram_module = types.ModuleType("pyrogram")
+    pyrogram_module.__path__ = []
     pyrogram_file_id = types.ModuleType("pyrogram.file_id")
     pyrogram_file_id.FileId = SimpleNamespace(decode=lambda _value: SimpleNamespace(file_type=None))
+    pyrogram_types = types.ModuleType("pyrogram.types")
+    pyrogram_types.Message = SimpleNamespace
+    pyrogram_types.Chat = SimpleNamespace
+    pyrogram_types.User = SimpleNamespace
+    pyrogram_enums = types.ModuleType("pyrogram.enums")
+    pyrogram_enums.ChatType = SimpleNamespace(CHANNEL="channel", SUPERGROUP="supergroup", GROUP="group")
+    pyrogram_enums.ParseMode = SimpleNamespace(HTML="html", MARKDOWN="markdown")
     sys.modules["pyrogram"] = pyrogram_module
     sys.modules["pyrogram.file_id"] = pyrogram_file_id
+    sys.modules["pyrogram.types"] = pyrogram_types
+    sys.modules["pyrogram.enums"] = pyrogram_enums
+    sys.modules["pyrogram.enums.parse_mode"] = SimpleNamespace(ParseMode=pyrogram_enums.ParseMode)
 
     webstreamer = types.ModuleType("WebStreamer")
     webstreamer.Var = SimpleNamespace(HASH_LENGTH=32, BIN_CHANNEL=-100, MULTI_CLIENT=False, URL="")
@@ -94,6 +106,8 @@ def load_stream_routes():
     bot_module.multi_clients = {}
     bot_module.work_loads = {}
     bot_module.channel_accessible_clients = set()
+    bot_module.channel_write_clients = set()
+    bot_module.bot_channel_modes = {}
     bot_module.select_stream_bot = lambda **_kwargs: None
     bot_module.get_available_channel_bot_count = lambda: 1
     bot_module.get_bot_runtime_snapshot = lambda: {}
@@ -157,10 +171,21 @@ class FakeJsonRequest:
 class TelegramThumbnailTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
+        cls._saved_modules = dict(sys.modules)
         cls.routes = load_stream_routes()
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "_saved_modules"):
+            for k in list(sys.modules.keys()):
+                if k not in cls._saved_modules:
+                    sys.modules.pop(k, None)
+            sys.modules.update(cls._saved_modules)
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory(prefix="mistrelay_thumb_cache_", dir="/tmp")
+        from db import init_db
+        init_db()
 
         import thumbnail_generator
 
@@ -437,6 +462,82 @@ class TelegramThumbnailTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(oversized_response.status, 400)
         self.assertIn("200", oversized_response.body["error"])
+
+
+    async def test_ensure_telegram_thumbnail_cache_flow(self):
+        import thumbnail_generator
+        message_id = 88
+        file_name = "test_flow.jpg"
+        source_path = Path(self.temp_dir.name) / file_name
+        Image.new("RGB", (32, 32), "#38bdf8").save(source_path)
+
+        self.routes.get_tg_media_record_by_message_id = lambda _mid: {
+            "message_id": message_id,
+            "file_name": file_name,
+            "mime_type": "image/jpeg",
+            "file_size": source_path.stat().st_size,
+        }
+
+        async def fake_download(_mid, out_path, _max_bytes):
+            out_path.write_bytes(source_path.read_bytes())
+
+        self.routes.download_telegram_media_sample = fake_download
+
+        # First call: cache miss
+        path1, hit1 = await self.routes.ensure_telegram_thumbnail(message_id)
+        self.assertIsNotNone(path1)
+        self.assertFalse(hit1)
+        self.assertTrue(path1.exists())
+
+        # Second call: cache hit
+        path2, hit2 = await self.routes.ensure_telegram_thumbnail(message_id)
+        self.assertEqual(path1, path2)
+        self.assertTrue(hit2)
+
+    async def test_thumbnail_worker_and_api_endpoints(self):
+        import asyncio
+        from thumbnail_worker import TelegramThumbnailWorker
+        worker = TelegramThumbnailWorker()
+        processed = []
+
+        async def mock_ensure(mid):
+            processed.append(mid)
+            return (Path(self.temp_dir.name) / f"{mid}.webp", False)
+
+        worker.set_ensure_func(mock_ensure)
+        worker.enqueue(901)
+        worker.enqueue(902)
+        # Duplicate enqueue should be skipped
+        worker.enqueue(901)
+
+        status = worker.get_status()
+        self.assertIn("running", status)
+        self.assertIn("total", status)
+        self.assertIn("cached", status)
+        self.assertIn("pending", status)
+        self.assertIn("percent", status)
+
+        await asyncio.sleep(1.2)
+        await worker.stop()
+        self.assertIn(901, processed)
+
+        # Test GET /api/telegram/thumbnails/status
+        status_req = SimpleNamespace()
+        status_resp = await self.routes.telegram_thumbnails_status_handler(status_req)
+        self.assertEqual(status_resp.status, 200)
+        self.assertTrue(status_resp.body["success"])
+        self.assertIn("cached", status_resp.body["data"])
+
+        # Test POST /api/telegram/thumbnails/warmup (admin permitted)
+        warmup_req = SimpleNamespace(get=lambda k, d=None: {"role": "admin"} if k == "user" else d)
+        warmup_resp = await self.routes.telegram_thumbnails_warmup_handler(warmup_req)
+        self.assertEqual(warmup_resp.status, 200)
+        self.assertTrue(warmup_resp.body["success"])
+
+        # Test POST /api/telegram/thumbnails/warmup (non-admin rejected)
+        non_admin_req = SimpleNamespace(get=lambda k, d=None: {"role": "guest"} if k == "user" else d)
+        forbidden_resp = await self.routes.telegram_thumbnails_warmup_handler(non_admin_req)
+        self.assertEqual(forbidden_resp.status, 403)
 
 
 if __name__ == "__main__":

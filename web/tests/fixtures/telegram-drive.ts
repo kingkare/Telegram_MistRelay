@@ -25,6 +25,8 @@ function createFile(index: number): TelegramDriveFile {
     supports_streaming: mimeType.startsWith('video/'),
     thumbnail_url: `/api/telegram/thumbnail/${index}`,
     stream_url: `/api/telegram/stream/${index}`,
+    dc_id: (index % 5) + 1,
+    dc_label: `DC${(index % 5) + 1}`,
     caption: index % 7 === 0 ? `fixture caption ${index}` : undefined,
   }
 }
@@ -39,6 +41,8 @@ function createFolder(index: number): TelegramDriveFolder {
     group_mime_types: ['image/jpeg', 'video/mp4'],
     message_date: new Date(Date.UTC(2026, 0, 1, 1, index % 60, 0)).toISOString(),
     thumbnail_url: `/api/telegram/thumbnail/group-${index}`,
+    dc_id: (index % 5) + 1,
+    dc_label: `DC${(index % 5) + 1}`,
   }
 }
 
@@ -48,8 +52,3 @@ export function createTelegramDriveFixture(total = 10000): TelegramDriveItem[] {
   ))
 }
 
-export const pcDriveViewports = [
-  { width: 1100, height: 720, columns: 5 },
-  { width: 1366, height: 768, columns: 6 },
-  { width: 1920, height: 1080, columns: 8 },
-] as const

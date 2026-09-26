@@ -1,3 +1,4 @@
+import tests  # noqa: F401
 import os
 import sqlite3
 import tempfile
@@ -75,15 +76,15 @@ class AuthSessionTests(unittest.TestCase):
             1,
             token_hash,
             auth.get_refresh_token_expires_at(),
-            device_id="pc-1",
-            session_name="Desktop",
+            device_id="client-1",
+            session_name="WebSession",
         )
 
         self.assertNotEqual(refresh_token, token_hash)
         self.assertEqual(len(token_hash), 64)
         self.assertEqual(session["token_hash"], token_hash)
         self.assertIsNone(db.get_auth_session(refresh_token))
-        self.assertEqual(db.get_auth_session(token_hash)["device_id"], "pc-1")
+        self.assertEqual(db.get_auth_session(token_hash)["device_id"], "client-1")
 
     def test_refresh_rotation_blocks_replay(self):
         old_hash = auth.hash_refresh_token("old-refresh")

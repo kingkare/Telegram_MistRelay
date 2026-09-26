@@ -18,6 +18,7 @@ from .constants import (
     DOWNLOAD_PROGRESS_UPDATE_INTERVAL,
     pyrogram_clients,
     channel_accessible_clients,
+    channel_write_clients,
     upload_work_loads,
     get_upload_semaphore
 )
@@ -157,30 +158,28 @@ class UploadHandler:
             upload_client = None
 
             if pyrogram_clients and len(pyrogram_clients) > 0:
-                # 使用Pyrogram多客户端负载均衡
-                # 优先选择能访问频道的客户端
-                if channel_accessible_clients:
+                # 使用Pyrogram写权限负载均衡（严格按写权限筛选，防止免加频道的只读Bot上传报403）
+                import aria2_client.constants as a2_const
+                write_candidates = getattr(a2_const, "channel_write_clients", None) or channel_write_clients
+                if not write_candidates and 0 in pyrogram_clients:
+                    write_candidates = {0}
+
+                if write_candidates:
                     available_loads = {
                         k: v for k, v in upload_work_loads.items()
-                        if k in channel_accessible_clients and k in pyrogram_clients
+                        if k in write_candidates and k in pyrogram_clients
                     }
                     if available_loads:
                         client_index = min(available_loads, key=available_loads.get)
-                    else:
-                        # 回退到所有客户端
-                        valid_loads = {k: v for k, v in upload_work_loads.items() if k in pyrogram_clients}
-                        if valid_loads:
-                            client_index = min(valid_loads, key=valid_loads.get)
-                else:
-                    # 使用所有客户端
-                    valid_loads = {k: v for k, v in upload_work_loads.items() if k in pyrogram_clients}
-                    if valid_loads:
-                        client_index = min(valid_loads, key=valid_loads.get)
+                    elif 0 in pyrogram_clients:
+                        client_index = 0
+                elif 0 in pyrogram_clients:
+                    client_index = 0
 
                 if client_index is not None and client_index in pyrogram_clients:
                     upload_client = pyrogram_clients[client_index]
                     upload_work_loads[client_index] = upload_work_loads.get(client_index, 0) + 1
-                    logger.info(f"使用Pyrogram客户端 {client_index} 上传文件（上传负载: {upload_work_loads[client_index]}）")
+                    logger.info(f"使用Pyrogram写权限客户端 {client_index} 上传文件（上传负载: {upload_work_loads[client_index]}）")
 
             # 如果没有Pyrogram客户端，使用主 bot（重试上传路径可能没有传入 bot）
             if upload_client is None:

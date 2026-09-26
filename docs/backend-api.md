@@ -70,7 +70,7 @@ JWT 特性：
 
 ### 1.3 CORS
 
-服务端只允许同源请求、Tauri 客户端和 `MISTRELAY_CORS_ORIGINS` 明确列出的 Origin：
+服务端只允许同源请求和 `MISTRELAY_CORS_ORIGINS` 明确列出的 Origin：
 
 - `Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS`
 - `Access-Control-Allow-Headers: Authorization, Content-Type, Accept, Origin, X-Requested-With, Range`
@@ -144,6 +144,27 @@ JWT 特性：
 | `DELETE` | `/api/telegram/group/{media_group_id}` | 是 | 删除媒体组文件夹 |
 | `POST` | `/api/telegram/batch/delete` | 是 | 删除当前选择的 TG 文件和媒体组 |
 | `DELETE` | `/api/telegram/all` | 是 | 清空 TG 频道网盘 |
+| `GET` | `/api/telegram/thumbnails/status` | 是 | 缩略图后台预生成工作器状态 |
+| `POST` | `/api/telegram/thumbnails/warmup` | 是 | 启动/恢复缩略图全量预热扫描 |
+| `GET` | `/api/cache/stats` | 是 | 全维度存储与内存缓存统计 |
+| `POST` | `/api/cache/clean` | 是 | 分类安全清理缓存（支持 Dry-run） |
+| `GET` | `/api/cache/policy` | 是 | 获取自动清理生命周期策略 |
+| `PUT` | `/api/cache/policy` | 是 | 动态保存自动清理生命周期策略 |
+| `GET` | `/api/telegram/botfather/accounts` | 是 | 协议号资产池列表（脱敏） |
+| `POST` | `/api/telegram/botfather/accounts/import` | 是 | 批量导入协议号资产（异步任务模式，避免 524 超时） |
+| `GET` | `/api/telegram/botfather/accounts/import-task/{task_id}` | 是 | 查询后台协议号导入任务状态与实时进度 |
+| `DELETE` | `/api/telegram/botfather/accounts/{id}` | 是 | 从资产池安全移除协议号 |
+| `POST` | `/api/telegram/botfather/accounts/{id}/check` | 是 | 探测协议号存活与持有机数 |
+| `POST` | `/api/telegram/botfather/tasks/start` | 是 | 启动多号接力或单号精准自动铸机流水线 |
+| `GET` | `/api/telegram/botfather/task-status` | 是 | 查询创机流水线实时进度与事件日志 |
+| `POST` | `/api/telegram/botfather/tasks/stop` | 是 | 停止创机流水线 |
+| `POST` | `/api/telegram/bots/hot-add` | 是 | 批量热挂载 Bot Token（零停机） |
+| `DELETE` | `/api/telegram/bots/{index}` | 是 | 热卸载并移除指定从机节点 |
+| `POST` | `/api/telegram/bots/reprobe` | 是 | 重新探测免加频道 Handle 与分流能力 |
+| `POST` | `/api/telegram/bots/test-load` | 是 | 集群节点多轮分流均匀度负载压测 |
+| `POST` | `/api/telegram/bots/{index}/benchmark` | 是 | 单节点网络延迟与小块吞吐测速 |
+| `POST` | `/api/telegram/bots/benchmark-all` | 是 | 全集群节点网络与小块吞吐测速 |
+| `POST` | `/api/telegram/benchmark/stream-and-download` | 是 | 单连接播放 vs 多连接下载速率实战基准测试 |
 | `GET` | `/api/files/list` | 是 | 本地文件列表 |
 | `GET` | `/api/files/download` | 是 | 本地文件下载 |
 | `POST` | `/api/files/upload` | 是 | 本地文件上传 |
@@ -194,7 +215,42 @@ JWT 特性：
 | `connected_bots` | integer | 当前已连接 bot 数量 |
 | `loads` | object | 每个 bot 的当前负载，键如 `bot1` |
 | `bot_metrics` | object | 每个 bot 的运行指标 |
-| `version` | string | 版本号，格式如 `v0.2.15` |
+| `version` | string | 版本号，格式如 `v2.2.5` |
+| `channel_info` | object | TG 频道公开标识与免加频道状态 |
+| `bot_details` | array | 集群中各 Bot 节点详细权限与工作模式 |
+| `dc_partitions` | object | Telegram DC1~DC5 数据中心动态分区分布与热度统计 |
+
+`channel_info` 字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `channel_id` | integer | 当前绑定的 Telegram 频道 ID |
+| `channel_type` | string | `"public"` 或 `"private"` |
+| `public_handle` | string \| null | 探测到的公开用户名或关联讨论组 Handle |
+| `no_join_balancing_active` | boolean | 免加频道分流是否处于激活就绪状态 |
+
+`bot_details[]` 字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `index` | integer | 机器人节点编号（0 为主控） |
+| `username` | string | 机器人用户名（如 `@mr_node_1_bot`） |
+| `mode` | string | `"primary_admin"` (主控) / `"direct_admin"` (频道管理) / `"no_join_resolved"` (免加频道分流就绪) / `"unreachable"` |
+| `can_read` | boolean | 是否具备流播与读取权限 |
+| `can_write` | boolean | 是否具备发帖转存与删帖权限 |
+| `invite_url` | string \| null | 私密频道未加管时的一键加管引导链接 |
+| `home_dc` | integer \| null | 机器人原生注册归属的 Telegram 数据中心编号（1~5） |
+| `warm_dcs` | integer[] | 机器人当前已完成 MTProto 握手并保持活跃的热备媒体数据中心列表 |
+
+`dc_partitions[DCx]` 字段（如 `DC1` ~ `DC5`）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `name` | string | 数据中心代码与地理分布（如 `"DC5 (新加坡/亚太)"`） |
+| `files_count` | integer | 存储于该 DC 分区下的网盘媒体文件总数 |
+| `home_bots` | integer | 原生归属注册在该 DC 的 Bot 节点数 |
+| `warm_bots` | integer | 当前已握手就绪可零延迟拉取该 DC 媒体的活跃 Bot 数 |
+| `requests` | integer | 系统累计分流至该 DC 的媒体请求计数 |
 
 `bot_metrics[botX]` 的字段：
 
@@ -325,6 +381,8 @@ JWT 特性：
 | `file_size` | integer \| null | 文件大小；媒体组文件夹为组内总大小 |
 | `message_date` | string | ISO8601 时间；媒体组文件夹为组内最新消息时间 |
 | `media_group_id` | string \| null | 媒体组 ID；删除文件夹和进入文件夹时使用 |
+| `dc_id` | integer \| null | 该媒体文件所在的 Telegram 数据中心编号（1~5） |
+| `dc_label` | string \| null | 数据中心分区标签（如 `"DC5"`、`"DC4"`） |
 
 文件夹专有字段：
 
@@ -930,7 +988,7 @@ curl -X POST "$BASE_URL/api/config/reload" \
 
 ## 7. Telegram 频道网盘概览
 
-TG 频道网盘是当前唯一维护的网盘能力，接口集中在第 9 节 `/api/telegram/*`。PC 客户端适配时应以 `entry_type` 区分媒体组文件夹和真实文件，不再调用第三方网盘接口。
+TG 频道网盘是当前唯一维护的网盘能力，接口集中在第 9 节 `/api/telegram/*`。前端适配时应以 `entry_type` 区分媒体组文件夹和真实文件，不再调用第三方网盘接口。
 
 ## 8. 下载、上传、队列与统计接口
 
@@ -1415,8 +1473,6 @@ curl -X DELETE "$BASE_URL/api/uploads/5" \
 
 默认按 TG 网盘根目录返回条目：同一 `media_group_id` 会聚合成一个 `entry_type = "folder"` 的媒体组文件夹；单文件返回 `entry_type = "file"`。传入 `media_group_id` 时返回该媒体组内的真实文件列表。
 
-PC 客户端详细适配指南见 [`docs/pc-client-tg-drive.md`](pc-client-tg-drive.md)。
-
 浏览已入库的 Telegram 频道网盘文件。
 
 - 鉴权：是
@@ -1479,7 +1535,7 @@ PC 客户端详细适配指南见 [`docs/pc-client-tg-drive.md`](pc-client-tg-dr
 - `type=document` 会排除 video/image/audio
 - 非法 `sort_by` 会自动回退为 `message_date`
 - `stream_url` 是相对服务端 origin 的 URL，客户端可按需追加 `token` 查询参数
-- PC 客户端下载保存名应优先使用流媒体响应头 `Content-Disposition`，拿不到响应头时使用 `download_file_name`
+- 前端下载保存名应优先使用流媒体响应头 `Content-Disposition`，拿不到响应头时使用 `download_file_name`
 - 服务端会在 `download_file_name` 和 `stream_url` 路径中尽量补齐扩展名：优先使用真实文件名已有的常见扩展名；若文件名缺少扩展名，或最后的点后缀不是常见文件扩展名，则按 MIME/媒体类型补 `.mp4`、`.jpg`、`.ogg` 等后缀
 
 示例：
@@ -1681,6 +1737,47 @@ curl -X DELETE "$BASE_URL/api/telegram/group/12345678901234567" \
 ```bash
 curl -X DELETE "$BASE_URL/api/telegram/all" \
   -H "Authorization: Bearer $TOKEN"
+```
+
+### 9.7 `GET /api/telegram/thumbnails/status`
+
+获取 Telegram 缩略图后台预生成工作器（`TelegramThumbnailWorker`）的实时运行状态与进度。
+
+- 鉴权：是
+- 请求参数：无
+- 响应数据：
+
+```json
+{
+  "success": true,
+  "data": {
+    "running": true,
+    "total": 162,
+    "cached": 45,
+    "pending": 117,
+    "percent": 27.8,
+    "current_message_id": 5660
+  }
+}
+```
+
+### 9.8 `POST /api/telegram/thumbnails/warmup`
+
+手动启动或重新触发后台全量媒体缩略图预热扫描。工作器将静默扫描历史无缓存媒体，并在后台平滑生成 WebP 缩略图，避免前台浏览时长时间等待。
+
+- 鉴权：是（仅限管理员）
+- 请求体：可选 `{ "force": false }`
+- 响应数据：
+
+```json
+{
+  "success": true,
+  "message": "已成功启动后台缩略图预生成，共入队 117 项待处理媒体",
+  "data": {
+    "enqueued": 117,
+    "running": true
+  }
+}
 ```
 
 ## 10. 文件管理接口
@@ -2045,7 +2142,7 @@ curl -L "$BASE_URL/12345/movie.mp4?hash=a1b2c3d4"
 
 ### 12.4 下载文件名与后缀规则
 
-PC 客户端下载 TG 网盘文件时，保存名优先级必须是：
+客户端下载 TG 网盘文件时，保存名优先级推荐为：
 
 1. 流媒体响应头 `Content-Disposition` 的 `filename*`
 2. 流媒体响应头 `Content-Disposition` 的 `filename`
@@ -2084,3 +2181,142 @@ PC 客户端下载 TG 网盘文件时，保存名优先级必须是：
 | `500` | 后端异常、子进程失败、数据库/IO 错误 |
 | `503` | 依赖服务未初始化，例如 aria2 客户端缺失 |
 | `504` | 调用外部系统超时 |
+
+
+## 14. 缓存与存储治理接口 (`/api/cache/*`)
+
+提供磁盘容量概况、缩略图缓存、下载目录残留文件、Rclone VFS 挂载缓存以及运行时内存缓存的统一监控与安全清理。
+
+### 14.1 `GET /api/cache/stats`
+
+查询系统磁盘、分类缓存体积、文件数及运行时内存状态。
+
+- 鉴权：是（管理员）
+- 响应数据示例：
+
+```json
+{
+  "success": true,
+  "data": {
+    "disk": {
+      "total_bytes": 107374182400,
+      "used_bytes": 42949672960,
+      "free_bytes": 64424509440,
+      "percent": 40.0
+    },
+    "thumbnails": {
+      "total_bytes": 268435456,
+      "total_files": 1280,
+      "telegram_bytes": 209715200,
+      "telegram_files": 1050,
+      "other_bytes": 58720256,
+      "other_files": 230
+    },
+    "downloads": {
+      "path": "/data/downloads",
+      "total_bytes": 5368709120,
+      "total_files": 12,
+      "protected_files": 2
+    },
+    "rclone": {
+      "total_bytes": 0,
+      "total_files": 0
+    },
+    "memory": {
+      "lru_entries": 64,
+      "active_sessions": 3
+    }
+  }
+}
+```
+
+### 14.2 `POST /api/cache/clean`
+
+分类安全清理冗余缓存。支持 `dry_run=true` 试运行模式（仅预估可释放体积与文件数，不实际删除物理文件）。下载目录清理内置活跃任务保护，绝不误删进行中的下载与上传文件。
+
+- 鉴权：是（管理员）
+- 请求体参数：
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `category` | string | 必填 | `"thumbnails"` \| `"downloads"` \| `"rclone"` \| `"memory"` \| `"all"` |
+| `retention_hours` | integer | `24` | 下载目录保留时间（小时） |
+| `retention_days` | integer | `7` | 缩略图保留天数 |
+| `dry_run` | boolean | `false` | 是否为仅分析不删除的试运行模式 |
+
+- 响应示例：
+
+```json
+{
+  "success": true,
+  "message": "缓存清理完成",
+  "data": {
+    "category": "thumbnails",
+    "dry_run": false,
+    "deleted_files": 145,
+    "freed_bytes": 45678900,
+    "skipped_protected": 0,
+    "duration_ms": 120
+  }
+}
+```
+
+### 14.3 `GET /api/cache/policy` & `PUT /api/cache/policy`
+
+读写下载目录与缩略图的自动清理生命周期策略。
+
+- 鉴权：是（管理员）
+- 配置对象结构：
+
+```json
+{
+  "success": true,
+  "data": {
+    "DOWNLOAD_CLEANUP_ENABLED": true,
+    "DOWNLOAD_RETENTION_HOURS": 24,
+    "DOWNLOAD_CLEANUP_INTERVAL_SECONDS": 3600,
+    "THUMBNAIL_CACHE_MAX_AGE_DAYS": 7
+  }
+}
+```
+
+---
+
+## 15. 多机器人集群与 @BotFather 自动化流水线接口
+
+### 15.1 协议号资产池管理
+
+- **`GET /api/telegram/botfather/accounts`**：查询纳管的 Telegram API 协议号列表（手机号、持有机数、状态、脱敏后信息）。
+- **`POST /api/telegram/botfather/accounts/import`**：支持多行大文本粘贴（`+86138...|http://api...` 或 Session String）或通过 `multipart/form-data` 上传多个 `.session` 文件。默认在后台启动异步导入任务并立即返回 `task_id`，彻底避免 Cloudflare 或反向代理 100~120s 超时 (HTTP 524)。支持传 `?sync=true` 同步等待模式。
+- **`GET /api/telegram/botfather/accounts/import-task/{task_id}`**：轮询后台协议号导入任务的实时状态、当前正在接码的手机号、频率保护冷却倒计时、实时日志及最终导入结果。
+- **`DELETE /api/telegram/botfather/accounts/{id}`**：安全从资产池移除指定协议号。
+- **`POST /api/telegram/botfather/accounts/{id}/check`**：通过 MTProto 直连 `@BotFather` `/mybots` 探测最新机器人数量并同步更新数据库。
+
+### 15.2 @BotFather 自动化流水线
+
+- **`POST /api/telegram/botfather/tasks/start`**：启动自动化创机流水线任务。
+  - `mode`: `"relay"` (多号接力模式，突破单号 20 上限，遇上限/限流自动切号) 或 `"single"` (单号精准独立铸造)；
+  - `account_ids`: 参与多号接力的账号 ID 列表；
+  - `single_account_id`: 单号精准模式的目标账号 ID；
+  - `count`: 目标扩容机器人总数（多号接力支持最高 200 个，单号模式上限 20 个）；
+  - `name_prefix`: 机器人名称前缀（如 `MistRelay Node`）；
+  - `reuse_existing`: 是否优先复用存量未挂载 Bot。
+- **`GET /api/telegram/botfather/task-status`**：获取当前创机任务状态、实时百分比进度、当前运作账号、已铸造 Bot 清单及最近执行日志。
+- **`POST /api/telegram/botfather/tasks/stop`**：强制取消并中止正在运行的创机流水线。
+
+### 15.3 运行期热挂载与节点调度
+
+- **`POST /api/telegram/bots/hot-add`**：
+  - 请求体：`{ "tokens": ["123456:ABC...", "789012:DEF..."] }` 或字符串；
+  - 零停机即时初始化并加入调度池，自动持久化至 `MULTI_BOT_TOKENS`。
+- **`DELETE /api/telegram/bots/{index}`**：优雅断开并移除指定编号的 Worker 机器人（禁止移除 0 号主控制 Bot）。
+- **`POST /api/telegram/bots/reprobe`**：重新探测频道公开 Handle，批量为未加频道的 Worker 节点激活免加频道分流模式。
+- **`POST /api/telegram/bots/test-load`**：向集群发送 `rounds_per_bot * total_bots` 次分流调度请求，返回各节点分流命中次数与方差分布报告。
+
+### 15.4 性能基准测试接口
+
+- **`POST /api/telegram/bots/{index}/benchmark`** & **`POST /api/telegram/bots/benchmark-all`**：
+  - 测试节点 API 响应延迟与 1MB 小块传输吞吐率。
+- **`POST /api/telegram/benchmark/stream-and-download`**：
+  - 参数：`sample_size_mb` (`10` \| `100` \| `1024`)，可选 `bot_index` 与 `message_id`；
+  - 实测真实单连接在线播放吞吐速度（`Single Connection Playback Speed`）与多连接并发下载吞吐速度（`Concurrent Download Speed`），输出峰值/平均速率与链路耗时报告。

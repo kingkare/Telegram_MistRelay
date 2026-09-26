@@ -26,7 +26,6 @@ import {
   setAuthToken,
   setRefreshToken,
 } from '@/utils/runtime'
-import { notifyPc } from '@/utils/pcNotifications'
 
 export type {
   TelegramBrowseParams,
@@ -135,12 +134,6 @@ api.interceptors.response.use(
         originalRequest.headers.Authorization = `Bearer ${token}`
         return api(originalRequest)
       } catch {
-        void notifyPc({
-          key: 'auth-expired',
-          title: '登录已过期',
-          body: '请重新登录 MistRelay',
-          cooldownMs: 60000,
-        })
         clearAuthTokens()
         if (!isCurrentLoginRoute()) {
           redirectToLogin()
@@ -149,12 +142,6 @@ api.interceptors.response.use(
     }
 
     if (error.response?.status === 401) {
-      void notifyPc({
-        key: 'auth-expired',
-        title: '登录已过期',
-        body: '请重新登录 MistRelay',
-        cooldownMs: 60000,
-      })
       clearAuthTokens()
       if (!isCurrentLoginRoute()) {
         redirectToLogin()
@@ -373,6 +360,37 @@ export function clearTelegramDrive(): Promise<TelegramDeleteResponse> {
   return api.delete<TelegramDeleteResponse>('/telegram/all').then(response => response.data)
 }
 
+export interface TelegramThumbnailStatus {
+  running: boolean
+  total: number
+  cached: number
+  pending: number
+  percent: number
+  current_message_id: number | null
+}
+
+export interface TelegramThumbnailStatusResponse {
+  success: boolean
+  data: TelegramThumbnailStatus
+}
+
+export interface TelegramThumbnailWarmupResponse {
+  success: boolean
+  message: string
+  data: TelegramThumbnailStatus & {
+    total_scanned?: number
+    queued?: number
+  }
+}
+
+export function getTelegramThumbnailStatus(): Promise<TelegramThumbnailStatusResponse> {
+  return api.get<TelegramThumbnailStatusResponse>('/telegram/thumbnails/status').then(response => response.data)
+}
+
+export function warmupTelegramThumbnails(): Promise<TelegramThumbnailWarmupResponse> {
+  return api.post<TelegramThumbnailWarmupResponse>('/telegram/thumbnails/warmup').then(response => response.data)
+}
+
 // ==================== 日志管理 API ====================
 
 export interface LogFile {
@@ -432,5 +450,205 @@ export function changePassword(oldPassword: string, newPassword: string): Promis
   return api.post<ChangePasswordResponse>('/auth/password', {
     old_password: oldPassword,
     new_password: newPassword,
+  }).then(r => r.data)
+}
+
+// ==================== 缓存治理与管理 API ====================
+
+import type {
+  CacheStatsData,
+  CacheStatsResponse,
+  CacheCleanRequest,
+  CacheCleanResult,
+  CacheCleanResponse,
+  CachePolicy,
+  CachePolicyResponse,
+} from '@/types/api'
+
+export type {
+  CacheStatsData,
+  CacheStatsResponse,
+  CacheCleanRequest,
+  CacheCleanResult,
+  CacheCleanResponse,
+  CachePolicy,
+  CachePolicyResponse,
+}
+
+export function getCacheStats(): Promise<CacheStatsResponse> {
+  return api.get<CacheStatsResponse>('/cache/stats').then(r => r.data)
+}
+
+export function cleanCache(payload: CacheCleanRequest): Promise<CacheCleanResponse> {
+  return api.post<CacheCleanResponse>('/cache/clean', payload).then(r => r.data)
+}
+
+export function getCachePolicy(): Promise<CachePolicyResponse> {
+  return api.get<CachePolicyResponse>('/cache/policy').then(r => r.data)
+}
+
+export function updateCachePolicy(policy: Partial<CachePolicy>): Promise<CachePolicyResponse> {
+  return api.put<CachePolicyResponse>('/cache/policy', policy).then(r => r.data)
+}
+
+// ==================== Telegram 多 Bot 热插拔与 BotFather 自动创机 API ====================
+
+import type {
+  HotAddBotResult,
+  HotAddBotsResponse,
+  HotRemoveBotResponse,
+  BotFatherAutoCreateRequest,
+  BotFatherAutoCreateResponse,
+  ProtocolAccount,
+  ProtocolAccountsResponse,
+  BatchImportAccountsRequest,
+  BatchImportAccountsResult,
+  BatchImportAccountsResponse,
+  CheckProtocolAccountResponse,
+  ImportTaskStatus,
+  ImportTaskStatusResponse,
+} from '@/types/api'
+
+export type {
+  HotAddBotResult,
+  HotAddBotsResponse,
+  HotRemoveBotResponse,
+  BotFatherAutoCreateRequest,
+  BotFatherAutoCreateResponse,
+  ProtocolAccount,
+  ProtocolAccountsResponse,
+  BatchImportAccountsRequest,
+  BatchImportAccountsResult,
+  BatchImportAccountsResponse,
+  CheckProtocolAccountResponse,
+  ImportTaskStatus,
+  ImportTaskStatusResponse,
+}
+
+export function getProtocolAccounts(): Promise<ProtocolAccountsResponse> {
+  return api.get<ProtocolAccountsResponse>('/telegram/botfather/accounts').then(r => r.data)
+}
+
+export function importProtocolAccounts(
+  data: FormData | BatchImportAccountsRequest
+): Promise<BatchImportAccountsResponse> {
+  if (data instanceof FormData) {
+    return api.post<BatchImportAccountsResponse>('/telegram/botfather/accounts/import', data, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    }).then(r => r.data)
+  }
+  return api.post<BatchImportAccountsResponse>('/telegram/botfather/accounts/import', data, {
+    timeout: 300000,
+  }).then(r => r.data)
+}
+
+export function getImportAccountTaskStatus(taskId: string): Promise<ImportTaskStatusResponse> {
+  return api.get<ImportTaskStatusResponse>(`/telegram/botfather/accounts/import-task/${taskId}`).then(r => r.data)
+}
+
+export function deleteProtocolAccount(accountId: number): Promise<{ success: boolean; message?: string; error?: string }> {
+  return api.delete<{ success: boolean; message?: string; error?: string }>(`/telegram/botfather/accounts/${accountId}`).then(r => r.data)
+}
+
+export function checkProtocolAccount(accountId: number): Promise<CheckProtocolAccountResponse> {
+  return api.post<CheckProtocolAccountResponse>(`/telegram/botfather/accounts/${accountId}/check`, {}, {
+    timeout: 300000,
+  }).then(r => r.data)
+}
+
+export function hotAddBots(tokens: string[] | string): Promise<HotAddBotsResponse> {
+  return api.post<HotAddBotsResponse>('/telegram/bots/hot-add', { tokens }, {
+    timeout: 180000,
+  }).then(r => r.data)
+}
+
+export function hotRemoveBot(index: number): Promise<HotRemoveBotResponse> {
+  return api.delete<HotRemoveBotResponse>(`/telegram/bots/${index}`).then(r => r.data)
+}
+
+export function botfatherAutoCreate(formDataOrJson: FormData | BotFatherAutoCreateRequest): Promise<BotFatherAutoCreateResponse> {
+  if (formDataOrJson instanceof FormData) {
+    return api.post<BotFatherAutoCreateResponse>('/telegram/botfather/auto-create', formDataOrJson, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    }).then(r => r.data)
+  }
+  return api.post<BotFatherAutoCreateResponse>('/telegram/botfather/auto-create', formDataOrJson, {
+    timeout: 300000,
+  }).then(r => r.data)
+}
+
+
+import type {
+  BotFatherTaskStatus,
+  BotFatherTaskStatusResponse,
+  BotClusterLoadTestNode,
+  BotClusterLoadTestResponse,
+  BotReprobeResponse,
+  BotBenchmarkResult,
+  BotClusterBenchmarkResponse,
+  BotSingleBenchmarkResponse,
+  StreamAndDownloadBenchmarkResponse,
+} from '@/types/api'
+
+export type {
+  BotFatherTaskStatus,
+  BotFatherTaskStatusResponse,
+  BotClusterLoadTestNode,
+  BotClusterLoadTestResponse,
+  BotReprobeResponse,
+  BotBenchmarkResult,
+  BotClusterBenchmarkResponse,
+  BotSingleBenchmarkResponse,
+  StreamAndDownloadBenchmarkResponse,
+}
+
+export function getBotFatherTaskStatus(): Promise<BotFatherTaskStatusResponse> {
+  return api.get<BotFatherTaskStatusResponse>('/telegram/botfather/task-status').then(r => r.data)
+}
+
+export function startBotFatherTask(data: FormData | BotFatherAutoCreateRequest): Promise<BotFatherTaskStatusResponse> {
+  if (data instanceof FormData) {
+    return api.post<BotFatherTaskStatusResponse>('/telegram/botfather/tasks/start', data, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    }).then(r => r.data)
+  }
+  return api.post<BotFatherTaskStatusResponse>('/telegram/botfather/tasks/start', data, {
+    timeout: 300000,
+  }).then(r => r.data)
+}
+
+export function stopBotFatherTask(): Promise<BotFatherTaskStatusResponse> {
+  return api.post<BotFatherTaskStatusResponse>('/telegram/botfather/tasks/stop').then(r => r.data)
+}
+
+export function testBotClusterLoad(roundsPerBot: number = 10): Promise<BotClusterLoadTestResponse> {
+  return api.post<BotClusterLoadTestResponse>('/telegram/bots/test-load', { rounds_per_bot: roundsPerBot }).then(r => r.data)
+}
+
+export function reprobeBots(): Promise<BotReprobeResponse> {
+  return api.post<BotReprobeResponse>('/telegram/bots/reprobe').then(r => r.data)
+}
+
+
+
+
+export function benchmarkBot(index: number, testDownload: boolean = true): Promise<BotSingleBenchmarkResponse> {
+  return api.post<BotSingleBenchmarkResponse>(`/telegram/bots/${index}/benchmark`, { test_download: testDownload }).then(r => r.data)
+}
+
+export function benchmarkAllBots(testDownload: boolean = true): Promise<BotClusterBenchmarkResponse> {
+  return api.post<BotClusterBenchmarkResponse>('/telegram/bots/benchmark-all', { test_download: testDownload }).then(r => r.data)
+}
+
+export function benchmarkStreamAndDownload(params: {
+  bot_index?: number | null
+  sample_size_mb?: number
+  message_id?: number | null
+} = {}): Promise<StreamAndDownloadBenchmarkResponse> {
+  return api.post<StreamAndDownloadBenchmarkResponse>('/telegram/benchmark/stream-and-download', params, {
+    timeout: 300000,
   }).then(r => r.data)
 }

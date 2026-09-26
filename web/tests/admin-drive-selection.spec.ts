@@ -71,6 +71,17 @@ async function mockAdminDrive(page: Page) {
     })
   })
 
+  await page.route('**/api/telegram/thumbnails/status', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: { running: false, total: 3, cached: 3, pending: 0, percent: 100, current_message_id: null },
+      }),
+    })
+  })
+
   await page.route('**/api/telegram/browse**', async route => {
     const url = new URL(route.request().url())
     const pageNumber = Number(url.searchParams.get('page') || '1')
@@ -151,4 +162,80 @@ test('multi-select controls remain usable at compact widths', async ({ page }) =
     viewport: document.documentElement.scrollWidth > window.innerWidth + 1,
   }))
   expect(overflow).toEqual({ horizontal: false, viewport: false })
+})
+
+test('video preview dialog adapts to viewport and does not overflow screen', async ({ page }) => {
+  await mockAdminDrive(page)
+  // Test standard desktop viewport
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto('/drive')
+
+  const videoRow = page.getByRole('row', { name: /海边视频\.mp4/ })
+  await videoRow.getByRole('button', { name: '预览' }).click()
+
+  const dialog = page.locator('.glass-video-dialog')
+  await expect(dialog).toBeVisible()
+
+  await expect(page.locator('.video-header-title')).toContainText('海边视频.mp4')
+
+  let box = await dialog.boundingBox()
+  expect(box).not.toBeNull()
+  expect(box!.height).toBeLessThanOrEqual(800)
+  expect(box!.y + box!.height).toBeLessThanOrEqual(800)
+
+  await expect(page.getByRole('button', { name: '全屏播放' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '下载原视频' })).toBeVisible()
+
+  // Test web fullscreen mode
+  await page.locator('.video-header-actions .btn-web-fullscreen').click()
+  await expect(dialog).toHaveClass(/is-web-fullscreen/)
+
+  // Test ultrawide/high-res viewport (3840x1920)
+  await page.setViewportSize({ width: 3840, height: 1920 })
+  box = await dialog.boundingBox()
+  expect(box).not.toBeNull()
+  expect(box!.height).toBeLessThanOrEqual(1920)
+  expect(box!.y + box!.height).toBeLessThanOrEqual(1920)
+
+  // Test mobile/tablet viewport (768x1024)
+  await page.setViewportSize({ width: 768, height: 1024 })
+  box = await dialog.boundingBox()
+  expect(box).not.toBeNull()
+  expect(box!.height).toBeLessThanOrEqual(1024)
+  expect(box!.y + box!.height).toBeLessThanOrEqual(1024)
+
+  // Close dialog via close button
+  await page.locator('.video-header-actions .btn-close').click()
+  await expect(dialog).not.toBeVisible()
+})
+
+
+test('supports stream link copy, M3U export, shift selection, and view preference persistence', async ({ page }) => {
+  await mockAdminDrive(page)
+  await page.goto('/drive')
+
+  // Test Shift range selection: click row 1 checkbox, then Shift+click row 3 checkbox
+  const rows = page.locator('.drive-table .el-table__body-wrapper tbody tr')
+  await expect(rows).toHaveCount(3)
+
+  await rows.nth(0).locator('.el-checkbox').click()
+  await expect(page.getByText('已选 1 项')).toBeVisible()
+
+  await rows.nth(2).locator('.el-checkbox').click({ modifiers: ['Shift'] })
+  await expect(page.getByText('已选 3 项')).toBeVisible()
+
+  // Verify batch copy & M3U export buttons are enabled
+  await expect(page.getByRole('button', { name: /复制直链\s*（2）/ })).toBeEnabled()
+  await expect(page.getByRole('button', { name: /导出播放列表\s*（2）/ })).toBeEnabled()
+
+  // Trigger M3U playlist export
+  await page.getByRole('button', { name: /导出播放列表\s*（2）/ }).click()
+  await expect(page.getByText(/已导出包含 2 项的 M3U 播放列表/)).toBeVisible()
+
+  // Switch to grid mode and verify persistence across reload
+  await page.locator('.el-radio-button').filter({ has: page.locator('.el-icon') }).nth(1).click()
+  await expect(page.locator('.grid-view')).toBeVisible()
+
+  await page.reload()
+  await expect(page.locator('.grid-view')).toBeVisible()
 })

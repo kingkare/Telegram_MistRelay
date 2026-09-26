@@ -1,3 +1,4 @@
+import tests  # noqa: F401
 import importlib.util
 import sys
 import types
@@ -74,10 +75,10 @@ web = sys.modules["aiohttp.web"]
 
 
 class ServerSecurityTests(unittest.IsolatedAsyncioTestCase):
-    def test_same_origin_and_explicit_tauri_origins_only(self):
+    def test_same_origin_and_dev_origins_only(self):
         request = SimpleNamespace(host="files.example.com")
         self.assertTrue(server._is_allowed_origin(request, "https://files.example.com"))
-        self.assertTrue(server._is_allowed_origin(request, "tauri://localhost"))
+        self.assertTrue(server._is_allowed_origin(request, "http://localhost:5173"))
         self.assertFalse(server._is_allowed_origin(request, "https://attacker.example"))
 
     def test_websocket_bearer_is_scoped_to_subprotocol(self):

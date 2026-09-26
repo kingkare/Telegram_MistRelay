@@ -1,12 +1,58 @@
 <template>
-  <div class="settings-page">
-    <el-tabs v-model="activeTab" type="border-card">
-      <el-tab-pane label="客户端连接" name="client">
-        <el-card shadow="hover">
-          <template #header>
-            <div class="card-header">
-              <span>客户端连接配置</span>
-              <div class="card-actions">
+  <div class="settings-page animate-fade-in">
+    <!-- 顶部品牌横幅与连接状态 -->
+    <div class="settings-header-card glass-card">
+      <div class="settings-header-main">
+        <div class="settings-title-group">
+          <div class="settings-title-row">
+            <h2 class="settings-title text-gradient-sakura">系统设置与运维中心</h2>
+            <span class="settings-badge">Config & DevOps</span>
+          </div>
+          <p class="settings-subtitle">
+            核心服务参数动态配置、Aria2 RPC 调优、直链管理与 Docker 容器全生命周期治理。
+          </p>
+        </div>
+
+        <div class="settings-header-actions">
+          <div class="connection-pill-card">
+            <span class="connection-dot" :class="connectionStatusDotClass"></span>
+            <div class="connection-pill-info">
+              <span class="connection-pill-label">后端连接状态</span>
+              <span class="connection-pill-val">{{ connectionStatusLabel }} ({{ effectiveServerUrlLabel }})</span>
+            </div>
+          </div>
+
+          <el-button
+            class="header-btn"
+            :icon="Refresh"
+            @click="reloadCurrentTab"
+            size="default"
+          >
+            重新载入
+          </el-button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 现代 Segmented 毛玻璃设置标签页 -->
+    <div class="settings-tabs-wrapper glass-card">
+      <el-tabs v-model="activeTab" class="modern-settings-tabs" type="border-card">
+        <!-- 1. 客户端连接 -->
+        <el-tab-pane name="client">
+          <template #label>
+            <span class="tab-label-item">
+              <el-icon><Link /></el-icon>
+              <span>客户端连接</span>
+            </span>
+          </template>
+
+          <div class="tab-pane-content">
+            <div class="pane-header-row">
+              <div class="pane-title-group">
+                <h3 class="pane-title">客户端连接配置</h3>
+                <p class="pane-desc">管理 Web 前端与 MistRelay 后端服务的通信端点及同源/远程策略</p>
+              </div>
+              <div class="pane-actions">
                 <el-button @click="testConnection" :loading="testingConnection">
                   测试连接
                 </el-button>
@@ -15,539 +61,961 @@
                 </el-button>
               </div>
             </div>
+
+            <el-alert
+              title="浏览器端可选择同源访问，也可以指定远程服务器。"
+              type="info"
+              :closable="false"
+              class="modern-alert mb-6"
+            />
+
+            <el-form label-width="180px" class="modern-form">
+              <el-form-item label="客户端类型">
+                <el-tag type="info" class="font-medium">浏览器客户端</el-tag>
+              </el-form-item>
+              <el-form-item label="服务器地址">
+                <el-input
+                  v-model="clientServerUrl"
+                  placeholder="127.0.0.1:8080 或 https://mistrelay.example.com"
+                  clearable
+                />
+                <div class="el-form-item__help">
+                  留空时继续使用当前同源服务。
+                </div>
+              </el-form-item>
+              <el-form-item label="当前生效地址">
+                <el-input :model-value="effectiveServerUrlLabel" readonly class="readonly-input" />
+              </el-form-item>
+              <el-form-item label="连接状态">
+                <div class="connection-status">
+                  <el-tag :type="connectionStatusTagType" effect="light">
+                    {{ connectionStatusLabel }}
+                  </el-tag>
+                  <span v-if="connectionStatusText" class="connection-status-text">
+                    {{ connectionStatusText }}
+                  </span>
+                </div>
+              </el-form-item>
+            </el-form>
+          </div>
+        </el-tab-pane>
+
+        <!-- 2. Telegram配置 -->
+        <el-tab-pane name="telegram">
+          <template #label>
+            <span class="tab-label-item">
+              <el-icon><Promotion /></el-icon>
+              <span>Telegram配置</span>
+            </span>
           </template>
 
-          <el-alert
-            title="浏览器端可选择同源访问，也可以指定远程服务器。"
-            type="info"
-            :closable="false"
-            style="margin-bottom: 20px"
-          />
-
-          <el-form label-width="180px">
-            <el-form-item label="客户端类型">
-              <el-tag type="info">浏览器客户端</el-tag>
-            </el-form-item>
-            <el-form-item label="服务器地址">
-              <el-input
-                v-model="clientServerUrl"
-                placeholder="127.0.0.1:8080 或 https://mistrelay.example.com"
-                clearable
-              />
-              <div class="el-form-item__help">
-                留空时继续使用当前同源服务。
+          <div class="tab-pane-content">
+            <div class="pane-header-row">
+              <div class="pane-title-group">
+                <h3 class="pane-title">Telegram Bot 配置</h3>
+                <p class="pane-desc">配置 Telegram 认证凭证与频道自动转存参数</p>
               </div>
-            </el-form-item>
-            <el-form-item label="当前生效地址">
-              <el-input :model-value="effectiveServerUrlLabel" readonly />
-            </el-form-item>
-            <el-form-item label="连接状态">
-              <div class="connection-status">
-                <el-tag :type="connectionStatusTagType">
-                  {{ connectionStatusLabel }}
-                </el-tag>
-                <span v-if="connectionStatusText" class="connection-status-text">
-                  {{ connectionStatusText }}
+              <div class="pane-actions">
+                <el-button type="primary" @click="saveConfig('telegram')" :loading="saving">
+                  保存配置
+                </el-button>
+              </div>
+            </div>
+
+            <el-alert
+              type="warning"
+              :closable="false"
+              class="modern-alert mb-6"
+            >
+              <template #title>
+                <div style="font-size: 13px; line-height: 1.6;">
+                  <strong>注意：</strong>修改 API ID、API Hash、Bot Token 或管理员ID 后需要重启服务才能生效。
+                  <br />其他配置（如上传到 Telegram）保存后会在下次使用时自动从数据库读取最新配置。
+                </div>
+              </template>
+            </el-alert>
+
+            <el-form :model="configs.telegram" label-width="180px" :rules="rules" class="modern-form">
+              <el-form-item label="API ID" prop="API_ID">
+                <el-input-number
+                  v-model="configs.telegram.API_ID"
+                  :min="0"
+                  style="width: 100%"
+                  :disabled="isOfflineOnly('API_ID')"
+                />
+              </el-form-item>
+              <el-form-item label="API Hash" prop="API_HASH">
+                <el-input
+                  v-model="configs.telegram.API_HASH"
+                  type="password"
+                  show-password
+                  :disabled="isOfflineOnly('API_HASH')"
+                  :placeholder="secretStatus('API_HASH')"
+                />
+              </el-form-item>
+              <el-form-item label="Bot Token" prop="BOT_TOKEN">
+                <el-input
+                  v-model="configs.telegram.BOT_TOKEN"
+                  type="password"
+                  show-password
+                  :disabled="isOfflineOnly('BOT_TOKEN')"
+                  :placeholder="secretStatus('BOT_TOKEN')"
+                />
+              </el-form-item>
+              <el-form-item label="管理员ID" prop="ADMIN_ID">
+                <el-input-number
+                  v-model="configs.telegram.ADMIN_ID"
+                  :min="0"
+                  style="width: 100%"
+                  :disabled="isOfflineOnly('ADMIN_ID')"
+                />
+              </el-form-item>
+              <el-form-item label="上传到Telegram">
+                <el-switch v-model="configs.telegram.UP_TELEGRAM" />
+              </el-form-item>
+            </el-form>
+          </div>
+        </el-tab-pane>
+
+        <!-- 3. 下载配置 -->
+        <el-tab-pane name="download">
+          <template #label>
+            <span class="tab-label-item">
+              <el-icon><Download /></el-icon>
+              <span>下载配置</span>
+            </span>
+          </template>
+
+          <div class="tab-pane-content">
+            <div class="pane-header-row">
+              <div class="pane-title-group">
+                <h3 class="pane-title">本地存储与下载策略</h3>
+                <p class="pane-desc">配置下载保存路径、网络代理及文件生命周期清理策略</p>
+              </div>
+              <div class="pane-actions">
+                <el-button type="primary" @click="saveConfig('download')" :loading="saving">
+                  保存配置
+                </el-button>
+              </div>
+            </div>
+
+            <el-alert
+              type="info"
+              :closable="false"
+              class="modern-alert mb-6"
+            >
+              <template #title>
+                <div style="font-size: 13px">
+                  <strong>提示：</strong>下载配置保存后会立即生效，下次下载时会自动从数据库读取最新配置，无需重启服务。
+                </div>
+              </template>
+            </el-alert>
+
+            <el-form :model="configs.download" label-width="200px" class="modern-form">
+              <el-form-item label="保存路径">
+                <el-input v-model="configs.download.SAVE_PATH" />
+              </el-form-item>
+              <el-form-item label="自动清理下载文件">
+                <el-switch v-model="configs.download.DOWNLOAD_CLEANUP_ENABLED" />
+                <div class="el-form-item__help">
+                  启用后，后台会定期清理保存路径中超过保留时间的本地文件，并自动跳过正在下载或上传的文件
+                </div>
+              </el-form-item>
+              <el-form-item
+                label="下载文件保留时间（小时）"
+                v-if="configs.download.DOWNLOAD_CLEANUP_ENABLED"
+              >
+                <el-input-number
+                  v-model="configs.download.DOWNLOAD_RETENTION_HOURS"
+                  :min="1"
+                  :max="8760"
+                  style="width: 100%"
+                />
+                <div class="el-form-item__help">
+                  默认保留 24 小时；清理任务每小时检查一次
+                </div>
+              </el-form-item>
+              <el-form-item label="代理IP">
+                <el-input
+                  v-model="configs.download.PROXY_IP"
+                  placeholder="留空则不使用代理"
+                  :disabled="isOfflineOnly('PROXY_IP')"
+                />
+              </el-form-item>
+              <el-form-item label="代理端口">
+                <el-input
+                  v-model="configs.download.PROXY_PORT"
+                  placeholder="留空则不使用代理"
+                  :disabled="isOfflineOnly('PROXY_PORT')"
+                />
+              </el-form-item>
+              <el-divider />
+              <el-form-item label="跳过小文件">
+                <el-switch v-model="configs.download.SKIP_SMALL_FILES" />
+                <div class="el-form-item__help">
+                  启用后，小于指定大小的媒体文件将不会被下载
+                </div>
+              </el-form-item>
+              <el-form-item
+                label="最小文件大小（MB）"
+                v-if="configs.download.SKIP_SMALL_FILES"
+              >
+                <el-input-number
+                  v-model="configs.download.MIN_FILE_SIZE_MB"
+                  :min="1"
+                  :max="10000"
+                  style="width: 100%"
+                />
+                <div class="el-form-item__help">
+                  小于此大小的文件将被跳过下载（默认：100MB）
+                </div>
+              </el-form-item>
+            </el-form>
+          </div>
+        </el-tab-pane>
+
+        <!-- 4. Aria2配置 -->
+        <el-tab-pane name="aria2">
+          <template #label>
+            <span class="tab-label-item">
+              <el-icon><Cpu /></el-icon>
+              <span>Aria2配置</span>
+            </span>
+          </template>
+
+          <div class="tab-pane-content">
+            <div class="pane-header-row">
+              <div class="pane-title-group">
+                <h3 class="pane-title">Aria2 RPC 引擎配置</h3>
+                <p class="pane-desc">配置 Aria2 RPC 秘钥与端点连接地址</p>
+              </div>
+              <div class="pane-actions">
+                <el-button type="primary" @click="saveConfig('aria2')" :loading="saving">
+                  保存配置
+                </el-button>
+              </div>
+            </div>
+
+            <el-alert
+              type="info"
+              :closable="false"
+              class="modern-alert mb-6"
+            >
+              <template #title>
+                <div style="font-size: 13px">
+                  <strong>提示：</strong>Aria2配置保存后会立即生效，下次连接时会自动从数据库读取最新配置，无需重启服务。
+                </div>
+              </template>
+            </el-alert>
+
+            <el-form :model="configs.aria2" label-width="180px" class="modern-form">
+              <el-form-item label="RPC密钥">
+                <el-input
+                  v-model="configs.aria2.RPC_SECRET"
+                  type="password"
+                  show-password
+                  :disabled="isOfflineOnly('RPC_SECRET')"
+                  :placeholder="secretStatus('RPC_SECRET')"
+                />
+              </el-form-item>
+              <el-form-item label="RPC URL">
+                <el-input v-model="configs.aria2.RPC_URL" :disabled="isOfflineOnly('RPC_URL')" />
+              </el-form-item>
+            </el-form>
+          </div>
+        </el-tab-pane>
+
+        <!-- 5. 直链功能 -->
+        <el-tab-pane name="stream">
+          <template #label>
+            <span class="tab-label-item">
+              <el-icon><VideoPlay /></el-icon>
+              <span>直链功能</span>
+            </span>
+          </template>
+
+          <div class="tab-pane-content">
+            <div class="pane-header-row">
+              <div class="pane-title-group">
+                <h3 class="pane-title">媒体直链与 WebStreamer 服务</h3>
+                <p class="pane-desc">配置 Telegram 媒体流媒体代理、SSL 端口与多机器人分流池</p>
+              </div>
+              <div class="pane-actions">
+                <el-button type="primary" @click="saveConfig('stream')" :loading="saving">
+                  保存配置
+                </el-button>
+              </div>
+            </div>
+
+            <el-form :model="configs.stream" label-width="180px" class="modern-form">
+              <el-form-item label="启用直链功能">
+                <el-switch v-model="configs.stream.ENABLE_STREAM" />
+              </el-form-item>
+              <el-form-item label="日志频道ID">
+                <el-input v-model="configs.stream.BIN_CHANNEL" :disabled="isOfflineOnly('BIN_CHANNEL')" />
+              </el-form-item>
+              <el-form-item label="Web服务器端口">
+                <el-input-number v-model="configs.stream.STREAM_PORT" :min="1" :max="65535" style="width: 100%" />
+              </el-form-item>
+              <el-form-item label="绑定地址">
+                <el-input v-model="configs.stream.STREAM_BIND_ADDRESS" />
+              </el-form-item>
+              <el-form-item label="哈希长度">
+                <el-input-number v-model="configs.stream.STREAM_HASH_LENGTH" :min="5" :max="64" style="width: 100%" />
+              </el-form-item>
+              <el-form-item label="使用SSL">
+                <el-switch v-model="configs.stream.STREAM_HAS_SSL" />
+              </el-form-item>
+              <el-form-item label="隐藏端口">
+                <el-switch v-model="configs.stream.STREAM_NO_PORT" />
+              </el-form-item>
+              <el-form-item label="完全限定域名">
+                <el-input v-model="configs.stream.STREAM_FQDN" />
+              </el-form-item>
+              <el-form-item label="保持连接活跃">
+                <el-switch v-model="configs.stream.STREAM_KEEP_ALIVE" />
+              </el-form-item>
+              <el-form-item label="Ping间隔（秒）">
+                <el-input-number v-model="configs.stream.STREAM_PING_INTERVAL" :min="60" style="width: 100%" />
+              </el-form-item>
+              <el-form-item label="使用会话文件">
+                <el-switch v-model="configs.stream.STREAM_USE_SESSION_FILE" :disabled="isOfflineOnly('STREAM_USE_SESSION_FILE')" />
+              </el-form-item>
+              <el-form-item label="允许使用直链的用户">
+                <el-input
+                  v-model="configs.stream.STREAM_ALLOWED_USERS"
+                  placeholder="数字用户 ID，逗号分隔；留空则拒绝所有人"
+                  :disabled="isOfflineOnly('STREAM_ALLOWED_USERS')"
+                />
+              </el-form-item>
+              <el-form-item label="自动下载兼容开关">
+                <el-switch v-model="configs.stream.STREAM_AUTO_DOWNLOAD" />
+                <div class="el-form-item__help">
+                  TG网盘媒体不会本地下载；此开关仅保留给旧直链流程。
+                </div>
+              </el-form-item>
+              <el-form-item label="发送直链信息给用户">
+                <el-switch v-model="configs.stream.SEND_STREAM_LINK" />
+              </el-form-item>
+              <el-form-item label="多机器人Token列表">
+                <el-input
+                  v-model="multiBotTokensText"
+                  type="textarea"
+                  :rows="4"
+                  placeholder="新增 Token，每行一个或逗号分隔"
+                />
+                <div class="el-form-item__help">
+                  {{ secretStatus('MULTI_BOT_TOKENS') }}
+                </div>
+              </el-form-item>
+            </el-form>
+
+            <!-- 多 Bot 负载均衡与免加频道状态诊断卡片 -->
+            <div class="bot-cluster-card glass-card mt-6">
+              <div class="cluster-card-header">
+                <div class="flex items-center gap-2">
+                  <div class="cluster-icon-pill">
+                    <el-icon><Cpu /></el-icon>
+                  </div>
+                  <div>
+                    <h4 class="cluster-title">多 Bot 集群与免加频道状态诊断</h4>
+                    <p class="cluster-desc">
+                      共 {{ serverStatus?.bot_details?.length || 1 }} 个节点 ·
+                      流播分流就绪 {{ serverStatus?.channel_info?.accessible_bots || 1 }} 个 ·
+                      上传写权限 {{ serverStatus?.channel_info?.write_bots || 1 }} 个
+                    </p>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <el-button size="small" type="primary" plain @click="openHotAddDialog">
+                    + 快速热添加 Token
+                  </el-button>
+                  <el-button size="small" type="success" @click="openBotFatherDialog">
+                    ⚡ API协议号自动创机
+                  </el-button>
+                  <el-button size="small" :icon="Refresh" circle @click="fetchServerStatus" :loading="loadingServerStatus" title="刷新状态" />
+                </div>
+              </div>
+
+              <!-- 提示横幅 -->
+              <div v-if="serverStatus?.channel_info?.no_join_balancing_active" class="cluster-banner banner-success">
+                <span class="banner-icon">🎉</span>
+                <span class="banner-text">
+                  频道已检测到公开标识符（<strong>@{{ serverStatus.channel_info.public_handle }}</strong>），所有 Worker 机器人无需人工加入频道，已自动激活免加频道负载均衡与多 DC 满速分流！
                 </span>
               </div>
-            </el-form-item>
-          </el-form>
-        </el-card>
-      </el-tab-pane>
+              <div v-else-if="serverStatus?.channel_info?.channel_type === 'private' && hasUnreachableBots" class="cluster-banner banner-warning">
+                <span class="banner-icon">💡</span>
+                <span class="banner-text">
+                  检测到私密频道存在未激活从节点。建议在 Telegram 频道设置中配置一个公开用户名（如 @xxx）或绑定公开讨论组，所有从机器人将全自动免加频道就绪；亦可点击下方【一键加管】快速授权。
+                </span>
+              </div>
 
-      <!-- Telegram配置 -->
-      <el-tab-pane label="Telegram配置" name="telegram">
-        <el-card shadow="hover">
-          <template #header>
-            <div class="card-header">
-              <span>Telegram Bot配置</span>
-              <el-button type="primary" @click="saveConfig('telegram')" :loading="saving">
-                保存配置
-              </el-button>
+              <!-- 节点网格 -->
+              <div v-if="serverStatus?.bot_details && serverStatus.bot_details.length > 0" class="bot-node-grid">
+                <div v-for="bot in serverStatus.bot_details" :key="bot.index" class="bot-node-card">
+                  <div class="node-card-top">
+                    <div class="flex items-center gap-2 overflow-hidden">
+                      <span class="node-name font-mono font-semibold">{{ bot.name }}</span>
+                      <span class="node-username text-xs text-slate-500 truncate" :title="bot.username">{{ bot.username }}</span>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                      <span :class="['node-badge', getBotModeBadge(bot).cls]">
+                        {{ getBotModeBadge(bot).label }}
+                      </span>
+                      <el-button
+                        v-if="bot.index !== 0"
+                        size="small"
+                        type="danger"
+                        link
+                        :icon="Delete"
+                        title="下线并移除该节点"
+                        @click="handleRemoveBot(bot)"
+                      />
+                    </div>
+                  </div>
+
+                  <div class="node-caps-row">
+                    <span class="cap-tag" :class="bot.can_read ? 'cap-ok' : 'cap-no'">
+                      {{ bot.can_read ? '✓ 流播分流' : '✗ 无法分流' }}
+                    </span>
+                    <span class="cap-tag" :class="bot.can_write ? 'cap-ok' : 'cap-readonly'">
+                      {{ bot.can_write ? '✓ 上传/删帖' : '只读分流' }}
+                    </span>
+                    <span class="cap-load text-xs text-slate-500 ml-auto">
+                      负载: {{ bot.active_requests }}
+                    </span>
+                  </div>
+
+                  <div v-if="!bot.can_read && bot.invite_url" class="node-action-row mt-2">
+                    <el-button
+                      size="small"
+                      type="warning"
+                      plain
+                      class="w-full"
+                      tag="a"
+                      :href="bot.invite_url"
+                      target="_blank"
+                    >
+                      一键加管授权
+                    </el-button>
+                  </div>
+                </div>
+              </div>
             </div>
+          </div>
+        </el-tab-pane>
+
+        <!-- 6. 容器管理 (兼容 admin-container-status.spec.ts) -->
+        <el-tab-pane name="container">
+          <template #label>
+            <span class="tab-label-item">
+              <el-icon><Box /></el-icon>
+              <span>容器管理</span>
+            </span>
           </template>
-          <el-alert
-            type="warning"
-            :closable="false"
-            style="margin-bottom: 20px"
-          >
-            <template #title>
-              <div style="font-size: 13px">
-                <strong>注意：</strong>修改 API ID、API Hash、Bot Token 或管理员ID 后需要重启服务才能生效。
-                <br />其他配置（如上传到Telegram）保存后会在下次使用时自动从数据库读取最新配置。
-              </div>
-            </template>
-          </el-alert>
-          <el-form :model="configs.telegram" label-width="180px" :rules="rules">
-            <el-form-item label="API ID" prop="API_ID">
-              <el-input-number v-model="configs.telegram.API_ID" :min="0" style="width: 100%" :disabled="isOfflineOnly('API_ID')" />
-            </el-form-item>
-            <el-form-item label="API Hash" prop="API_HASH">
-              <el-input v-model="configs.telegram.API_HASH" type="password" show-password :disabled="isOfflineOnly('API_HASH')" :placeholder="secretStatus('API_HASH')" />
-            </el-form-item>
-            <el-form-item label="Bot Token" prop="BOT_TOKEN">
-              <el-input v-model="configs.telegram.BOT_TOKEN" type="password" show-password :disabled="isOfflineOnly('BOT_TOKEN')" :placeholder="secretStatus('BOT_TOKEN')" />
-            </el-form-item>
-            <el-form-item label="管理员ID" prop="ADMIN_ID">
-              <el-input-number v-model="configs.telegram.ADMIN_ID" :min="0" style="width: 100%" :disabled="isOfflineOnly('ADMIN_ID')" />
-            </el-form-item>
-            <el-form-item label="上传到Telegram">
-              <el-switch v-model="configs.telegram.UP_TELEGRAM" />
-            </el-form-item>
-          </el-form>
-        </el-card>
-      </el-tab-pane>
 
-      <!-- 下载配置 -->
-      <el-tab-pane label="下载配置" name="download">
-        <el-card shadow="hover">
-          <template #header>
-            <div class="card-header">
-              <span>下载设置</span>
-              <el-button type="primary" @click="saveConfig('download')" :loading="saving">
-                保存配置
-              </el-button>
-            </div>
-          </template>
-          <el-alert
-            type="info"
-            :closable="false"
-            style="margin-bottom: 20px"
-          >
-            <template #title>
-              <div style="font-size: 13px">
-                <strong>提示：</strong>下载配置保存后会立即生效，下次下载时会自动从数据库读取最新配置，无需重启服务。
-              </div>
-            </template>
-          </el-alert>
-          <el-form :model="configs.download" label-width="180px">
-            <el-form-item label="保存路径">
-              <el-input v-model="configs.download.SAVE_PATH" />
-            </el-form-item>
-            <el-form-item label="自动清理下载文件">
-              <el-switch v-model="configs.download.DOWNLOAD_CLEANUP_ENABLED" />
-              <div class="el-form-item__help">
-                启用后，后台会定期清理保存路径中超过保留时间的本地文件，并跳过正在下载或上传的文件
-              </div>
-            </el-form-item>
-            <el-form-item
-              label="下载文件保留时间（小时）"
-              v-if="configs.download.DOWNLOAD_CLEANUP_ENABLED"
-            >
-              <el-input-number
-                v-model="configs.download.DOWNLOAD_RETENTION_HOURS"
-                :min="1"
-                :max="8760"
-                style="width: 100%"
-              />
-              <div class="el-form-item__help">
-                默认保留 24 小时；清理任务每小时检查一次
-              </div>
-            </el-form-item>
-            <el-form-item label="代理IP">
-              <el-input v-model="configs.download.PROXY_IP" placeholder="留空则不使用代理" :disabled="isOfflineOnly('PROXY_IP')" />
-            </el-form-item>
-            <el-form-item label="代理端口">
-              <el-input v-model="configs.download.PROXY_PORT" placeholder="留空则不使用代理" :disabled="isOfflineOnly('PROXY_PORT')" />
-            </el-form-item>
-            <el-divider />
-            <el-form-item label="跳过小文件">
-              <el-switch v-model="configs.download.SKIP_SMALL_FILES" />
-              <div class="el-form-item__help">
-                启用后，小于指定大小的媒体文件将不会被下载
-              </div>
-            </el-form-item>
-            <el-form-item
-              label="最小文件大小（MB）"
-              v-if="configs.download.SKIP_SMALL_FILES"
-            >
-              <el-input-number
-                v-model="configs.download.MIN_FILE_SIZE_MB"
-                :min="1"
-                :max="10000"
-                style="width: 100%"
-              />
-              <div class="el-form-item__help">
-                小于此大小的文件将被跳过下载（默认：100MB）
-              </div>
-            </el-form-item>
-          </el-form>
-        </el-card>
-      </el-tab-pane>
+          <div class="tab-pane-content">
+            <el-row :gutter="20">
+              <!-- 左侧: 容器状态 -->
+              <el-col :xs="24" :lg="12">
+                <el-card shadow="hover" class="container-info-card mb-6">
+                  <template #header>
+                    <div class="card-header">
+                      <div class="flex items-center gap-2">
+                        <el-icon class="text-primary"><Box /></el-icon>
+                        <span class="font-bold">Docker容器状态</span>
+                      </div>
+                      <el-button
+                        :icon="Refresh"
+                        circle
+                        size="small"
+                        @click="fetchDockerStatus"
+                        :loading="loadingStatus"
+                        title="刷新容器状态"
+                      />
+                    </div>
+                  </template>
 
-      <!-- Aria2配置 -->
-      <el-tab-pane label="Aria2配置" name="aria2">
-        <el-card shadow="hover">
-          <template #header>
-            <div class="card-header">
-              <span>Aria2 RPC配置</span>
-              <el-button type="primary" @click="saveConfig('aria2')" :loading="saving">
-                保存配置
-              </el-button>
-            </div>
-          </template>
-          <el-alert
-            type="info"
-            :closable="false"
-            style="margin-bottom: 20px"
-          >
-            <template #title>
-              <div style="font-size: 13px">
-                <strong>提示：</strong>Aria2配置保存后会立即生效，下次连接时会自动从数据库读取最新配置，无需重启服务。
-              </div>
-            </template>
-          </el-alert>
-          <el-form :model="configs.aria2" label-width="180px">
-            <el-form-item label="RPC密钥">
-              <el-input v-model="configs.aria2.RPC_SECRET" type="password" show-password :disabled="isOfflineOnly('RPC_SECRET')" :placeholder="secretStatus('RPC_SECRET')" />
-            </el-form-item>
-            <el-form-item label="RPC URL">
-              <el-input v-model="configs.aria2.RPC_URL" :disabled="isOfflineOnly('RPC_URL')" />
-            </el-form-item>
-          </el-form>
-        </el-card>
-      </el-tab-pane>
+                  <el-skeleton v-if="loadingStatus" :rows="6" animated />
 
-      <!-- 直链功能配置 -->
-      <el-tab-pane label="直链功能" name="stream">
-        <el-card shadow="hover">
-          <template #header>
-            <div class="card-header">
-              <span>直链功能配置</span>
-              <el-button type="primary" @click="saveConfig('stream')" :loading="saving">
-                保存配置
-              </el-button>
-            </div>
-          </template>
-          <el-form :model="configs.stream" label-width="180px">
-            <el-form-item label="启用直链功能">
-              <el-switch v-model="configs.stream.ENABLE_STREAM" />
-            </el-form-item>
-            <el-form-item label="日志频道ID">
-              <el-input v-model="configs.stream.BIN_CHANNEL" :disabled="isOfflineOnly('BIN_CHANNEL')" />
-            </el-form-item>
-            <el-form-item label="Web服务器端口">
-              <el-input-number v-model="configs.stream.STREAM_PORT" :min="1" :max="65535" style="width: 100%" />
-            </el-form-item>
-            <el-form-item label="绑定地址">
-              <el-input v-model="configs.stream.STREAM_BIND_ADDRESS" />
-            </el-form-item>
-            <el-form-item label="哈希长度">
-              <el-input-number v-model="configs.stream.STREAM_HASH_LENGTH" :min="5" :max="64" style="width: 100%" />
-            </el-form-item>
-            <el-form-item label="使用SSL">
-              <el-switch v-model="configs.stream.STREAM_HAS_SSL" />
-            </el-form-item>
-            <el-form-item label="隐藏端口">
-              <el-switch v-model="configs.stream.STREAM_NO_PORT" />
-            </el-form-item>
-            <el-form-item label="完全限定域名">
-              <el-input v-model="configs.stream.STREAM_FQDN" />
-            </el-form-item>
-            <el-form-item label="保持连接活跃">
-              <el-switch v-model="configs.stream.STREAM_KEEP_ALIVE" />
-            </el-form-item>
-            <el-form-item label="Ping间隔（秒）">
-              <el-input-number v-model="configs.stream.STREAM_PING_INTERVAL" :min="60" style="width: 100%" />
-            </el-form-item>
-            <el-form-item label="使用会话文件">
-              <el-switch v-model="configs.stream.STREAM_USE_SESSION_FILE" :disabled="isOfflineOnly('STREAM_USE_SESSION_FILE')" />
-            </el-form-item>
-            <el-form-item label="允许使用直链的用户">
-              <el-input v-model="configs.stream.STREAM_ALLOWED_USERS" placeholder="数字用户 ID，逗号分隔；留空则拒绝所有人" :disabled="isOfflineOnly('STREAM_ALLOWED_USERS')" />
-            </el-form-item>
-            <el-form-item label="自动下载兼容开关">
-              <el-switch v-model="configs.stream.STREAM_AUTO_DOWNLOAD" />
-              <div class="el-form-item__help">
-                TG网盘媒体不会本地下载；此开关仅保留给旧直链流程。
-              </div>
-            </el-form-item>
-            <el-form-item label="发送直链信息给用户">
-              <el-switch v-model="configs.stream.SEND_STREAM_LINK" />
-            </el-form-item>
-            <el-form-item label="多机器人Token列表">
-              <el-input
-                v-model="multiBotTokensText"
-                type="textarea"
-                :rows="4"
-                placeholder="新增 Token，每行一个或逗号分隔"
-              />
-              <div class="el-form-item__help">
-                {{ secretStatus('MULTI_BOT_TOKENS') }}
-              </div>
-            </el-form-item>
-          </el-form>
-        </el-card>
-      </el-tab-pane>
+                  <div v-else-if="dockerStatus" class="container-status-details">
+                    <el-descriptions :column="1" border size="small" class="modern-descriptions">
+                      <el-descriptions-item label="运行环境">
+                        <el-tag :type="dockerStatus.in_docker ? 'success' : 'info'" size="small">
+                          {{ dockerStatus.in_docker ? 'Docker容器内' : '非Docker环境' }}
+                        </el-tag>
+                      </el-descriptions-item>
+                      <el-descriptions-item label="容器名称">
+                        <span class="font-mono font-semibold text-slate-800">{{ dockerStatus.container_name || '-' }}</span>
+                      </el-descriptions-item>
+                      <el-descriptions-item label="运行状态">
+                        <el-tag :type="getStatusType(dockerStatus.status)" size="small">
+                          {{ dockerStatus.status || '-' }}
+                        </el-tag>
+                      </el-descriptions-item>
+                      <el-descriptions-item label="镜像名称">
+                        <span class="font-mono text-xs text-slate-600">{{ dockerStatus.image || '-' }}</span>
+                      </el-descriptions-item>
+                      <el-descriptions-item label="状态来源">
+                        <span class="badge-source">{{ dockerStatus.status_source === 'docker' ? 'Docker API' : '应用自检' }}</span>
+                      </el-descriptions-item>
+                      <el-descriptions-item label="应用版本">
+                        <span class="font-mono font-bold text-primary">{{ dockerStatus.application_version || '-' }}</span>
+                      </el-descriptions-item>
+                      <el-descriptions-item label="创建时间">
+                        <span class="text-slate-500 font-mono text-xs">{{ formatDate(dockerStatus.created) }}</span>
+                      </el-descriptions-item>
+                    </el-descriptions>
 
+                    <div v-if="dockerStatus.error" class="mt-4">
+                      <el-alert
+                        :title="dockerStatus.error"
+                        type="warning"
+                        :closable="false"
+                      />
+                    </div>
+                  </div>
 
-      <el-tab-pane label="容器管理" name="container">
-        <el-row :gutter="20">
-          <el-col :xs="24" :lg="12">
-            <el-card shadow="hover" class="mb-6">
+                  <el-empty v-else description="无法获取容器状态" />
+                </el-card>
+              </el-col>
+
+              <!-- 右侧: 容器控制 -->
+              <el-col :xs="24" :lg="12">
+                <el-card shadow="hover" class="container-ctrl-card mb-6">
+                  <template #header>
+                    <div class="flex items-center gap-2">
+                      <el-icon class="text-primary"><RefreshRight /></el-icon>
+                      <span class="font-bold">容器控制</span>
+                    </div>
+                  </template>
+
+                  <div class="control-actions">
+                    <p class="text-sm text-slate-500 mb-4">
+                      重载 MistRelay 宿主容器。当检测到外部 Docker Socket 挂载时支持优雅热重启。
+                    </p>
+
+                    <el-button
+                      type="primary"
+                      :icon="RefreshRight"
+                      @click="handleRestart"
+                      :loading="restarting"
+                      :disabled="!dockerStatus?.control_enabled"
+                      block
+                      size="large"
+                      class="restart-container-btn"
+                    >
+                      重启容器（热重载）
+                    </el-button>
+
+                    <el-alert
+                      v-if="dockerStatus && !dockerStatus.control_enabled"
+                      :title="dockerStatus.control_message || '宿主 Docker 控制未启用'"
+                      type="info"
+                      :closable="false"
+                      class="mt-4 modern-alert"
+                    />
+
+                    <div v-if="restartMessage" class="mt-4">
+                      <el-alert
+                        :title="restartMessage"
+                        :type="restartSuccess ? 'success' : 'error'"
+                        :closable="true"
+                        @close="restartMessage = ''"
+                      />
+                    </div>
+                  </div>
+                </el-card>
+              </el-col>
+            </el-row>
+
+            <!-- 容器日志 -->
+            <el-card shadow="hover" class="container-logs-card">
               <template #header>
-                <div class="flex justify-between items-center">
-                  <span>Docker容器状态</span>
+                <div class="flex justify-between items-center flex-wrap gap-2">
+                  <div class="flex items-center gap-2">
+                    <el-icon class="text-primary"><Document /></el-icon>
+                    <span class="font-bold">容器日志</span>
+                    <span v-if="wsConnected" class="stream-live-pill">
+                      <span class="stream-dot"></span> LIVE 流式传输中
+                    </span>
+                  </div>
+                  <div class="flex gap-2 items-center flex-wrap">
+                    <el-select
+                      v-model="dockerLogLines"
+                      @change="handleDockerLogLinesChange"
+                      style="width: 110px"
+                      size="small"
+                      :disabled="wsConnected"
+                    >
+                      <el-option label="50 行" :value="50" />
+                      <el-option label="100 行" :value="100" />
+                      <el-option label="200 行" :value="200" />
+                      <el-option label="500 行" :value="500" />
+                    </el-select>
+                    <el-button
+                      v-if="!wsConnected"
+                      :icon="VideoPlay"
+                      circle
+                      size="small"
+                      @click="startLogStream"
+                      :loading="connecting"
+                      title="开始实时日志"
+                    />
+                    <el-button
+                      v-else
+                      :icon="VideoPause"
+                      circle
+                      size="small"
+                      type="danger"
+                      @click="stopLogStream"
+                      title="停止实时日志"
+                    />
+                    <el-button
+                      :icon="Refresh"
+                      circle
+                      size="small"
+                      @click="fetchDockerLogs"
+                      :loading="loadingDockerLogs"
+                      :disabled="wsConnected"
+                      title="刷新日志"
+                    />
+                    <el-button
+                      :icon="Delete"
+                      circle
+                      size="small"
+                      @click="clearDockerLogs"
+                      title="清空日志"
+                    />
+                  </div>
+                </div>
+              </template>
+
+              <el-skeleton v-if="loadingDockerLogs && !wsConnected" :rows="10" animated />
+
+              <div v-else class="logs-container" ref="dockerLogsContainerRef">
+                <pre class="logs-content">{{ dockerLogs }}</pre>
+              </div>
+
+              <el-empty v-if="!dockerLogs && !wsConnected" description="无法获取容器日志" />
+            </el-card>
+          </div>
+        </el-tab-pane>
+
+        <!-- 7. 系统日志 -->
+        <el-tab-pane name="app-logs">
+          <template #label>
+            <span class="tab-label-item">
+              <el-icon><Document /></el-icon>
+              <span>系统日志</span>
+            </span>
+          </template>
+
+          <div class="tab-pane-content">
+            <!-- 工具栏卡片 -->
+            <el-card shadow="hover" class="mb-4 app-logs-toolbar-card">
+              <div class="toolbar">
+                <div class="toolbar-left">
+                  <el-select
+                    v-model="selectedFile"
+                    placeholder="当前日志"
+                    clearable
+                    style="width: 200px"
+                    size="default"
+                    @change="fetchAppLogs"
+                  >
+                    <el-option
+                      v-for="f in logFiles"
+                      :key="f.name"
+                      :label="`${f.name} (${formatSize(f.size)})`"
+                      :value="f.name"
+                    />
+                  </el-select>
+
+                  <el-select
+                    v-model="levelFilter"
+                    placeholder="全部级别"
+                    clearable
+                    style="width: 120px"
+                    size="default"
+                    @change="fetchAppLogs"
+                  >
+                    <el-option label="ERROR" value="ERROR" />
+                    <el-option label="WARNING" value="WARNING" />
+                    <el-option label="INFO" value="INFO" />
+                    <el-option label="DEBUG" value="DEBUG" />
+                  </el-select>
+
+                  <el-input
+                    v-model="keyword"
+                    placeholder="关键词搜索"
+                    clearable
+                    style="width: 180px"
+                    size="default"
+                    @keyup.enter="fetchAppLogs"
+                    @clear="fetchAppLogs"
+                  >
+                    <template #prefix>
+                      <el-icon><Search /></el-icon>
+                    </template>
+                  </el-input>
+
+                  <el-select
+                    v-model="tailCount"
+                    style="width: 130px"
+                    size="default"
+                    @change="fetchAppLogs"
+                  >
+                    <el-option label="最新 100 行" :value="100" />
+                    <el-option label="最新 200 行" :value="200" />
+                    <el-option label="最新 500 行" :value="500" />
+                    <el-option label="最新 1000 行" :value="1000" />
+                  </el-select>
+                </div>
+
+                <div class="toolbar-right">
                   <el-button
                     :icon="Refresh"
                     circle
-                    size="small"
-                    @click="fetchDockerStatus"
-                    :loading="loadingStatus"
+                    size="default"
+                    @click="fetchAppLogs"
+                    :loading="loadingAppLogs"
+                    title="刷新"
                   />
-                </div>
-              </template>
-
-              <el-skeleton v-if="loadingStatus" :rows="5" animated />
-
-              <div v-else-if="dockerStatus">
-                <el-descriptions :column="1" border size="small">
-                  <el-descriptions-item label="运行环境">
-                    <el-tag :type="dockerStatus.in_docker ? 'success' : 'info'" size="small">
-                      {{ dockerStatus.in_docker ? 'Docker容器内' : '非Docker环境' }}
-                    </el-tag>
-                  </el-descriptions-item>
-                  <el-descriptions-item label="容器名称">
-                    {{ dockerStatus.container_name || '-' }}
-                  </el-descriptions-item>
-                  <el-descriptions-item label="运行状态">
-                    <el-tag
-                      :type="getStatusType(dockerStatus.status)"
-                      size="small"
-                    >
-                      {{ dockerStatus.status || '-' }}
-                    </el-tag>
-                  </el-descriptions-item>
-                  <el-descriptions-item label="镜像名称">
-                    {{ dockerStatus.image || '-' }}
-                  </el-descriptions-item>
-                  <el-descriptions-item label="状态来源">
-                    {{ dockerStatus.status_source === 'docker' ? 'Docker API' : '应用自检' }}
-                  </el-descriptions-item>
-                  <el-descriptions-item label="应用版本">
-                    {{ dockerStatus.application_version || '-' }}
-                  </el-descriptions-item>
-                  <el-descriptions-item label="创建时间">
-                    {{ formatDate(dockerStatus.created) }}
-                  </el-descriptions-item>
-                </el-descriptions>
-
-                <div v-if="dockerStatus.error" class="mt-4">
-                  <el-alert
-                    :title="dockerStatus.error"
-                    type="warning"
-                    :closable="false"
+                  <el-button
+                    :icon="Download"
+                    circle
+                    size="default"
+                    @click="handleDownload"
+                    :disabled="!currentFileName"
+                    title="下载日志文件"
+                  />
+                  <el-button
+                    :icon="Delete"
+                    circle
+                    size="default"
+                    @click="clearAppLogDisplay"
+                    title="清空显示"
                   />
                 </div>
               </div>
-
-              <el-empty v-else description="无法获取容器状态" />
             </el-card>
-          </el-col>
 
-          <el-col :xs="24" :lg="12">
-            <el-card shadow="hover" class="mb-6">
+            <!-- 日志文件折叠卡片 -->
+            <el-card shadow="hover" class="mb-4" v-if="logFiles.length > 0">
               <template #header>
-                <span>容器控制</span>
-              </template>
-
-              <div class="control-actions">
-                <el-button
-                  type="primary"
-                  :icon="RefreshRight"
-                  @click="handleRestart"
-                  :loading="restarting"
-                  :disabled="!dockerStatus?.control_enabled"
-                  block
-                  size="large"
-                >
-                  重启容器（热重载）
-                </el-button>
-
-                <el-alert
-                  v-if="dockerStatus && !dockerStatus.control_enabled"
-                  :title="dockerStatus.control_message || '宿主 Docker 控制未启用'"
-                  type="info"
-                  :closable="false"
-                  class="mt-4"
-                />
-
-                <div v-if="restartMessage" class="mt-4">
-                  <el-alert
-                    :title="restartMessage"
-                    :type="restartSuccess ? 'success' : 'error'"
-                    :closable="true"
-                    @close="restartMessage = ''"
-                  />
+                <div class="flex justify-between items-center">
+                  <span class="font-semibold text-slate-700">磁盘日志文件档案 ({{ logFiles.length }})</span>
+                  <el-button text size="small" @click="showFileList = !showFileList">
+                    {{ showFileList ? '收起' : '展开' }}
+                  </el-button>
                 </div>
+              </template>
+              <div v-if="showFileList">
+                <el-table :data="logFiles" size="small" stripe class="custom-log-files-table">
+                  <el-table-column prop="name" label="文件名" />
+                  <el-table-column label="大小" width="120">
+                    <template #default="{ row }">{{ formatSize(row.size) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="modified" label="最后修改" width="180" />
+                  <el-table-column label="操作" width="100">
+                    <template #default="{ row }">
+                      <el-button text size="small" type="primary" @click="viewFile(row.name)">查看</el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
               </div>
             </el-card>
-          </el-col>
-        </el-row>
 
-        <el-card shadow="hover">
-          <template #header>
-            <div class="flex justify-between items-center">
-              <span>容器日志</span>
-              <div class="flex gap-2">
-                <el-select
-                  v-model="dockerLogLines"
-                  @change="handleDockerLogLinesChange"
-                  style="width: 120px"
-                  size="small"
-                  :disabled="wsConnected"
-                >
-                  <el-option label="50 行" :value="50" />
-                  <el-option label="100 行" :value="100" />
-                  <el-option label="200 行" :value="200" />
-                  <el-option label="500 行" :value="500" />
-                </el-select>
-                <el-button
-                  v-if="!wsConnected"
-                  :icon="VideoPlay"
-                  circle
-                  size="small"
-                  @click="startLogStream"
-                  :loading="connecting"
-                  title="开始实时日志"
-                />
-                <el-button
-                  v-else
-                  :icon="VideoPause"
-                  circle
-                  size="small"
-                  @click="stopLogStream"
-                  title="停止实时日志"
-                />
-                <el-button
-                  :icon="Refresh"
-                  circle
-                  size="small"
-                  @click="fetchDockerLogs"
-                  :loading="loadingDockerLogs"
-                  :disabled="wsConnected"
-                  title="刷新日志"
-                />
-                <el-button
-                  :icon="Delete"
-                  circle
-                  size="small"
-                  @click="clearDockerLogs"
-                  title="清空日志"
-                />
+            <!-- 终端日志内容 -->
+            <el-card shadow="hover" class="app-logs-viewer-card">
+              <template #header>
+                <div class="flex justify-between items-center">
+                  <span class="font-bold flex items-center gap-2">
+                    <span>运行日志输出</span>
+                    <el-tag size="small" type="info" class="ml-2 font-mono" v-if="appLogLines.length">
+                      {{ appLogLines.length }} 行
+                    </el-tag>
+                  </span>
+                  <el-switch v-model="autoScroll" active-text="自动贴底滚动" inactive-text="" size="small" />
+                </div>
+              </template>
+
+              <el-skeleton v-if="loadingAppLogs" :rows="12" animated />
+
+              <div
+                v-else-if="appLogLines.length > 0"
+                class="logs-container app-logs-container"
+                ref="appLogsContainerRef"
+              >
+                <div v-for="(line, idx) in appLogLines" :key="idx" :class="['log-line', getLineClass(line)]">
+                  <span class="line-no">{{ idx + 1 }}</span>
+                  <span class="line-content">{{ line }}</span>
+                </div>
               </div>
-            </div>
-          </template>
 
-          <el-skeleton v-if="loadingDockerLogs && !wsConnected" :rows="10" animated />
-
-          <div v-else class="logs-container" ref="dockerLogsContainerRef">
-            <pre class="logs-content">{{ dockerLogs }}</pre>
+              <el-empty v-else description="暂无日志数据" />
+            </el-card>
           </div>
+        </el-tab-pane>
+      </el-tabs>
+    </div>
 
-          <el-empty v-if="!dockerLogs && !wsConnected" description="无法获取容器日志" />
-        </el-card>
-      </el-tab-pane>
+    <!-- 快速热添加 Bot Token 弹窗 -->
+    <el-dialog
+      v-model="showHotAddDialog"
+      title="快速热添加负载机器人 Token"
+      width="520px"
+      append-to-body
+    >
+      <div class="space-y-4">
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          title="零停机热插拔：提交后立即在运行期初始化连接、完成免加频道 Peer 解析并纳入负载均衡池，无需重启容器。"
+        />
+        <el-input
+          v-model="hotAddTokensText"
+          type="textarea"
+          :rows="5"
+          placeholder="每行粘贴一个 Bot Token（或用逗号分隔），例如：&#10;1234567890:AAHxyz...&#10;9876543210:BBGabc..."
+        />
+      </div>
+      <template #footer>
+        <el-button @click="showHotAddDialog = false">取消</el-button>
+        <el-button type="primary" :loading="submittingHotAdd" @click="handleHotAddSubmit">
+          立即热挂载入网
+        </el-button>
+      </template>
+    </el-dialog>
 
-      <el-tab-pane label="系统日志" name="app-logs">
-        <el-card shadow="hover" class="mb-4">
-          <div class="toolbar">
-            <div class="toolbar-left">
-              <el-select v-model="selectedFile" placeholder="当前日志" clearable style="width: 220px" size="default" @change="fetchAppLogs">
-                <el-option v-for="f in logFiles" :key="f.name" :label="`${f.name} (${formatSize(f.size)})`" :value="f.name" />
-              </el-select>
+    <!-- API 协议号一键自动创机与入网向导弹窗 -->
+    <el-dialog
+      v-model="showBotFatherDialog"
+      title="API 协议号一键批量创机与入网 (@BotFather 流水线)"
+      width="600px"
+      append-to-body
+    >
+      <div class="space-y-4">
+        <el-alert
+          type="success"
+          :closable="false"
+          show-icon
+          title="全生态协议号支持：兼容 Pyrogram 与 Telethon 的 Session String 及 .session 文件。仅在内存临时连接 @BotFather，任务完成后自动销毁会话。"
+        />
 
-              <el-select v-model="levelFilter" placeholder="全部级别" clearable style="width: 130px" size="default" @change="fetchAppLogs">
-                <el-option label="ERROR" value="ERROR" />
-                <el-option label="WARNING" value="WARNING" />
-                <el-option label="INFO" value="INFO" />
-                <el-option label="DEBUG" value="DEBUG" />
-              </el-select>
+        <el-radio-group v-model="botFatherInputMode" size="default" class="w-full">
+          <el-radio-button value="string">粘贴 Session String 文本</el-radio-button>
+          <el-radio-button value="file">上传 .session 协议号文件</el-radio-button>
+        </el-radio-group>
 
-              <el-input v-model="keyword" placeholder="关键词搜索" clearable style="width: 200px" size="default" @keyup.enter="fetchAppLogs" @clear="fetchAppLogs">
-                <template #prefix>
-                  <el-icon><Search /></el-icon>
-                </template>
-              </el-input>
+        <div v-if="botFatherInputMode === 'string'">
+          <el-input
+            v-model="botFatherSessionString"
+            type="textarea"
+            :rows="3"
+            placeholder="请粘贴 Pyrogram 或 Telethon 导出的 Session String 文本..."
+          />
+        </div>
+        <div v-else class="session-upload-box">
+          <input
+            type="file"
+            accept=".session"
+            @change="onSessionFileChange"
+            class="block w-full text-sm text-slate-600 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-sky-50 file:text-sky-700 hover:file:bg-sky-100"
+          />
+          <p v-if="botFatherSelectedFile" class="text-xs text-emerald-600 mt-2 font-medium">
+            已选择协议号文件: {{ botFatherSelectedFile.name }} ({{ (botFatherSelectedFile.size / 1024).toFixed(1) }} KB)
+          </p>
+        </div>
 
-              <el-select v-model="tailCount" style="width: 120px" size="default" @change="fetchAppLogs">
-                <el-option label="最新 100 行" :value="100" />
-                <el-option label="最新 200 行" :value="200" />
-                <el-option label="最新 500 行" :value="500" />
-                <el-option label="最新 1000 行" :value="1000" />
-              </el-select>
-            </div>
+        <el-form label-width="140px" size="default" class="mt-2">
+          <el-form-item label="目标扩容节点数">
+            <el-slider v-model="botFatherCount" :min="1" :max="20" show-input class="w-full" />
+          </el-form-item>
+          <el-form-item label="机器人名称前缀">
+            <el-input v-model="botFatherPrefix" placeholder="MistRelay Node" />
+          </el-form-item>
+          <el-form-item label="存量机器人复用">
+            <el-switch
+              v-model="botFatherReuse"
+              active-text="优先探测并直接提取该协议号下已有的 Bot Token（省时高效）"
+            />
+          </el-form-item>
+        </el-form>
 
-            <div class="toolbar-right">
-              <el-button :icon="Refresh" circle size="default" @click="fetchAppLogs" :loading="loadingAppLogs" title="刷新" />
-              <el-button :icon="Download" circle size="default" @click="handleDownload" :disabled="!currentFileName" title="下载日志文件" />
-              <el-button :icon="Delete" circle size="default" @click="clearAppLogDisplay" title="清空显示" />
-            </div>
+        <!-- 运行进度或结果反馈 -->
+        <div v-if="submittingBotFather" class="p-3 rounded-xl bg-sky-50 border border-sky-200 text-sky-800 text-xs space-y-1">
+          <div class="font-semibold">🚀 正在执行自动化创机流水线，请稍候（每个新机器人约需 2~3 秒）...</div>
+          <div>① 解析协议号内存会话 ➔ ② 对话 @BotFather 探测/创建 ➔ ③ 提取 Token 并激活免加频道分流</div>
+        </div>
+
+        <div v-if="botFatherResult" class="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs space-y-1.5">
+          <div class="font-bold text-sm">
+            ✅ 流水线执行完毕：复用存量 {{ botFatherResult.reused_count }} 个 · 新建签发 {{ botFatherResult.created_count }} 个 · 当前活跃从节点 {{ botFatherResult.total_active_workers }} 个
           </div>
-        </el-card>
-
-        <el-card shadow="hover" class="mb-4" v-if="logFiles.length > 0">
-          <template #header>
-            <div class="flex justify-between items-center">
-              <span>日志文件 ({{ logFiles.length }})</span>
-              <el-button text size="small" @click="showFileList = !showFileList">
-                {{ showFileList ? '收起' : '展开' }}
-              </el-button>
-            </div>
-          </template>
-          <div v-if="showFileList">
-            <el-table :data="logFiles" size="small" stripe>
-              <el-table-column prop="name" label="文件名" />
-              <el-table-column label="大小" width="120">
-                <template #default="{ row }">{{ formatSize(row.size) }}</template>
-              </el-table-column>
-              <el-table-column prop="modified" label="最后修改" width="180" />
-              <el-table-column label="操作" width="100">
-                <template #default="{ row }">
-                  <el-button text size="small" type="primary" @click="viewFile(row.name)">查看</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
+          <div v-if="botFatherResult.bots?.length" class="flex flex-wrap gap-1.5 pt-1">
+            <span
+              v-for="b in botFatherResult.bots"
+              :key="b.index"
+              class="px-2 py-0.5 rounded bg-white border border-emerald-300 font-mono text-xs"
+            >
+              Bot {{ b.index }} (@{{ b.username }})
+            </span>
           </div>
-        </el-card>
-
-        <el-card shadow="hover">
-          <template #header>
-            <div class="flex justify-between items-center">
-              <span>
-                日志内容
-                <el-tag size="small" type="info" class="ml-2" v-if="appLogLines.length">{{ appLogLines.length }} 行</el-tag>
-              </span>
-              <el-switch v-model="autoScroll" active-text="自动滚动" inactive-text="" size="small" />
-            </div>
-          </template>
-
-          <el-skeleton v-if="loadingAppLogs" :rows="12" animated />
-
-          <div v-else-if="appLogLines.length > 0" class="logs-container app-logs-container" ref="appLogsContainerRef">
-            <div v-for="(line, idx) in appLogLines" :key="idx" :class="['log-line', getLineClass(line)]">
-              <span class="line-no">{{ idx + 1 }}</span>
-              <span class="line-content">{{ line }}</span>
-            </div>
+          <div v-if="botFatherResult.errors?.length" class="text-amber-700 pt-1">
+            <div v-for="(err, idx) in botFatherResult.errors" :key="idx">⚠️ {{ err }}</div>
           </div>
-
-          <el-empty v-else description="暂无日志数据" />
-        </el-card>
-      </el-tab-pane>
-
-    </el-tabs>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="showBotFatherDialog = false">关闭</el-button>
+        <el-button type="success" :loading="submittingBotFather" @click="handleBotFatherSubmit">
+          启动全自动创机并入网
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { downloadLogFile, getConfig, updateConfig, getDockerStatus, restartDocker, getDockerLogs, getLogFiles, getLogContent, type LogFile } from '@/api'
+import {
+  downloadLogFile,
+  getConfig,
+  updateConfig,
+  getStatus,
+  getDockerStatus,
+  restartDocker,
+  getDockerLogs,
+  getLogFiles,
+  getLogContent,
+  hotAddBots,
+  hotRemoveBot,
+  botfatherAutoCreate,
+  type LogFile
+} from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { checkServerConnection } from '@/utils/connection'
 import { getServerBaseUrl, isValidServerBaseUrl, setServerBaseUrl } from '@/utils/runtime'
-import { Refresh, RefreshRight, VideoPlay, VideoPause, Delete, Download, Search } from '@element-plus/icons-vue'
-import type { DockerStatus } from '@/types/api'
+import {
+  Refresh,
+  RefreshRight,
+  VideoPlay,
+  VideoPause,
+  Delete,
+  Download,
+  Search,
+  Link,
+  Promotion,
+  Cpu,
+  Box,
+  Document
+} from '@element-plus/icons-vue'
+import type { DockerStatus, ServerStatus } from '@/types/api'
 import { formatDate } from '@/utils/formatters'
 import { buildWsProtocols, buildWsUrl } from '@/utils/websocket'
 import { useRoute, useRouter } from 'vue-router'
@@ -558,10 +1026,182 @@ const authStore = useAuthStore()
 
 type SettingsTab = 'client' | 'telegram' | 'download' | 'aria2' | 'stream' | 'container' | 'app-logs'
 const validTabs: SettingsTab[] = ['client', 'telegram', 'download', 'aria2', 'stream', 'container', 'app-logs']
-const initialTab = typeof route.query.tab === 'string' && validTabs.includes(route.query.tab as SettingsTab)
-  ? route.query.tab as SettingsTab
-  : 'client'
+const initialTab =
+  typeof route.query.tab === 'string' && validTabs.includes(route.query.tab as SettingsTab)
+    ? (route.query.tab as SettingsTab)
+    : 'client'
 const activeTab = ref<SettingsTab>(initialTab)
+const serverStatus = ref<ServerStatus | null>(null)
+const loadingServerStatus = ref(false)
+
+async function fetchServerStatus() {
+  loadingServerStatus.value = true
+  try {
+    serverStatus.value = await getStatus()
+  } catch (e) {
+    console.error('获取系统状态与Bot集群信息失败', e)
+  } finally {
+    loadingServerStatus.value = false
+  }
+}
+
+const hasUnreachableBots = computed(() => {
+  return serverStatus.value?.bot_details?.some(b => !b.can_read) ?? false
+})
+
+// 多 Bot 热插拔与 @BotFather 自动化流水线状态
+const showHotAddDialog = ref(false)
+const hotAddTokensText = ref('')
+const submittingHotAdd = ref(false)
+
+const showBotFatherDialog = ref(false)
+const botFatherInputMode = ref<'string' | 'file'>('string')
+const botFatherSessionString = ref('')
+const botFatherSelectedFile = ref<File | null>(null)
+const botFatherCount = ref(3)
+const botFatherPrefix = ref('MistRelay Node')
+const botFatherReuse = ref(true)
+const submittingBotFather = ref(false)
+const botFatherResult = ref<any>(null)
+
+function openHotAddDialog() {
+  hotAddTokensText.value = ''
+  showHotAddDialog.value = true
+}
+
+function openBotFatherDialog() {
+  botFatherResult.value = null
+  showBotFatherDialog.value = true
+}
+
+function onSessionFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  if (input.files && input.files.length > 0) {
+    botFatherSelectedFile.value = input.files[0]
+  } else {
+    botFatherSelectedFile.value = null
+  }
+}
+
+async function handleHotAddSubmit() {
+  const raw = hotAddTokensText.value.trim()
+  if (!raw) {
+    ElMessage.warning('请至少输入一个有效的 Bot Token')
+    return
+  }
+  submittingHotAdd.value = true
+  try {
+    const res = await hotAddBots(raw)
+    if (res.success && res.data) {
+      const addedCount = res.data.total_added || 0
+      const errCount = res.data.errors?.length || 0
+      if (addedCount > 0) {
+        ElMessage.success(`成功热挂载 ${addedCount} 个机器人节点` + (errCount > 0 ? `（${errCount} 个失败）` : ''))
+        showHotAddDialog.value = false
+        await fetchServerStatus()
+        await fetchConfigs()
+      } else if (errCount > 0) {
+        ElMessage.error(`挂载失败: ${res.data.errors[0]}`)
+      }
+    } else {
+      ElMessage.error(res.error || '热挂载失败')
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || e?.message || '请求失败')
+  } finally {
+    submittingHotAdd.value = false
+  }
+}
+
+async function handleRemoveBot(bot: any) {
+  if (!bot || bot.index === 0) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要将节点 ${bot.name} (${bot.username}) 下线并从负载均衡池移除吗？`,
+      '移除负载节点',
+      { type: 'warning', confirmButtonText: '确认移除', cancelButtonText: '取消' }
+    )
+    const res = await hotRemoveBot(bot.index)
+    if (res.success) {
+      ElMessage.success(`节点 ${bot.name} 已安全下线并移除`)
+      await fetchServerStatus()
+      await fetchConfigs()
+    } else {
+      ElMessage.error(res.error || '移除失败')
+    }
+  } catch (e: any) {
+    if (e !== 'cancel') {
+      ElMessage.error(e?.response?.data?.error || e?.message || '移除失败')
+    }
+  }
+}
+
+async function handleBotFatherSubmit() {
+  if (botFatherInputMode.value === 'string' && !botFatherSessionString.value.trim()) {
+    ElMessage.warning('请粘贴有效的 Session String 文本')
+    return
+  }
+  if (botFatherInputMode.value === 'file' && !botFatherSelectedFile.value) {
+    ElMessage.warning('请选择要上传的 .session 协议号文件')
+    return
+  }
+
+  submittingBotFather.value = true
+  botFatherResult.value = null
+  try {
+    let res
+    if (botFatherInputMode.value === 'file' && botFatherSelectedFile.value) {
+      const fd = new FormData()
+      fd.append('session_file', botFatherSelectedFile.value)
+      fd.append('count', String(botFatherCount.value))
+      fd.append('name_prefix', botFatherPrefix.value || 'MistRelay Node')
+      fd.append('reuse_existing', String(botFatherReuse.value))
+      res = await botfatherAutoCreate(fd)
+    } else {
+      res = await botfatherAutoCreate({
+        session_string: botFatherSessionString.value.trim(),
+        count: botFatherCount.value,
+        name_prefix: botFatherPrefix.value || 'MistRelay Node',
+        reuse_existing: botFatherReuse.value,
+      })
+    }
+
+    if (res.success && res.data) {
+      botFatherResult.value = res.data
+      const totalGot = (res.data.reused_count || 0) + (res.data.created_count || 0)
+      if (totalGot > 0) {
+        ElMessage.success(`自动创机流水线成功！共接入 ${totalGot} 个负载机器人`)
+        await fetchServerStatus()
+        await fetchConfigs()
+      } else {
+        ElMessage.warning('流水线执行完成，但未新增可用机器人，请查看详情提示')
+      }
+    } else {
+      ElMessage.error(res.error || '自动创机流水线执行失败')
+    }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || e?.message || '自动创机请求失败')
+  } finally {
+    submittingBotFather.value = false
+  }
+}
+
+function getBotModeBadge(bot: any) {
+  if (!bot) return { label: '就绪', cls: 'badge-ready' }
+  switch (bot.mode) {
+    case 'primary_admin':
+      return { label: '主控 (管理员)', cls: 'badge-primary' }
+    case 'direct_admin':
+      return { label: '频道管理员', cls: 'badge-admin' }
+    case 'no_join_resolved':
+      return { label: '免加频道就绪', cls: 'badge-nojoin' }
+    case 'unreachable':
+      return { label: '未激活 (私密)', cls: 'badge-unreachable' }
+    default:
+      return { label: '就绪', cls: 'badge-ready' }
+  }
+}
+
 const saving = ref(false)
 const clientServerUrl = ref(getServerBaseUrl())
 const testingConnection = ref(false)
@@ -596,6 +1236,12 @@ const connectionStatusTagType = computed(() => {
   if (connectionState.value === 'error') return 'danger'
   return 'info'
 })
+const connectionStatusDotClass = computed(() => {
+  if (connectionState.value === 'success') return 'connection-dot--success'
+  if (connectionState.value === 'error') return 'connection-dot--error'
+  return 'connection-dot--idle'
+})
+
 // 配置数据
 const configs = ref({
   telegram: {
@@ -638,7 +1284,7 @@ const configs = ref({
   }
 })
 
-// 多机器人Token文本（用于显示和编辑）
+// 多机器人Token文本
 const multiBotTokensText = computed({
   get: () => {
     const tokens = configs.value.stream.MULTI_BOT_TOKENS || []
@@ -654,7 +1300,6 @@ function updateMultiBotTokens(text: string) {
     configs.value.stream.MULTI_BOT_TOKENS = []
     return
   }
-  // 支持换行和逗号分隔
   const tokens = text
     .split(/[,\n]/)
     .map(t => t.trim())
@@ -738,7 +1383,6 @@ async function fetchConfigs() {
         redactedKeys.value = new Set([...redactedKeys.value, ...(response.redacted_keys || [])])
         offlineOnlyKeys.value = new Set([...offlineOnlyKeys.value, ...(response.offline_only_keys || [])])
         secretCounts.value = { ...secretCounts.value, ...(response.secret_counts || {}) }
-        // 合并配置，保留默认值
         ;(configs.value as Record<ConfigCategory, Record<string, any>>)[category] = {
           ...(configs.value[category] as Record<string, any>),
           ...response.data
@@ -766,7 +1410,6 @@ async function saveConfig(category: ConfigCategory) {
       } else {
         ElMessage.success(response.message || '配置已保存，下次使用时将从数据库读取最新配置')
       }
-      // 重新获取配置以确保同步
       await fetchConfigs()
     } else {
       ElMessage.error(response.error || '配置保存失败')
@@ -777,6 +1420,19 @@ async function saveConfig(category: ConfigCategory) {
   } finally {
     saving.value = false
   }
+}
+
+function reloadCurrentTab() {
+  if (activeTab.value === 'container') {
+    fetchDockerStatus()
+    fetchDockerLogs()
+  } else if (activeTab.value === 'app-logs') {
+    fetchFileList().then(() => fetchAppLogs())
+  } else {
+    fetchConfigs()
+    testConnection(false)
+  }
+  ElMessage.success('已刷新当前页面数据')
 }
 
 const dockerStatus = ref<DockerStatus | null>(null)
@@ -842,20 +1498,16 @@ function startLogStream() {
     ws.value.onopen = () => {
       wsConnected.value = true
       connecting.value = false
-      // 清空现有日志，准备接收流式日志
       dockerLogs.value = ''
     }
 
     ws.value.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
-
         if (data.type === 'history') {
           dockerLogs.value = data.logs || ''
-        } else if (data.type === 'log' || data.type === 'line') { // line passed from backend is 'line', but let's handle 'log' too just in case
-          // Append new log line
+        } else if (data.type === 'log' || data.type === 'line') {
           dockerLogs.value += (dockerLogs.value ? '\n' : '') + (data.line || '')
-          // Auto scroll to bottom
           nextTick(() => {
             if (dockerLogsContainerRef.value) {
               dockerLogsContainerRef.value.scrollTop = dockerLogsContainerRef.value.scrollHeight
@@ -889,10 +1541,8 @@ function startLogStream() {
 
 function handleDockerLogLinesChange() {
   if (wsConnected.value) {
-    // 如果正在流式传输，重新连接以应用新的行数设置
     startLogStream()
   } else {
-    // 否则只是获取静态日志
     fetchDockerLogs()
   }
 }
@@ -1024,7 +1674,6 @@ function handleRestart() {
           restartSuccess.value = true
           restartMessage.value = data.message || '容器重启成功'
           ElMessage.success(restartMessage.value)
-          // 延迟刷新状态
           setTimeout(() => {
             fetchDockerStatus()
             fetchDockerLogs()
@@ -1064,7 +1713,6 @@ function getStatusType(status?: string): 'success' | 'warning' | 'danger' | 'inf
   return 'info'
 }
 
-
 function syncSettingsTabFromRoute() {
   if (typeof route.query.tab === 'string' && validTabs.includes(route.query.tab as SettingsTab)) {
     activeTab.value = route.query.tab as SettingsTab
@@ -1084,6 +1732,9 @@ function updateSettingsTabQuery(tab: SettingsTab) {
 }
 
 function loadSystemTabData(tab: SettingsTab) {
+  if (tab === 'stream' && !loadingServerStatus.value) {
+    fetchServerStatus()
+  }
   if (tab === 'container') {
     fetchDockerStatus()
     fetchDockerLogs()
@@ -1116,153 +1767,611 @@ onUnmounted(() => {
 <style scoped>
 .settings-page {
   @apply space-y-6;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
-.page-header {
-  @apply mb-6 flex items-center justify-between;
+/* 顶部品牌横幅 */
+.settings-header-card {
+  padding: 24px 28px 20px;
+  position: relative;
+  overflow: hidden;
+  border-radius: 20px;
 }
 
-.page-title {
-  @apply text-3xl font-bold text-gray-800 mb-2;
+.settings-header-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
 }
 
-.page-subtitle {
-  @apply text-gray-600;
+.settings-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.card-header {
-  @apply flex items-center justify-between;
+.settings-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.card-actions {
-  @apply flex items-center gap-3;
+.settings-title {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  margin: 0;
+  line-height: 1.2;
+}
+
+.settings-badge {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  background: linear-gradient(135deg, rgba(255, 117, 151, 0.15) 0%, rgba(56, 189, 248, 0.15) 100%);
+  color: #ff7597;
+  border: 1px solid rgba(255, 143, 171, 0.35);
+}
+
+.settings-subtitle {
+  color: #64748b;
+  font-size: 13.5px;
+  margin: 0;
+}
+
+.settings-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.connection-pill-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 143, 171, 0.25);
+}
+
+.connection-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.connection-dot--success {
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2), 0 0 8px #10b981;
+}
+
+.connection-dot--error {
+  background: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+}
+
+.connection-dot--idle {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+}
+
+.connection-pill-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.connection-pill-label {
+  font-size: 10.5px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.connection-pill-val {
+  font-size: 12px;
+  font-weight: 700;
+  color: #334155;
+  font-family: monospace;
+}
+
+.header-btn {
+  border-radius: 12px;
+  font-weight: 600;
+}
+
+/* 现代毛玻璃标签容器 */
+.settings-tabs-wrapper {
+  border-radius: 20px;
+  overflow: hidden;
+  padding: 10px;
+}
+
+.modern-settings-tabs {
+  border: none !important;
+  background: transparent !important;
+}
+
+.modern-settings-tabs :deep(.el-tabs__header) {
+  background: rgba(248, 250, 252, 0.8) !important;
+  border: 1px solid rgba(255, 143, 171, 0.2) !important;
+  border-radius: 14px !important;
+  padding: 6px !important;
+  margin-bottom: 20px !important;
+  display: flex;
+  overflow-x: auto;
+}
+
+.modern-settings-tabs :deep(.el-tabs__header)::-webkit-scrollbar {
+  height: 4px;
+}
+
+.modern-settings-tabs :deep(.el-tabs__nav) {
+  border: none !important;
+  display: flex;
+  gap: 4px;
+}
+
+.modern-settings-tabs :deep(.el-tabs__item) {
+  border: none !important;
+  border-radius: 10px !important;
+  padding: 0 16px !important;
+  height: 38px !important;
+  line-height: 38px !important;
+  font-size: 13.5px !important;
+  font-weight: 600 !important;
+  color: #64748b !important;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+
+.modern-settings-tabs :deep(.el-tabs__item:hover) {
+  color: #ff7597 !important;
+  background: rgba(255, 117, 151, 0.08) !important;
+}
+
+.modern-settings-tabs :deep(.el-tabs__item.is-active) {
+  background: var(--gradient-primary) !important;
+  color: #ffffff !important;
+  box-shadow: 0 4px 12px rgba(255, 117, 151, 0.35) !important;
+}
+
+.tab-label-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tab-pane-content {
+  padding: 16px 20px;
+}
+
+/* 标签面板头部 */
+.pane-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px dashed rgba(226, 232, 240, 0.9);
+}
+
+.pane-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pane-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 0;
+}
+
+.pane-desc {
+  font-size: 13px;
+  color: #64748b;
+  margin: 0;
+}
+
+.pane-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 现代表单定制 */
+.modern-form {
+  max-width: 800px;
+}
+
+.modern-alert {
+  border-radius: 12px !important;
+  border: 1px solid rgba(255, 143, 171, 0.25) !important;
+  background: rgba(255, 255, 255, 0.85) !important;
+}
+
+.readonly-input :deep(.el-input__wrapper) {
+  background-color: rgba(241, 245, 249, 0.8) !important;
 }
 
 .connection-status {
-  @apply flex items-center gap-3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .connection-status-text {
-  @apply text-sm text-gray-500;
-}
-
-.quick-actions {
-  @apply space-y-3;
+  font-size: 13px;
+  color: #64748b;
 }
 
 .el-form-item__help {
-  @apply text-xs text-gray-500 mt-1;
+  font-size: 12px;
+  color: #94a3b8;
+  margin-top: 4px;
+  line-height: 1.5;
 }
 
-.control-actions {
-  @apply space-y-4;
+/* 容器管理专属样式 */
+.container-info-card,
+.container-ctrl-card,
+.container-logs-card {
+  border-radius: 16px;
+  border: 1px solid rgba(255, 143, 171, 0.25) !important;
+  background: rgba(255, 255, 255, 0.85) !important;
 }
 
-.settings-page .system-tabs {
-  @apply rounded-xl bg-white p-4;
+.badge-source {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #0284c7;
 }
 
-.settings-page .system-tabs:deep(.el-tabs__header) {
-  margin-bottom: 20px;
+.restart-container-btn {
+  border-radius: 12px;
+  height: 44px;
+  font-weight: 700;
 }
 
-.settings-page .system-tabs:deep(.el-tabs__nav-wrap::after) {
-  background-color: rgba(226, 232, 240, 0.9);
+.stream-live-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  font-size: 11.5px;
+  font-weight: 700;
+  margin-left: 10px;
 }
 
-.toolbar {
-  @apply flex flex-wrap justify-between items-center gap-3;
+.stream-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #10b981;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.35);
+  animation: pulse 1.8s infinite;
 }
 
-.toolbar-left {
-  @apply flex flex-wrap items-center gap-2;
-}
-
-.toolbar-right {
-  @apply flex items-center gap-1;
-}
-
+/* 终端日志视窗 */
 .logs-container {
-  @apply bg-gray-900 rounded-lg p-4 overflow-auto;
-  max-height: 600px;
-  font-family: 'Courier New', monospace;
-  position: relative;
-}
-
-.app-logs-container {
-  @apply p-0;
-  max-height: 65vh;
-  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
-  font-size: 12.5px;
-  line-height: 1.6;
+  background: #0f172a;
+  border-radius: 12px;
+  padding: 14px 16px;
+  overflow-y: auto;
+  max-height: 520px;
+  border: 1px solid rgba(51, 65, 85, 0.6);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.35);
 }
 
 .logs-content {
-  @apply text-gray-100 text-sm whitespace-pre-wrap;
-  margin: 0;
-  line-height: 1.5;
+  color: #e2e8f0;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
   word-break: break-all;
+  margin: 0;
+}
+
+/* 系统日志应用专属样式 */
+.app-logs-toolbar-card {
+  border-radius: 14px;
+  border: 1px solid rgba(255, 143, 171, 0.22) !important;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.app-logs-viewer-card {
+  border-radius: 16px;
+  border: 1px solid rgba(255, 143, 171, 0.25) !important;
+}
+
+.app-logs-container {
+  padding: 10px 0;
+  max-height: 65vh;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .log-line {
-  @apply flex px-3 py-0;
+  display: flex;
+  padding: 2px 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-  transition: background-color 0.15s;
+  transition: background-color 0.15s ease;
 }
 
 .log-line:hover {
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: rgba(255, 255, 255, 0.06);
 }
 
 .log-error {
-  background-color: rgba(239, 68, 68, 0.12);
+  background-color: rgba(244, 63, 94, 0.15);
 }
 
 .log-warn {
-  background-color: rgba(245, 158, 11, 0.10);
+  background-color: rgba(245, 158, 11, 0.12);
 }
 
 .log-debug {
-  @apply text-gray-500;
+  color: #94a3b8;
 }
 
 .line-no {
-  @apply text-gray-600 select-none pr-3 text-right flex-shrink-0;
-  min-width: 40px;
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  color: #64748b;
+  user-select: none;
+  padding-right: 12px;
+  text-align: right;
+  flex-shrink: 0;
+  min-width: 44px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
   margin-right: 12px;
+  font-size: 11px;
 }
 
 .line-content {
-  @apply text-gray-200 whitespace-pre-wrap break-all;
+  color: #f1f5f9;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .log-error .line-content {
-  @apply text-red-400;
+  color: #fda4af;
+  font-weight: 500;
 }
 
 .log-warn .line-content {
-  @apply text-yellow-400;
+  color: #fde047;
+  font-weight: 500;
 }
 
-.logs-container::-webkit-scrollbar {
-  width: 8px;
+.custom-log-files-table {
+  background: transparent !important;
 }
 
-.logs-container::-webkit-scrollbar-track {
-  @apply bg-gray-800 rounded;
+.custom-log-files-table :deep(tr) {
+  background: transparent !important;
 }
 
-.logs-container::-webkit-scrollbar-thumb {
-  @apply bg-gray-600 rounded;
+/* 响应式适配 */
+@media (max-width: 768px) {
+  .settings-header-card {
+    padding: 16px;
+  }
+
+  .settings-title {
+    font-size: 20px;
+  }
+
+  .settings-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .tab-pane-content {
+    padding: 10px 4px;
+  }
+
+  .pane-header-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .modern-form {
+    max-width: 100%;
+  }
+
+  .toolbar-left {
+    width: 100%;
+  }
+
+  .toolbar-left :deep(.el-input),
+  .toolbar-left :deep(.el-select) {
+    width: 100% !important;
+  }
 }
 
-.logs-container::-webkit-scrollbar-thumb:hover {
-  @apply bg-gray-500;
+/* 多 Bot 集群卡片 */
+.bot-cluster-card {
+  margin-top: 24px;
+  padding: 20px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  backdrop-filter: blur(12px);
 }
 
-:deep(.el-descriptions__label) {
-  @apply font-medium;
+.cluster-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
 }
 
+.cluster-icon-pill {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(56, 189, 248, 0.15);
+  color: #0284c7;
+  font-size: 18px;
+}
+
+.cluster-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.cluster-desc {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.cluster-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+
+.banner-success {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  color: #065f46;
+}
+
+.banner-warning {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  color: #92400e;
+}
+
+.bot-node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.bot-node-card {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.85);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.node-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.node-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.badge-primary {
+  background: rgba(168, 85, 247, 0.15);
+  color: #7e22ce;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.badge-admin {
+  background: rgba(16, 185, 129, 0.15);
+  color: #047857;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-nojoin {
+  background: rgba(56, 189, 248, 0.15);
+  color: #0369a1;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.badge-unreachable {
+  background: rgba(245, 158, 11, 0.15);
+  color: #b45309;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.node-caps-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cap-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.cap-ok {
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+}
+
+.cap-no {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+}
+
+.cap-readonly {
+  background: rgba(148, 163, 184, 0.15);
+  color: #475569;
+}
 </style>

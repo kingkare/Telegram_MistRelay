@@ -3,12 +3,12 @@
     <div class="logo-container">
       <div v-if="!isCollapse" class="logo">
         <div class="logo-icon-wrapper">
-          <el-icon :size="28" class="logo-icon"><Cpu /></el-icon>
+          <el-icon :size="26" class="logo-icon"><Cpu /></el-icon>
         </div>
         <span class="logo-text">MistRelay</span>
       </div>
       <div v-else class="logo-icon-wrapper collapsed">
-        <el-icon :size="28" class="logo-icon"><Cpu /></el-icon>
+        <el-icon :size="26" class="logo-icon"><Cpu /></el-icon>
       </div>
     </div>
     
@@ -18,8 +18,8 @@
       router
       class="sidebar-menu"
       background-color="transparent"
-      text-color="#e5e7eb"
-      active-text-color="#ffffff"
+      text-color="#4b5563"
+      active-text-color="#ff7597"
     >
       <el-menu-item index="/dashboard" class="menu-item">
         <el-icon><Odometer /></el-icon>
@@ -34,6 +34,21 @@
       <el-menu-item index="/drive" class="menu-item">
         <el-icon><Folder /></el-icon>
         <template #title>TG网盘</template>
+      </el-menu-item>
+      
+      <el-menu-item index="/bots" class="menu-item">
+        <el-icon><Connection /></el-icon>
+        <template #title>集群管理</template>
+      </el-menu-item>
+      
+      <el-menu-item index="/botfather" class="menu-item">
+        <el-icon><MagicStick /></el-icon>
+        <template #title>自动铸机</template>
+      </el-menu-item>
+      
+      <el-menu-item index="/cache" class="menu-item">
+        <el-icon><Box /></el-icon>
+        <template #title>缓存管理</template>
       </el-menu-item>
       
       <el-menu-item index="/settings" class="menu-item">
@@ -63,6 +78,9 @@ import {
   Odometer,
   Download,
   Folder,
+  Box,
+  Connection,
+  MagicStick,
   Setting,
   Expand,
   Fold
@@ -116,57 +134,60 @@ onUnmounted(() => {
 
 <style scoped>
 .sidebar {
-  background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   @apply h-screen fixed left-0 top-0 transition-all duration-300 ease-in-out z-50;
-  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.12);
-  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 4px 0 24px rgba(255, 117, 151, 0.1);
+  border-right: 1px solid rgba(255, 143, 171, 0.22);
 }
 
 .logo-container {
   @apply h-16 flex items-center justify-center;
   @apply px-4;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(255, 143, 171, 0.18);
+  background: rgba(255, 255, 255, 0.4);
 }
 
 .logo {
-  @apply flex items-center gap-3 text-white font-bold text-xl;
+  @apply flex items-center gap-3 font-bold text-xl;
   animation: slideInLeft 0.5s ease-out;
 }
 
 .logo-icon-wrapper {
-  @apply w-10 h-10 rounded-xl flex items-center justify-center;
+  @apply w-10 h-10 rounded-2xl flex items-center justify-center;
   background: var(--gradient-primary);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-  animation: glow 2s ease-in-out infinite;
+  box-shadow: 0 4px 14px rgba(255, 117, 151, 0.35);
+  animation: glow 3s ease-in-out infinite;
 }
 
 .logo-icon-wrapper.collapsed {
-  @apply w-12 h-12;
+  @apply w-11 h-11;
 }
 
 .logo-icon {
   @apply text-white;
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15));
 }
 
 .logo-text {
   @apply whitespace-nowrap;
-  background: linear-gradient(135deg, #ffffff 0%, #e0e7ff 100%);
+  background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
-  text-shadow: 0 2px 8px rgba(255, 255, 255, 0.1);
+  font-weight: 800;
+  letter-spacing: -0.5px;
 }
 
 .sidebar-menu {
   @apply border-none;
   height: calc(100vh - 128px);
   overflow-y: auto;
-  padding: 12px 8px;
+  padding: 12px 10px;
 }
 
-/* 自定义滚动条 */
+/* 二次元细滚动条 */
 .sidebar-menu::-webkit-scrollbar {
   width: 4px;
 }
@@ -176,44 +197,51 @@ onUnmounted(() => {
 }
 
 .sidebar-menu::-webkit-scrollbar-thumb {
-  @apply bg-gray-600 rounded-full;
+  background: rgba(255, 143, 171, 0.3);
+  border-radius: 9999px;
 }
 
 .sidebar-menu:deep(.el-menu-item) {
-  @apply rounded-lg my-1 mx-0;
-  @apply transition-all duration-300;
+  border-radius: 12px;
+  margin: 4px 0;
+  padding: 0 14px;
+  font-weight: 500;
   border: 1px solid transparent;
   position: relative;
   overflow: hidden;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .sidebar-menu:deep(.el-menu-item):before {
   content: '';
   position: absolute;
   left: 0;
-  top: 0;
-  width: 3px;
-  height: 100%;
+  top: 15%;
+  width: 4px;
+  height: 70%;
+  border-radius: 0 4px 4px 0;
   background: var(--gradient-primary);
   transform: scaleY(0);
-  transition: transform 0.3s ease;
+  transition: transform 0.25s ease;
 }
 
-.sidebar-menu:deep(.el-menu-item):hover {
-  @apply bg-gray-700/50;
-  border-color: rgba(102, 126, 234, 0.3);
-  padding-left: calc(var(--el-menu-base-level-padding) + 4px);
+.sidebar-menu:deep(.el-menu-item:hover) {
+  background: rgba(255, 143, 171, 0.1);
+  border-color: rgba(255, 143, 171, 0.25);
+  color: #ff7597 !important;
+  transform: translateX(3px);
 }
 
-.sidebar-menu:deep(.el-menu-item):hover:before {
+.sidebar-menu:deep(.el-menu-item:hover):before {
   transform: scaleY(1);
 }
 
 .sidebar-menu:deep(.el-menu-item.is-active) {
-  background: linear-gradient(90deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.1) 100%);
-  border-color: rgba(102, 126, 234, 0.4);
-  @apply text-white;
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+  background: linear-gradient(90deg, rgba(255, 117, 151, 0.16) 0%, rgba(56, 189, 248, 0.08) 100%);
+  border-color: rgba(255, 117, 151, 0.35);
+  color: #ff7597 !important;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(255, 117, 151, 0.15);
 }
 
 .sidebar-menu:deep(.el-menu-item.is-active):before {
@@ -221,37 +249,39 @@ onUnmounted(() => {
 }
 
 .sidebar-menu:deep(.el-menu-item .el-icon) {
-  @apply transition-transform duration-300;
+  transition: transform 0.25s ease;
+  font-size: 18px;
 }
 
 .sidebar-menu:deep(.el-menu-item:hover .el-icon) {
-  transform: scale(1.1);
+  transform: scale(1.15);
+  color: #ff7597;
 }
 
 .sidebar-menu:deep(.el-menu-item.is-active .el-icon) {
-  color: #667eea;
-  filter: drop-shadow(0 0 8px rgba(102, 126, 234, 0.6));
+  color: #ff7597;
+  filter: drop-shadow(0 0 6px rgba(255, 117, 151, 0.5));
 }
 
-/* 折叠状态样式 */
 .sidebar-menu:deep(.el-menu--collapse .el-menu-item) {
   @apply flex items-center justify-center;
 }
 
 .sidebar-footer {
   @apply h-16 flex items-center justify-center;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
+  border-top: 1px solid rgba(255, 143, 171, 0.18);
+  background: rgba(255, 255, 255, 0.4);
 }
 
 .collapse-btn {
-  @apply text-gray-400;
-  @apply transition-all duration-300;
-  @apply hover:text-white hover:bg-gray-700/50;
-  @apply hover:scale-110;
+  color: #9ca3af;
+  transition: all 0.25s ease;
 }
 
 .collapse-btn:hover {
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+  color: #ff7597;
+  background: rgba(255, 143, 171, 0.12);
+  transform: scale(1.1);
+  box-shadow: 0 2px 10px rgba(255, 117, 151, 0.25);
 }
 </style>

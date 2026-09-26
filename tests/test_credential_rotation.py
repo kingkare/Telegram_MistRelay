@@ -1,3 +1,4 @@
+import tests  # noqa: F401
 import hashlib
 import os
 import sqlite3

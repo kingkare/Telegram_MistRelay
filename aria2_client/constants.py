@@ -46,17 +46,24 @@ def get_upload_semaphore():
 upload_work_loads = {}  # 上传任务的负载跟踪
 pyrogram_clients = {}
 channel_accessible_clients = set()
+channel_write_clients = set()
 
 if ENABLE_STREAM:
     try:
-        from WebStreamer.bot import multi_clients as pyrogram_clients, channel_accessible_clients
+        from WebStreamer.bot import (
+            multi_clients as pyrogram_clients,
+            channel_accessible_clients,
+            channel_write_clients,
+        )
         # 初始化上传负载跟踪
         upload_work_loads = {index: 0 for index in pyrogram_clients.keys()}
     except ImportError:
         pyrogram_clients = {}
         channel_accessible_clients = set()
+        channel_write_clients = set()
         upload_work_loads = {}
 else:
     pyrogram_clients = {}
     channel_accessible_clients = set()
+    channel_write_clients = set()
     upload_work_loads = {}

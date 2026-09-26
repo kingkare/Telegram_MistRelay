@@ -1,7 +1,6 @@
 import { createRouter, createWebHashHistory, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
-import PcLayout from '@/components/pc/pc-layout.vue'
 import { getDefaultRoutePath, shouldUseHashHistory } from '@/utils/runtime'
 
 const routes: RouteRecordRaw[] = [
@@ -14,43 +13,6 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/',
     redirect: () => getDefaultRoutePath()
-  },
-  {
-    path: '/pc/login',
-    name: 'PcLogin',
-    component: () => import('@/views/pc/login.vue'),
-    meta: { public: true, pc: true },
-  },
-  {
-    path: '/pc',
-    component: PcLayout,
-    meta: { pc: true },
-    children: [
-      {
-        path: '',
-        redirect: '/pc/drive',
-      },
-      {
-        path: 'drive',
-        name: 'PcDrive',
-        component: () => import('@/views/pc/drive.vue'),
-      },
-      {
-        path: 'recent',
-        name: 'PcRecent',
-        component: () => import('@/views/pc/recent.vue'),
-      },
-      {
-        path: 'downloads',
-        name: 'PcDownloads',
-        component: () => import('@/views/pc/downloads.vue'),
-      },
-      {
-        path: 'settings',
-        name: 'PcSettings',
-        component: () => import('@/views/pc/settings.vue'),
-      },
-    ],
   },
   {
     path: '/dashboard',
@@ -77,6 +39,21 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/drive.vue')
   },
   {
+    path: '/bots',
+    name: 'Bots',
+    component: () => import('@/views/bots.vue')
+  },
+  {
+    path: '/botfather',
+    name: 'BotFather',
+    component: () => import('@/views/botfather.vue')
+  },
+  {
+    path: '/cache',
+    name: 'Cache',
+    component: () => import('@/views/cache.vue')
+  },
+  {
     path: '/system',
     redirect: '/settings?tab=container'
   },
@@ -97,14 +74,11 @@ router.beforeEach((to) => {
   const auth = useAuthStore()
   if (!to.meta.public && !auth.isLoggedIn) {
     return {
-      name: to.meta.pc ? 'PcLogin' : 'Login',
+      name: 'Login',
       query: { redirect: to.fullPath },
     }
   }
   if (to.name === 'Login' && auth.isLoggedIn) {
     return { path: '/' }
-  }
-  if (to.name === 'PcLogin' && auth.isLoggedIn) {
-    return { path: '/pc/drive' }
   }
 })

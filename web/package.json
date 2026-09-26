@@ -8,20 +8,12 @@
     "build": "vite build",
     "build:check": "vue-tsc && vite build",
     "check": "npm run type-check && npm run build",
-    "check:pc": "npm run type-check && npm run build && npm run tauri:build",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
     "test:e2e": "playwright test",
-    "test:e2e:downloads": "playwright test tests/download-concurrency.spec.ts",
-    "test:e2e:pc-drive": "playwright test tests/pc-drive.spec.ts",
-    "test:e2e:pc-smoke": "playwright test tests/pc-smoke.spec.ts",
     "type-check": "vue-tsc --noEmit"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
-    "@tauri-apps/api": "^2.11.1",
     "@types/video.js": "^7.3.58",
     "@vueuse/components": "^14.1.0",
     "@vueuse/core": "^14.1.0",
@@ -35,7 +27,6 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
-    "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^25.0.10",
     "@vitejs/plugin-vue": "^6.0.1",
     "autoprefixer": "^10.4.23",

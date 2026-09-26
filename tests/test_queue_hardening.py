@@ -1,3 +1,4 @@
+import tests  # noqa: F401
 import asyncio
 import unittest
 from unittest.mock import patch

@@ -1,3 +1,4 @@
+import tests  # noqa: F401
 import hashlib
 import unittest
 from unittest.mock import patch

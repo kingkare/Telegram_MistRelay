@@ -35,7 +35,7 @@ class Var(object):
         )
     KEEP_ALIVE = STREAM_KEEP_ALIVE if STREAM_KEEP_ALIVE else False
     DEBUG = False
-    USE_SESSION_FILE = STREAM_USE_SESSION_FILE if STREAM_USE_SESSION_FILE else False
+    USE_SESSION_FILE = True
     ALLOWED_USERS = [
         item.strip()
         for item in str(STREAM_ALLOWED_USERS or "").split(",")

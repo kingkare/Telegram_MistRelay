@@ -2,13 +2,6 @@ const SERVER_BASE_URL_KEY = 'mistrelay.serverBaseUrl'
 const TOKEN_KEY = 'token'
 const REFRESH_TOKEN_KEY = 'mistrelay.refreshToken'
 
-declare global {
-  interface Window {
-    __TAURI__?: unknown
-    __TAURI_INTERNALS__?: unknown
-  }
-}
-
 function getHostnameForProtocolDefault(value: string): string {
   try {
     return new URL(`http://${value}`).hostname.toLowerCase()
@@ -62,15 +55,8 @@ export function shouldUseHashHistory(): boolean {
   return import.meta.env.VITE_USE_HASH_ROUTER === 'true'
 }
 
-export function isTauriRuntime(): boolean {
-  return typeof window !== 'undefined' && (
-    Boolean(window.__TAURI_INTERNALS__) ||
-    Boolean(window.__TAURI__)
-  )
-}
-
 export function getDefaultRoutePath(): string {
-  return isTauriRuntime() ? '/pc/drive' : '/dashboard'
+  return '/dashboard'
 }
 
 function getAppBasePath(): string {
@@ -182,7 +168,7 @@ export function buildAuthorizedStreamUrl(streamUrl: string): string {
 
 export function getLoginRouteUrl(): string {
   const basePath = getAppBasePath()
-  const loginPath = isTauriRuntime() ? '/pc/login' : '/login'
+  const loginPath = '/login'
   if (shouldUseHashHistory()) {
     return `${basePath}/#${loginPath}`
   }
@@ -190,19 +176,13 @@ export function getLoginRouteUrl(): string {
 }
 
 export function isCurrentLoginRoute(): boolean {
-  if (
-    window.location.hash.startsWith('#/login') ||
-    window.location.hash.startsWith('#/pc/login')
-  ) {
+  if (window.location.hash.startsWith('#/login')) {
     return true
   }
 
   const basePath = getAppBasePath()
   const pathname = normalizePathname(window.location.pathname)
-  return (
-    pathname === normalizePathname(`${basePath}/login`) ||
-    pathname === normalizePathname(`${basePath}/pc/login`)
-  )
+  return pathname === normalizePathname(`${basePath}/login`)
 }
 
 export function redirectToLogin(): void {

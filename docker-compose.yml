@@ -30,6 +30,11 @@ services:
         target: /app/cache/thumbnails
         bind:
           create_host_path: false
+      - type: bind
+        source: ./web/dist
+        target: /app/web/dist
+        bind:
+          create_host_path: false
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=64m
       - /run:rw,noexec,nosuid,nodev,mode=0755,size=16m

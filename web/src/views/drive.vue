@@ -1,97 +1,274 @@
 <template>
-  <div class="drive-page">
-    <el-card shadow="hover">
-      <template #header>
-        <div class="drive-header">
-          <div>
-            <h2>Telegram 频道网盘</h2>
-            <p class="drive-header-subtitle">第三方网盘已废弃，这里只管理 TG 频道中的媒体文件。</p>
+  <div class="drive-page animate-fade-in">
+    <!-- 头部品牌与统计区 -->
+    <div class="drive-header-card glass-card">
+      <div class="drive-header-main">
+        <div class="drive-title-group">
+          <div class="drive-title-row">
+            <h2 class="drive-title text-gradient-sakura">Telegram 频道网盘</h2>
+            <span class="drive-badge">Cloud Storage</span>
           </div>
-          <div class="drive-header-actions">
-            <el-button :icon="RefreshRight" @click="refreshAll" :loading="loading">刷新</el-button>
-            <el-button type="danger" :icon="Delete" @click="handleClearAll" :disabled="items.length === 0">
-              清空 TG 网盘
-            </el-button>
-          </div>
+          <p class="drive-subtitle">
+            TG 频道媒体资源仓库，支持在线流播、原图直链与批量管理。
+          </p>
         </div>
-      </template>
 
-      <el-row :gutter="16" class="stats-row">
+        <div class="drive-header-actions">
+          <!-- 缩略图预热胶囊徽标 / 按钮 -->
+          <div
+            v-if="thumbStatus"
+            class="thumb-warmup-pill"
+            :class="{ 'is-running': thumbStatus.running }"
+            :title="thumbStatus.running ? `正在后台预生成缩略图 (当前 ID: ${thumbStatus.current_message_id || '处理中'})` : '点击一键重新预热所有媒体封面'"
+            @click="handleTriggerWarmup"
+          >
+            <el-icon class="warmup-icon" :class="{ 'is-spinning': thumbStatus.running }">
+              <Loading v-if="thumbStatus.running" />
+              <Picture v-else />
+            </el-icon>
+            <span class="warmup-text">
+              <template v-if="thumbStatus.running">
+                封面预热中 {{ thumbStatus.cached }}/{{ thumbStatus.total }} ({{ thumbStatus.percent }}%)
+              </template>
+              <template v-else-if="thumbStatus.total > 0 && thumbStatus.cached >= thumbStatus.total">
+                缩略图全部就绪
+              </template>
+              <template v-else>
+                预热缩略图 {{ thumbStatus.cached }}/{{ thumbStatus.total }}
+              </template>
+            </span>
+          </div>
+
+          <el-button
+            class="header-btn refresh-btn"
+            :icon="RefreshRight"
+            @click="refreshAll"
+            :loading="loading"
+          >
+            刷新
+          </el-button>
+          <el-button
+            type="danger"
+            class="header-btn clear-all-btn"
+            :icon="Delete"
+            @click="handleClearAll"
+            :disabled="items.length === 0 && (!usageStats || usageStats.total_count === 0)"
+          >
+            清空 TG 网盘
+          </el-button>
+        </div>
+      </div>
+
+      <!-- 现代流光指标统计卡片 -->
+      <el-row :gutter="14" class="stats-row">
+        <!-- 卡片 1: 文件总数 -->
         <el-col :xs="12" :sm="6">
-          <el-statistic title="文件总数" :value="usageStats?.total_count || 0" />
+          <div
+            class="stat-card"
+            :class="{ 'is-active': typeFilter === '' }"
+            @click="selectTypeFilter('')"
+            title="查看全部文件"
+          >
+            <div class="stat-icon-wrapper stat-icon-files">
+              <el-icon :size="22"><Files /></el-icon>
+            </div>
+            <div class="stat-info">
+              <div class="stat-value">{{ usageStats?.total_count || 0 }}</div>
+              <div class="stat-label">文件总数</div>
+            </div>
+          </div>
         </el-col>
+
+        <!-- 卡片 2: 占用空间 -->
         <el-col :xs="12" :sm="6">
-          <el-statistic title="占用空间" :value="formatBytes(usageStats?.total_size || 0)" />
+          <div class="stat-card stat-card-size" title="云端累计占用体积">
+            <div class="stat-icon-wrapper stat-icon-storage">
+              <el-icon :size="22"><Coin /></el-icon>
+            </div>
+            <div class="stat-info">
+              <div class="stat-value stat-value-size">{{ formatBytes(usageStats?.total_size || 0) }}</div>
+              <div class="stat-label">占用空间</div>
+            </div>
+          </div>
         </el-col>
+
+        <!-- 卡片 3: 视频 -->
         <el-col :xs="12" :sm="6">
-          <el-statistic title="视频" :value="usageStats?.videos || 0" />
+          <div
+            class="stat-card"
+            :class="{ 'is-active': typeFilter === 'video' }"
+            @click="selectTypeFilter('video')"
+            title="筛选视频文件"
+          >
+            <div class="stat-icon-wrapper stat-icon-video">
+              <el-icon :size="22"><VideoPlay /></el-icon>
+            </div>
+            <div class="stat-info">
+              <div class="stat-value">{{ usageStats?.videos || 0 }}</div>
+              <div class="stat-label">视频资源</div>
+            </div>
+          </div>
         </el-col>
+
+        <!-- 卡片 4: 图片 -->
         <el-col :xs="12" :sm="6">
-          <el-statistic title="图片" :value="usageStats?.images || 0" />
+          <div
+            class="stat-card"
+            :class="{ 'is-active': typeFilter === 'image' }"
+            @click="selectTypeFilter('image')"
+            title="筛选图片相册"
+          >
+            <div class="stat-icon-wrapper stat-icon-image">
+              <el-icon :size="22"><Picture /></el-icon>
+            </div>
+            <div class="stat-info">
+              <div class="stat-value">{{ usageStats?.images || 0 }}</div>
+              <div class="stat-label">图片相册</div>
+            </div>
+          </div>
         </el-col>
       </el-row>
+    </div>
 
+    <!-- 主操作与媒体内容展示卡片 -->
+    <div class="drive-main-card glass-card">
+      <!-- 工具控制栏 -->
       <div class="toolbar">
-        <el-input
-          v-model="searchKeyword"
-          placeholder="搜索文件名或描述"
-          clearable
-          class="search-input"
-          :prefix-icon="Search"
-          @keyup.enter="handleSearch"
-          @clear="handleSearch"
-        />
-        <el-select v-model="typeFilter" placeholder="类型" class="type-select" @change="handleSearch">
-          <el-option label="全部" value="" />
-          <el-option label="视频" value="video" />
-          <el-option label="图片" value="image" />
-          <el-option label="音频" value="audio" />
-          <el-option label="文档" value="document" />
-        </el-select>
-        <el-select v-model="sortOption" class="sort-select" @change="handleSearch">
-          <el-option label="时间 新→旧" value="message_date-desc" />
-          <el-option label="时间 旧→新" value="message_date-asc" />
-          <el-option label="大小 大→小" value="file_size-desc" />
-          <el-option label="大小 小→大" value="file_size-asc" />
-          <el-option label="名称 A→Z" value="file_name-asc" />
-          <el-option label="名称 Z→A" value="file_name-desc" />
-        </el-select>
-        <el-radio-group v-model="viewMode">
-          <el-radio-button label="list"><el-icon><List /></el-icon></el-radio-button>
-          <el-radio-button label="grid"><el-icon><Grid /></el-icon></el-radio-button>
-        </el-radio-group>
+        <div class="toolbar-left">
+          <el-input
+            v-model="searchKeyword"
+            placeholder="搜索文件名或描述"
+            clearable
+            class="search-input"
+            :prefix-icon="Search"
+            @keyup.enter="handleSearch"
+            @clear="handleSearch"
+          />
+          <el-select
+            v-model="typeFilter"
+            placeholder="类型"
+            class="type-select"
+            @change="handleSearch"
+          >
+            <el-option label="全部" value="" />
+            <el-option label="视频" value="video" />
+            <el-option label="图片" value="image" />
+            <el-option label="音频" value="audio" />
+            <el-option label="文档" value="document" />
+          </el-select>
+          <el-select
+            v-model="sortOption"
+            class="sort-select"
+            @change="handleSearch"
+          >
+            <el-option label="时间 新→旧" value="message_date-desc" />
+            <el-option label="时间 旧→新" value="message_date-asc" />
+            <el-option label="大小 大→小" value="file_size-desc" />
+            <el-option label="大小 小→大" value="file_size-asc" />
+            <el-option label="名称 A→Z" value="file_name-asc" />
+            <el-option label="名称 Z→A" value="file_name-desc" />
+          </el-select>
+        </div>
+
+        <div class="toolbar-right">
+          <el-radio-group v-model="viewMode" class="view-mode-toggle">
+            <el-radio-button label="list">
+              <el-icon><List /></el-icon>
+            </el-radio-button>
+            <el-radio-button label="grid">
+              <el-icon><Grid /></el-icon>
+            </el-radio-button>
+          </el-radio-group>
+        </div>
       </div>
 
-      <div class="breadcrumb-bar">
-        <el-button v-if="isInsideGroup" :icon="ArrowLeft" text @click="goRoot">返回根目录</el-button>
-        <el-breadcrumb separator="/">
-          <el-breadcrumb-item>
-            <span class="breadcrumb-link" @click="goRoot">TG网盘</span>
-          </el-breadcrumb-item>
-          <el-breadcrumb-item v-if="isInsideGroup">{{ currentFolderName }}</el-breadcrumb-item>
-        </el-breadcrumb>
-      </div>
-
-      <div v-if="items.length" class="selection-toolbar">
-        <el-checkbox
-          :model-value="allPageSelected"
-          :indeterminate="somePageSelected"
-          :disabled="loading || batchDeleting"
-          @change="toggleSelectPage(Boolean($event))"
+      <!-- 媒体分类快捷药丸标签 -->
+      <div class="quick-filter-pills">
+        <button
+          v-for="pill in typePillOptions"
+          :key="pill.value"
+          type="button"
+          class="filter-pill"
+          :class="{ 'is-active': typeFilter === pill.value }"
+          @click="selectTypeFilter(pill.value)"
         >
-          全选本页
-        </el-checkbox>
-        <span class="selection-count">已选 {{ selectedItems.length }} 项</span>
+          <el-icon class="pill-icon"><component :is="pill.icon" /></el-icon>
+          <span class="pill-label">{{ pill.label }}</span>
+          <span v-if="pill.count !== undefined" class="pill-count">{{ pill.count }}</span>
+        </button>
+      </div>
+
+      <!-- 面包屑与路径状态栏 -->
+      <div class="breadcrumb-bar">
+        <el-button
+          v-if="isInsideGroup"
+          :icon="ArrowLeft"
+          class="back-root-btn"
+          text
+          @click="goRoot"
+        >
+          返回根目录
+        </el-button>
+        <el-breadcrumb separator="/" class="drive-breadcrumb">
+          <el-breadcrumb-item>
+            <span class="breadcrumb-link" @click="goRoot">
+              <el-icon class="breadcrumb-home-icon"><Folder /></el-icon>
+              <span>TG网盘</span>
+            </span>
+          </el-breadcrumb-item>
+          <el-breadcrumb-item v-if="isInsideGroup">
+            <span class="breadcrumb-current-group">
+              <el-icon class="mr-1 text-sm"><FolderOpened /></el-icon>
+              {{ currentFolderName }}
+            </span>
+          </el-breadcrumb-item>
+        </el-breadcrumb>
+        <div v-if="total > 0" class="items-total-pill">
+          共 {{ total }} 项
+        </div>
+      </div>
+
+      <!-- 批量选择与操作工具栏 -->
+      <div v-if="items.length" class="selection-toolbar">
+        <div class="selection-left">
+          <el-checkbox
+            :model-value="allPageSelected"
+            :indeterminate="somePageSelected"
+            :disabled="loading || batchDeleting"
+            @change="toggleSelectPage(Boolean($event))"
+          >
+            全选本页
+          </el-checkbox>
+          <span class="selection-count">已选 {{ selectedItems.length }} 项</span>
+        </div>
         <div class="selection-actions">
           <el-button
             :icon="Download"
+            class="batch-btn batch-download-btn"
             :disabled="selectedFiles.length === 0 || loading || batchDeleting"
             @click="handleBatchDownload"
           >
             下载文件<span v-if="selectedFiles.length">（{{ selectedFiles.length }}）</span>
           </el-button>
           <el-button
+            :icon="Link"
+            class="batch-btn batch-copy-btn"
+            :disabled="selectedFiles.length === 0 || loading || batchDeleting"
+            @click="handleBatchCopyStreamUrls"
+          >
+            复制直链<span v-if="selectedFiles.length">（{{ selectedFiles.length }}）</span>
+          </el-button>
+          <el-button
+            :icon="List"
+            class="batch-btn batch-m3u-btn"
+            :disabled="selectedFiles.length === 0 || loading || batchDeleting"
+            @click="handleExportM3U"
+          >
+            导出播放列表<span v-if="selectedFiles.length">（{{ selectedFiles.length }}）</span>
+          </el-button>
+          <el-button
             type="danger"
+            class="batch-btn batch-delete-btn"
             :icon="Delete"
             :disabled="selectedItems.length === 0 || loading"
             :loading="batchDeleting"
@@ -102,6 +279,7 @@
           <el-button
             v-if="selectedItems.length"
             text
+            class="batch-cancel-btn"
             :disabled="batchDeleting"
             @click="clearSelection"
           >
@@ -110,83 +288,151 @@
         </div>
       </div>
 
-      <el-table
-        v-if="viewMode === 'list'"
-        :data="items"
-        v-loading="loading"
-        style="width: 100%; margin-top: 20px"
-        @row-click="handleOpen"
-        :row-style="{ cursor: 'pointer' }"
-      >
-        <el-table-column width="48" align="center">
-          <template #header>
-            <el-checkbox
-              :model-value="allPageSelected"
-              :indeterminate="somePageSelected"
-              :disabled="loading || batchDeleting"
-              aria-label="全选本页"
-              @click.stop
-              @change="toggleSelectPage(Boolean($event))"
-            />
-          </template>
-          <template #default="{ row }">
-            <el-checkbox
-              :model-value="isSelected(row)"
-              :disabled="batchDeleting"
-              :aria-label="`选择 ${getFileName(row)}`"
-              @click.stop
-              @change="toggleItemSelection(row, Boolean($event))"
-            />
-          </template>
-        </el-table-column>
-        <el-table-column label="名称" min-width="260">
-          <template #default="{ row }">
-            <div class="file-name">
-              <el-icon :size="18">
-                <Folder v-if="isFolder(row)" />
-                <Picture v-else-if="isImage(row)" />
-                <VideoPlay v-else-if="isVideo(row)" />
-                <Headset v-else-if="isAudio(row)" />
-                <Document v-else />
-              </el-icon>
-              <span>{{ getFileName(row) }}</span>
-              <el-tag v-if="isFolder(row)" size="small" type="warning">{{ row.item_count || 0 }} 个文件</el-tag>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="类型" width="120">
-          <template #default="{ row }">{{ getTypeLabel(row) }}</template>
-        </el-table-column>
-        <el-table-column label="大小" width="130">
-          <template #default="{ row }">{{ formatBytes(getDisplaySize(row)) }}</template>
-        </el-table-column>
-        <el-table-column label="内容" width="120">
-          <template #default="{ row }">
-            <span v-if="isFolder(row)">{{ row.item_count || 0 }} 个文件</span>
-            <span v-else>#{{ row.message_id }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="时间" width="180">
-          <template #default="{ row }">{{ formatDate(row.message_date) }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="220" align="center">
-          <template #default="{ row }">
-            <el-button-group>
-              <el-button v-if="isFolder(row)" type="primary" link :icon="Folder" @click.stop="enterFolder(row)">
-                打开
-              </el-button>
-              <el-button v-else type="primary" link :icon="View" @click.stop="handlePreview(row)">
-                预览
-              </el-button>
-              <el-button v-if="isFile(row)" type="success" link :icon="Download" @click.stop="handleDownload(row)">
-                下载
-              </el-button>
-              <el-button type="danger" link :icon="Delete" @click.stop="handleDelete(row)" />
-            </el-button-group>
-          </template>
-        </el-table-column>
-      </el-table>
+      <!-- 列表模式视图 -->
+      <div v-if="viewMode === 'list'" class="table-container">
+        <el-table
+          :data="items"
+          v-loading="loading"
+          class="drive-table"
+          @row-click="handleOpen"
+          :row-style="{ cursor: 'pointer' }"
+        >
+          <el-table-column width="48" align="center">
+            <template #header>
+              <el-checkbox
+                :model-value="allPageSelected"
+                :indeterminate="somePageSelected"
+                :disabled="loading || batchDeleting"
+                aria-label="全选本页"
+                @click.stop
+                @change="toggleSelectPage(Boolean($event))"
+              />
+            </template>
+            <template #default="{ row }">
+              <el-checkbox
+                :model-value="isSelected(row)"
+                :disabled="batchDeleting"
+                :aria-label="`选择 ${getFileName(row)}`"
+                @click.stop="handleCheckboxClick(row, $event)"
+                @change="toggleItemSelection(row, Boolean($event))"
+              />
+            </template>
+          </el-table-column>
 
+          <el-table-column label="名称" min-width="260">
+            <template #default="{ row }">
+              <div class="file-name">
+                <span class="file-icon-badge" :class="getFileIconClass(row)">
+                  <img
+                    v-if="getThumbnailUrl(row) && !failedCovers.has(getItemKey(row))"
+                    :src="getThumbnailUrl(row)"
+                    :alt="getFileName(row)"
+                    class="file-mini-thumb"
+                    loading="lazy"
+                    @error="markCoverFailed(row)"
+                  />
+                  <el-icon v-else :size="18">
+                    <Folder v-if="isFolder(row)" />
+                    <Picture v-else-if="isImage(row)" />
+                    <VideoPlay v-else-if="isVideo(row)" />
+                    <Headset v-else-if="isAudio(row)" />
+                    <Document v-else />
+                  </el-icon>
+                </span>
+                <span class="file-title" :title="getFileName(row)">{{ getFileName(row) }}</span>
+                <span v-if="row.dc_id" class="dc-tag-inline">DC{{ row.dc_id }}</span>
+                <el-tag v-if="isFolder(row)" size="small" class="album-tag">
+                  {{ row.item_count || 0 }} 个文件
+                </el-tag>
+              </div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="类型" width="130">
+            <template #default="{ row }">
+              <span class="type-pill" :class="getTypeBadgeClass(row)">
+                {{ getTypeLabel(row) }}
+              </span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="大小" width="130">
+            <template #default="{ row }">
+              <span class="size-text">{{ formatBytes(getDisplaySize(row)) }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="内容" width="120">
+            <template #default="{ row }">
+              <span v-if="isFolder(row)" class="content-text">{{ row.item_count || 0 }} 个文件</span>
+              <span v-else class="message-id-tag">#{{ row.message_id }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="时间" width="180">
+            <template #default="{ row }">
+              <span class="time-text">{{ formatDate(row.message_date) }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="操作" width="220" align="center">
+            <template #default="{ row }">
+              <div class="table-actions" @click.stop>
+                <el-button
+                  v-if="isFolder(row)"
+                  type="primary"
+                  link
+                  class="action-link-btn"
+                  :icon="Folder"
+                  @click.stop="enterFolder(row)"
+                >
+                  打开
+                </el-button>
+                <el-button
+                  v-else
+                  type="primary"
+                  link
+                  class="action-link-btn"
+                  :icon="View"
+                  @click.stop="handlePreview(row)"
+                >
+                  预览
+                </el-button>
+                <el-button
+                  v-if="isFile(row)"
+                  type="info"
+                  link
+                  class="action-link-btn action-copy-link"
+                  :icon="Link"
+                  title="复制文件直链"
+                  @click.stop="handleCopyStreamUrl(row)"
+                >
+                  直链
+                </el-button>
+                <el-button
+                  v-if="isFile(row)"
+                  type="success"
+                  link
+                  class="action-link-btn action-download"
+                  :icon="Download"
+                  @click.stop="handleDownload(row)"
+                >
+                  下载
+                </el-button>
+                <el-button
+                  type="danger"
+                  link
+                  class="action-link-btn action-delete"
+                  :icon="Delete"
+                  @click.stop="handleDelete(row)"
+                />
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <!-- 网格模式视图 -->
       <div v-else v-loading="loading" class="grid-view">
         <div
           v-for="item in items"
@@ -195,44 +441,171 @@
           :class="{ 'is-selected': isSelected(item) }"
           @click="handleOpen(item)"
         >
+          <!-- 左上角勾选框 -->
           <el-checkbox
             class="grid-item-checkbox"
             :model-value="isSelected(item)"
             :disabled="batchDeleting"
             :aria-label="`选择 ${getFileName(item)}`"
-            @click.stop
+            @click.stop="handleCheckboxClick(item, $event)"
             @change="toggleItemSelection(item, Boolean($event))"
           />
-          <div class="grid-item-preview">
-            <el-image v-if="!isFolder(item) && isImage(item)" :src="getStreamUrl(item)" fit="cover" class="grid-thumbnail" lazy>
-              <template #error><el-icon :size="44"><Picture /></el-icon></template>
-            </el-image>
+
+          <!-- 封面缩略图区域 -->
+          <div class="grid-item-preview" :class="getCoverBgClass(item)">
+            <img
+              v-if="getThumbnailUrl(item) && !failedCovers.has(getItemKey(item))"
+              :src="getThumbnailUrl(item)"
+              :alt="getFileName(item)"
+              loading="lazy"
+              class="grid-thumbnail"
+              @error="markCoverFailed(item)"
+            />
             <div v-else class="grid-placeholder">
-              <el-icon :size="48">
-                <Folder v-if="isFolder(item)" />
-                <VideoPlay v-else-if="isVideo(item)" />
-                <Headset v-else-if="isAudio(item)" />
-                <Document v-else />
-              </el-icon>
+              <div class="placeholder-icon-halo">
+                <el-icon :size="40">
+                  <Folder v-if="isFolder(item)" />
+                  <VideoPlay v-else-if="isVideo(item)" />
+                  <Picture v-else-if="isImage(item)" />
+                  <Headset v-else-if="isAudio(item)" />
+                  <Document v-else />
+                </el-icon>
+              </div>
             </div>
-            <el-tag class="type-badge" size="small">{{ getTypeLabel(item) }}</el-tag>
+
+            <!-- 右上角类型小徽章 -->
+            <span class="type-badge" :class="getTypeBadgeClass(item)">
+              {{ getTypeLabel(item) }}
+            </span>
+            <span v-if="item.dc_id" class="grid-dc-badge">DC{{ item.dc_id }}</span>
+
+            <!-- 相册标志 -->
+            <span v-if="isFolder(item)" class="grid-album-chip">
+              <el-icon class="mr-1"><Folder /></el-icon>
+              {{ item.item_count || 0 }}
+            </span>
+
+            <!-- 悬浮微操作栏 -->
+            <div class="grid-card-overlay" @click.stop>
+              <button
+                v-if="isFolder(item)"
+                class="overlay-action-btn"
+                title="打开相册"
+                @click.stop="enterFolder(item)"
+              >
+                <el-icon><FolderOpened /></el-icon>
+              </button>
+              <button
+                v-else
+                class="overlay-action-btn"
+                title="预览"
+                @click.stop="handlePreview(item)"
+              >
+                <el-icon><View /></el-icon>
+              </button>
+              <button
+                v-if="isFile(item)"
+                class="overlay-action-btn overlay-link"
+                title="复制直链"
+                @click.stop="handleCopyStreamUrl(item)"
+              >
+                <el-icon><Link /></el-icon>
+              </button>
+              <button
+                v-if="isFile(item)"
+                class="overlay-action-btn overlay-download"
+                title="下载"
+                @click.stop="handleDownload(item)"
+              >
+                <el-icon><Download /></el-icon>
+              </button>
+              <button
+                class="overlay-action-btn overlay-delete"
+                title="删除"
+                @click.stop="handleDelete(item)"
+              >
+                <el-icon><Delete /></el-icon>
+              </button>
+            </div>
           </div>
-          <div class="grid-item-name" :title="getFileName(item)">{{ getFileName(item) }}</div>
-          <div class="grid-item-meta">
-            <span v-if="isFolder(item)">{{ item.item_count || 0 }} 个文件 · {{ formatBytes(getDisplaySize(item)) }}</span>
-            <span v-else>{{ formatBytes(getDisplaySize(item)) }} · #{{ item.message_id }}</span>
-          </div>
-          <div class="grid-item-actions">
-            <el-button v-if="isFolder(item)" circle size="small" type="primary" :icon="Folder" @click.stop="enterFolder(item)" title="打开" />
-            <el-button v-else circle size="small" type="primary" :icon="View" @click.stop="handlePreview(item)" title="预览" />
-            <el-button v-if="isFile(item)" circle size="small" type="success" :icon="Download" @click.stop="handleDownload(item)" title="下载" />
-            <el-button circle size="small" type="danger" :icon="Delete" @click.stop="handleDelete(item)" />
+
+          <!-- 卡片信息与底栏操作 -->
+          <div class="grid-item-body">
+            <div class="grid-item-name" :title="getFileName(item)">{{ getFileName(item) }}</div>
+            <div class="grid-item-footer">
+              <div class="grid-item-meta">
+                <span v-if="isFolder(item)">{{ item.item_count || 0 }} 个文件 · {{ formatBytes(getDisplaySize(item)) }}</span>
+                <span v-else>{{ formatBytes(getDisplaySize(item)) }} · #{{ item.message_id }}</span>
+              </div>
+              <div class="grid-item-actions" @click.stop>
+                <button
+                  v-if="isFolder(item)"
+                  class="card-action-btn"
+                  title="打开"
+                  @click.stop="enterFolder(item)"
+                >
+                  <el-icon><FolderOpened /></el-icon>
+                </button>
+                <button
+                  v-else
+                  class="card-action-btn"
+                  title="预览"
+                  @click.stop="handlePreview(item)"
+                >
+                  <el-icon><View /></el-icon>
+                </button>
+                <button
+                  v-if="isFile(item)"
+                  class="card-action-btn card-action-link"
+                  title="复制直链"
+                  @click.stop="handleCopyStreamUrl(item)"
+                >
+                  <el-icon><Link /></el-icon>
+                </button>
+                <button
+                  v-if="isFile(item)"
+                  class="card-action-btn"
+                  title="下载"
+                  @click.stop="handleDownload(item)"
+                >
+                  <el-icon><Download /></el-icon>
+                </button>
+                <button
+                  class="card-action-btn card-action-delete"
+                  title="删除"
+                  @click.stop="handleDelete(item)"
+                >
+                  <el-icon><Delete /></el-icon>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
-      <el-empty v-if="!loading && items.length === 0" :description="isInsideGroup ? '此媒体组暂无文件' : 'TG 频道网盘暂无文件'" />
+      <!-- 空状态 -->
+      <div v-if="!loading && items.length === 0" class="empty-state-box">
+        <div class="empty-icon-halo">
+          <el-icon :size="54"><FolderOpened /></el-icon>
+        </div>
+        <div class="empty-title">{{ isInsideGroup ? '此媒体组暂无文件' : 'TG 频道网盘暂无文件' }}</div>
+        <p class="empty-hint">
+          {{ isInsideGroup ? '可点击上方返回根目录查看其他资源' : '频道内暂无可展示的媒体内容，或已被当前筛选条件过滤。' }}
+        </p>
+        <div class="empty-actions">
+          <el-button v-if="isInsideGroup" type="primary" :icon="ArrowLeft" @click="goRoot">
+            返回根目录
+          </el-button>
+          <el-button v-else-if="typeFilter || searchKeyword" :icon="RefreshRight" @click="resetFilters">
+            重置筛选条件
+          </el-button>
+          <el-button v-else :icon="RefreshRight" @click="refreshAll">
+            刷新同步
+          </el-button>
+        </div>
+      </div>
 
+      <!-- 分页栏 -->
       <div class="pagination-container">
         <el-pagination
           v-model:current-page="currentPage"
@@ -245,71 +618,329 @@
           @size-change="handlePageSizeChange"
         />
       </div>
-    </el-card>
+    </div>
 
+    <!-- 图片全屏预览 -->
     <el-image-viewer
       v-if="showPreview && previewType === 'image'"
-      :url-list="[previewUrl]"
+      :url-list="previewImageUrls.length > 0 ? previewImageUrls : [previewUrl]"
+      :initial-index="previewImageIndex"
       @close="closePreview"
       hide-on-click-modal
     />
 
+    <!-- 视频弹窗播放器 -->
     <el-dialog
       v-model="showPreview"
       v-if="previewType === 'video'"
+      :show-close="false"
+      append-to-body
+      align-center
+      destroy-on-close
+      @close="closePreview"
+      class="video-dialog glass-video-dialog"
+      :class="{ 'is-web-fullscreen': isWebFullscreen }"
+    >
+      <template #header="{ close }">
+        <div class="video-dialog-header">
+          <div class="video-header-left">
+            <span class="video-badge-icon">
+              <el-icon :size="16"><VideoCamera /></el-icon>
+            </span>
+            <span class="video-header-title" :title="getFileName(previewItem)">
+              {{ getFileName(previewItem) }}
+            </span>
+            <span v-if="currentPlayableIndex >= 0" class="video-header-pill">
+              {{ currentPlayableIndex + 1 }} / {{ playableMediaList.length }}
+            </span>
+          </div>
+          <div class="video-header-actions">
+            <el-tooltip content="上一集 (←)" placement="bottom">
+              <button
+                class="header-tool-btn nav-media-btn btn-prev-media"
+                type="button"
+                :disabled="!hasPrevMedia"
+                @click="playPrevMedia"
+              >
+                <el-icon :size="16"><ArrowLeft /></el-icon>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="下一集 (→)" placement="bottom">
+              <button
+                class="header-tool-btn nav-media-btn btn-next-media"
+                type="button"
+                :disabled="!hasNextMedia"
+                @click="playNextMedia"
+              >
+                <el-icon :size="16"><ArrowRight /></el-icon>
+              </button>
+            </el-tooltip>
+
+            <el-tooltip :content="isWebFullscreen ? '还原窗口' : '网页宽屏'" placement="bottom">
+              <button
+                class="header-tool-btn btn-web-fullscreen"
+                type="button"
+                @click="isWebFullscreen = !isWebFullscreen"
+              >
+                <el-icon :size="16">
+                  <component :is="isWebFullscreen ? ScaleToOriginal : FullScreen" />
+                </el-icon>
+              </button>
+            </el-tooltip>
+            <el-tooltip content="关闭预览 (Esc)" placement="bottom">
+              <button class="header-tool-btn btn-close" type="button" @click="close">
+                <el-icon :size="18"><Close /></el-icon>
+              </button>
+            </el-tooltip>
+          </div>
+        </div>
+      </template>
+
+      <div class="video-container" :class="{ 'fullscreen-container': isWebFullscreen }">
+        <VideoPlayer
+          ref="videoPlayerRef"
+          v-if="previewUrl"
+          :src="previewUrl"
+          :type="getVideoType(previewItem)"
+          @ended="handleMediaEnded"
+        />
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer-info">
+          <div class="footer-meta-tags">
+            <span v-if="previewItem && previewItem.dc_id" class="dc-tag-dialog">
+              DC{{ previewItem.dc_id }}
+            </span>
+            <span class="file-size-tag">{{ formatBytes(getDisplaySize(previewItem!)) }}</span>
+            <span v-if="previewItem && previewItem.mime_type" class="file-mime-tag">
+              {{ previewItem.mime_type }}
+            </span>
+            <el-tooltip content="播放完毕自动起播下一个视频" placement="top">
+              <el-switch
+                v-model="autoplayNext"
+                inline-prompt
+                active-text="连播"
+                inactive-text="单集"
+                class="autoplay-switch"
+                size="small"
+              />
+            </el-tooltip>
+          </div>
+          <div class="footer-actions">
+            <el-button
+              class="footer-tool-btn copy-url-btn"
+              :icon="Link"
+              @click="handleCopyStreamUrl(previewItem!)"
+            >
+              复制直链
+            </el-button>
+
+            <el-dropdown trigger="click" @command="(cmd: any) => openExternalPlayer(cmd)">
+              <el-button class="footer-tool-btn external-player-btn" :icon="Promotion">
+                外部播放<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu class="external-player-menu">
+                  <el-dropdown-item command="potplayer">
+                    <div class="player-menu-item">
+                      <span class="player-menu-title">PotPlayer</span>
+                      <span class="player-menu-hint">Windows 原生播放器</span>
+                    </div>
+                  </el-dropdown-item>
+                  <el-dropdown-item command="vlc">
+                    <div class="player-menu-item">
+                      <span class="player-menu-title">VLC Media Player</span>
+                      <span class="player-menu-hint">全平台开源播放器</span>
+                    </div>
+                  </el-dropdown-item>
+                  <el-dropdown-item command="iina">
+                    <div class="player-menu-item">
+                      <span class="player-menu-title">IINA</span>
+                      <span class="player-menu-hint">macOS 现代化播放器</span>
+                    </div>
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+
+            <el-tooltip content="独立画中画小窗播放" placement="top">
+              <el-button
+                class="footer-tool-btn pip-btn"
+                :icon="Monitor"
+                @click="triggerPlayerPiP"
+              >
+                画中画
+              </el-button>
+            </el-tooltip>
+
+            <el-button
+              class="fullscreen-toggle-btn"
+              :icon="FullScreen"
+              @click="triggerPlayerFullscreen"
+            >
+              全屏播放
+            </el-button>
+            <el-button
+              type="primary"
+              class="download-action-btn primary-glow-btn"
+              :icon="Download"
+              @click="handleDownload(previewItem!)"
+            >
+              下载原视频
+            </el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- 音频试听播放器 -->
+    <el-dialog
+      v-model="showPreview"
+      v-if="previewType === 'audio'"
       :title="getFileName(previewItem)"
-      width="80%"
+      append-to-body
+      align-center
       destroy-on-close
       @close="closePreview"
       center
-      class="video-dialog"
+      class="audio-dialog glass-audio-dialog"
     >
-      <div class="video-container">
-        <VideoPlayer v-if="previewUrl" :src="previewUrl" :type="getVideoType(previewItem)" />
+      <div class="audio-player-container">
+        <div class="audio-vinyl">
+          <el-icon :size="48" class="audio-vinyl-icon"><Headset /></el-icon>
+        </div>
+        <div class="audio-name">{{ getFileName(previewItem) }}</div>
+        <div class="audio-meta">{{ formatBytes(getDisplaySize(previewItem!)) }}</div>
+        <audio
+          :src="previewUrl"
+          controls
+          autoplay
+          class="audio-native-player"
+          @ended="handleMediaEnded"
+        ></audio>
       </div>
+      <template #footer>
+        <div class="dialog-footer-info">
+          <div class="footer-meta-tags">
+            <el-tooltip content="播放完毕自动起播下一个音频" placement="top">
+              <el-switch
+                v-model="autoplayNext"
+                inline-prompt
+                active-text="连播"
+                inactive-text="单集"
+                class="autoplay-switch"
+                size="small"
+              />
+            </el-tooltip>
+          </div>
+          <div class="footer-actions">
+            <el-button class="footer-tool-btn" :icon="Link" @click="handleCopyStreamUrl(previewItem!)">
+              复制直链
+            </el-button>
+            <el-button type="primary" :icon="Download" @click="handleDownload(previewItem!)">
+              下载音频
+            </el-button>
+          </div>
+        </div>
+      </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Delete, Document, Download, Folder, Grid, Headset, List, Picture, RefreshRight, Search, VideoPlay, View } from '@element-plus/icons-vue'
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  Close,
+  Coin,
+  Delete,
+  Document,
+  Download,
+  Files,
+  Folder,
+  FolderOpened,
+  FullScreen,
+  Grid,
+  Headset,
+  Link,
+  List,
+  Loading,
+  Monitor,
+  Picture,
+  Promotion,
+  RefreshRight,
+  ScaleToOriginal,
+  Search,
+  VideoCamera,
+  VideoPlay,
+  View,
+} from '@element-plus/icons-vue'
 import {
   browseTelegramDrive,
   clearTelegramDrive,
   deleteTelegramBatch,
   deleteTelegramGroup,
   deleteTelegramItem,
+  getTelegramThumbnailStatus,
   getTelegramUsage,
   isTelegramDriveFile,
   isTelegramDriveFolder,
+  warmupTelegramThumbnails,
   type TelegramDriveFile,
   type TelegramDriveFolder,
   type TelegramDriveItem,
+  type TelegramThumbnailStatus,
   type TelegramUsageStats,
 } from '@/api'
 import VideoPlayer from '@/components/VideoPlayer.vue'
-import { resolveServerUrl } from '@/utils/runtime'
+import { resolveServerUrl, toAbsoluteServerUrl } from '@/utils/runtime'
 
 const items = ref<TelegramDriveItem[]>([])
 const usageStats = ref<TelegramUsageStats | null>(null)
 const loading = ref(false)
 const searchKeyword = ref('')
 const typeFilter = ref('')
-const sortOption = ref('message_date-desc')
+const sortOption = ref(localStorage.getItem('mistrelay.drive.sortOption') || 'message_date-desc')
+watch(sortOption, val => {
+  localStorage.setItem('mistrelay.drive.sortOption', val)
+  handleSearch()
+})
+
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(Number(localStorage.getItem('mistrelay.drive.pageSize')) || 20)
+watch(pageSize, val => localStorage.setItem('mistrelay.drive.pageSize', String(val)))
+
 const total = ref(0)
-const viewMode = ref<'list' | 'grid'>('list')
+const viewMode = ref<'list' | 'grid'>((localStorage.getItem('mistrelay.drive.viewMode') as any) === 'grid' ? 'grid' : 'list')
+watch(viewMode, val => localStorage.setItem('mistrelay.drive.viewMode', val))
+
+const lastSelectedKey = ref<string | null>(null)
+const autoplayNext = ref(localStorage.getItem('mistrelay.drive.autoplayNext') !== 'false')
+watch(autoplayNext, val => localStorage.setItem('mistrelay.drive.autoplayNext', String(val)))
 const showPreview = ref(false)
 const previewItem = ref<TelegramDriveItem | null>(null)
-const previewType = ref<'image' | 'video' | 'unknown'>('unknown')
+const previewType = ref<'image' | 'video' | 'audio' | 'unknown'>('unknown')
 const previewUrl = ref('')
 const currentMediaGroupId = ref('')
 const currentFolderName = ref('')
 const selectedKeys = ref(new Set<string>())
 const batchDeleting = ref(false)
+const failedCovers = ref(new Set<string>())
+const thumbStatus = ref<TelegramThumbnailStatus | null>(null)
+const thumbVersion = ref(0)
+const pollTimer = ref<any>(null)
+const isWebFullscreen = ref(false)
+const videoPlayerRef = ref<any>(null)
+
+function triggerPlayerFullscreen() {
+  if (videoPlayerRef.value && typeof videoPlayerRef.value.toggleFullscreen === 'function') {
+    videoPlayerRef.value.toggleFullscreen()
+  }
+}
 
 const isInsideGroup = computed(() => Boolean(currentMediaGroupId.value))
 const selectedItems = computed(() => items.value.filter(item => selectedKeys.value.has(getItemKey(item))))
@@ -328,6 +959,26 @@ const sortParams = computed(() => {
     sort_desc: order !== 'asc',
   }
 })
+
+const typePillOptions = computed(() => [
+  { label: '全部', value: '', icon: Files, count: usageStats.value?.total_count },
+  { label: '视频', value: 'video', icon: VideoPlay, count: usageStats.value?.videos },
+  { label: '图片', value: 'image', icon: Picture, count: usageStats.value?.images },
+  { label: '音频', value: 'audio', icon: Headset, count: usageStats.value?.audios },
+  { label: '文档', value: 'document', icon: Document, count: usageStats.value?.documents },
+])
+
+function selectTypeFilter(value: string) {
+  if (typeFilter.value === value) return
+  typeFilter.value = value
+  handleSearch()
+}
+
+function resetFilters() {
+  typeFilter.value = ''
+  searchKeyword.value = ''
+  handleSearch()
+}
 
 function getFileName(item?: TelegramDriveItem | null): string {
   if (!item) return ''
@@ -372,12 +1023,41 @@ function clearSelection() {
   selectedKeys.value = new Set()
 }
 
+let isShiftPressed = false
+
+function handleCheckboxClick(_item: TelegramDriveItem, event: MouseEvent) {
+  if (event?.shiftKey) {
+    isShiftPressed = true
+  }
+}
+
 function toggleItemSelection(item: TelegramDriveItem, selected: boolean) {
-  const next = new Set(selectedKeys.value)
   const key = getItemKey(item)
+  const next = new Set(selectedKeys.value)
+
+  if (isShiftPressed && lastSelectedKey.value && lastSelectedKey.value !== key) {
+    const fromIdx = items.value.findIndex(it => getItemKey(it) === lastSelectedKey.value)
+    const toIdx = items.value.findIndex(it => getItemKey(it) === key)
+    if (fromIdx !== -1 && toIdx !== -1) {
+      const start = Math.min(fromIdx, toIdx)
+      const end = Math.max(fromIdx, toIdx)
+      for (let i = start; i <= end; i++) {
+        const k = getItemKey(items.value[i])
+        if (selected) next.add(k)
+        else next.delete(k)
+      }
+      selectedKeys.value = next
+      lastSelectedKey.value = key
+      isShiftPressed = false
+      return
+    }
+  }
+
+  isShiftPressed = false
   if (selected) next.add(key)
   else next.delete(key)
   selectedKeys.value = next
+  lastSelectedKey.value = key
 }
 
 function toggleSelectPage(selected: boolean) {
@@ -398,6 +1078,8 @@ function getDownloadUrl(item: TelegramDriveItem): string {
   return downloadUrl.toString()
 }
 
+const coverFallbacks = ref<Record<string, string>>({})
+
 function isFolder(item?: TelegramDriveItem | null): item is TelegramDriveFolder {
   return isTelegramDriveFolder(item)
 }
@@ -406,28 +1088,140 @@ function isFile(item?: TelegramDriveItem | null): item is TelegramDriveFile {
   return isTelegramDriveFile(item)
 }
 
+function isImage(item?: TelegramDriveItem | null): boolean {
+  if (!item) return false
+  if (isFolder(item)) return false
+  if (item.mime_type?.toLowerCase().startsWith('image/')) return true
+  const name = item.file_name || (item as any).download_file_name || ''
+  if (/\.(jpe?g|png|gif|webp|bmp|svg|heic|avif)$/i.test(name)) return true
+  const stream = item.stream_url || ''
+  if (/\.(jpe?g|png|gif|webp|bmp|svg|heic|avif)(\?|$)/i.test(stream)) return true
+  return false
+}
+
+function isVideo(item?: TelegramDriveItem | null): boolean {
+  if (!item) return false
+  if (isFolder(item)) return false
+  if (item.mime_type?.toLowerCase().startsWith('video/')) return true
+  const name = item.file_name || (item as any).download_file_name || ''
+  if (/\.(mp4|mkv|webm|avi|mov|wmv|flv|m4v|ts)$/i.test(name)) return true
+  const stream = item.stream_url || ''
+  if (/\.(mp4|mkv|webm|avi|mov|wmv|flv|m4v|ts)(\?|$)/i.test(stream)) return true
+  return false
+}
+
+function isAudio(item?: TelegramDriveItem | null): boolean {
+  if (!item) return false
+  if (isFolder(item)) return false
+  if (item.mime_type?.toLowerCase().startsWith('audio/')) return true
+  const name = item.file_name || (item as any).download_file_name || ''
+  if (/\.(mp3|ogg|wav|flac|m4a|aac|opus)$/i.test(name)) return true
+  const stream = item.stream_url || ''
+  if (/\.(mp3|ogg|wav|flac|m4a|aac|opus)(\?|$)/i.test(stream)) return true
+  return false
+}
+
+function isAlbumWithImages(item?: TelegramDriveItem | null): boolean {
+  if (!isFolder(item)) return false
+  const groupMimes = item.group_mime_types || []
+  if (groupMimes.some(mime => mime.toLowerCase().startsWith('image/'))) return true
+  const repMime = (item as any).representative_mime_type || ''
+  if (repMime.toLowerCase().startsWith('image/')) return true
+  const name = item.file_name || (item as any).representative_file_name || ''
+  return /\.(jpe?g|png|gif|webp|bmp|svg|heic|avif)$/i.test(name)
+}
+
+function getThumbnailUrl(item: TelegramDriveItem): string {
+  if (!item) return ''
+  const key = getItemKey(item)
+  if (failedCovers.value.has(key)) return ''
+  if (coverFallbacks.value[key]) {
+    return coverFallbacks.value[key]
+  }
+
+  // 1. 优先使用后端统一 WebP 缩略图（小体积、高并发、秒开）
+  if (item.thumbnail_url) {
+    const url = resolveServerUrl(item.thumbnail_url)
+    if (thumbVersion.value > 0) {
+      const sep = url.includes('?') ? '&' : '?'
+      return `${url}${sep}_v=${thumbVersion.value}`
+    }
+    return url
+  }
+
+  // 2. 文件夹相册有代表项直链且为图片
+  if (isFolder(item) && isAlbumWithImages(item) && item.stream_url) {
+    return resolveServerUrl(item.stream_url)
+  }
+
+  // 3. 兜底非音视频直链
+  if (item.stream_url && !isVideo(item) && !isAudio(item)) {
+    return resolveServerUrl(item.stream_url)
+  }
+
+  return ''
+}
+
+function markCoverFailed(item: TelegramDriveItem) {
+  const key = getItemKey(item)
+  // 若使用直链失败且存在后端 thumbnail_url，则降级尝试 thumbnail_url
+  if (!coverFallbacks.value[key] && item.thumbnail_url) {
+    const fallbackThumb = resolveServerUrl(item.thumbnail_url)
+    if (fallbackThumb !== getThumbnailUrl(item)) {
+      coverFallbacks.value = { ...coverFallbacks.value, [key]: fallbackThumb }
+      return
+    }
+  }
+  failedCovers.value = new Set(failedCovers.value).add(key)
+}
+
 function getDisplaySize(item: TelegramDriveItem): number {
   return isFolder(item) ? item.total_size ?? 0 : item.file_size ?? 0
 }
 
-function isImage(item?: TelegramDriveItem | null): boolean {
-  return Boolean(item?.mime_type?.startsWith('image/'))
-}
+const previewImageUrls = computed(() => {
+  return items.value
+    .filter(i => isFile(i) && isImage(i) && i.stream_url)
+    .map(i => resolveServerUrl(i.stream_url!))
+})
 
-function isVideo(item?: TelegramDriveItem | null): boolean {
-  return Boolean(item?.mime_type?.startsWith('video/'))
-}
-
-function isAudio(item?: TelegramDriveItem | null): boolean {
-  return Boolean(item?.mime_type?.startsWith('audio/'))
-}
+const previewImageIndex = computed(() => {
+  if (!previewItem.value || !isFile(previewItem.value)) return 0
+  const currentUrl = previewUrl.value
+  const idx = previewImageUrls.value.indexOf(currentUrl)
+  return idx >= 0 ? idx : 0
+})
 
 function getTypeLabel(item: TelegramDriveItem): string {
-  if (isFolder(item)) return '媒体组文件夹'
+  if (isFolder(item)) return '媒体组'
   if (isVideo(item)) return '视频'
   if (isImage(item)) return '图片'
   if (isAudio(item)) return '音频'
   return '文档'
+}
+
+function getTypeBadgeClass(item: TelegramDriveItem): string {
+  if (isFolder(item)) return 'type-badge-album'
+  if (isVideo(item)) return 'type-badge-video'
+  if (isImage(item)) return 'type-badge-image'
+  if (isAudio(item)) return 'type-badge-audio'
+  return 'type-badge-document'
+}
+
+function getFileIconClass(item: TelegramDriveItem): string {
+  if (isFolder(item)) return 'icon-badge-album'
+  if (isVideo(item)) return 'icon-badge-video'
+  if (isImage(item)) return 'icon-badge-image'
+  if (isAudio(item)) return 'icon-badge-audio'
+  return 'icon-badge-document'
+}
+
+function getCoverBgClass(item: TelegramDriveItem): string {
+  if (isFolder(item)) return 'cover-album'
+  if (isVideo(item)) return 'cover-video'
+  if (isImage(item)) return 'cover-image'
+  if (isAudio(item)) return 'cover-audio'
+  return 'cover-doc'
 }
 
 function getVideoType(item?: TelegramDriveItem | null): string {
@@ -489,7 +1283,60 @@ async function loadItems() {
   }
 }
 
+async function fetchThumbStatus() {
+  try {
+    const response = await getTelegramThumbnailStatus()
+    if (response?.success && response.data) {
+      const wasRunning = thumbStatus.value?.running
+      thumbStatus.value = response.data
+      if (response.data.running) {
+        startThumbPolling()
+      } else if (wasRunning) {
+        // 预热完成，更新版本号让页面重新拉取最新生成的 WebP 缩略图
+        thumbVersion.value++
+        failedCovers.value = new Set()
+        coverFallbacks.value = {}
+        stopThumbPolling()
+      }
+    }
+  } catch (_e) {
+    // 单元测试或接口不可用时优雅降级
+  }
+}
+
+function startThumbPolling() {
+  if (pollTimer.value) return
+  pollTimer.value = setInterval(fetchThumbStatus, 3000)
+}
+
+function stopThumbPolling() {
+  if (pollTimer.value) {
+    clearInterval(pollTimer.value)
+    pollTimer.value = null
+  }
+}
+
+async function handleTriggerWarmup() {
+  if (thumbStatus.value?.running) {
+    ElMessage.info('缩略图正在后台预热中，请稍候...')
+    return
+  }
+  try {
+    const res = await warmupTelegramThumbnails()
+    if (res.success) {
+      ElMessage.success(res.message || '已开始后台预生成缩略图')
+      if (res.data) {
+        thumbStatus.value = res.data
+      }
+      startThumbPolling()
+    }
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || e.message || '触发预热失败')
+  }
+}
+
 async function refreshAll() {
+  fetchThumbStatus().catch(() => {})
   await Promise.all([loadUsage(), loadItems()])
 }
 
@@ -517,6 +1364,170 @@ function goRoot() {
 function handlePageSizeChange() {
   currentPage.value = 1
   loadItems()
+}
+
+function getAbsoluteStreamUrl(item?: TelegramDriveItem | null): string {
+  if (!item || !isFile(item) || !item.stream_url) return ''
+  return toAbsoluteServerUrl(item.stream_url)
+}
+
+async function copyToClipboard(text: string, successMsg = '已复制到剪贴板') {
+  if (!text) return
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const textarea = document.createElement('textarea')
+      textarea.value = text
+      textarea.style.position = 'fixed'
+      textarea.style.left = '-9999px'
+      textarea.style.top = '-9999px'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      textarea.remove()
+    }
+    ElMessage.success(successMsg)
+  } catch {
+    ElMessage.error('复制失败，请手动复制')
+  }
+}
+
+function handleCopyStreamUrl(item: TelegramDriveItem) {
+  if (isFolder(item)) {
+    ElMessage.info('文件夹无法获取单文件直链')
+    return
+  }
+  const absUrl = getAbsoluteStreamUrl(item)
+  if (!absUrl) {
+    ElMessage.warning('该文件暂无可用直链')
+    return
+  }
+  copyToClipboard(absUrl, `已复制「${getFileName(item)}」直链`)
+}
+
+function handleBatchCopyStreamUrls() {
+  const files = selectedFiles.value
+  if (!files.length) return
+  const urls = files.map(it => getAbsoluteStreamUrl(it)).filter(Boolean)
+  if (!urls.length) {
+    ElMessage.warning('所选文件中暂无可用直链')
+    return
+  }
+  const text = urls.join('\n')
+  copyToClipboard(text, `已成功复制 ${urls.length} 个文件直链`)
+}
+
+function handleExportM3U() {
+  const files = selectedFiles.value.length > 0 ? selectedFiles.value : items.value.filter(isFile)
+  const mediaFiles = files.filter(it => isVideo(it) || isAudio(it) || isFile(it))
+  if (!mediaFiles.length) {
+    ElMessage.warning('当前无可用媒体文件导出播放列表')
+    return
+  }
+
+  let m3uContent = '#EXTM3U\n'
+  for (const item of mediaFiles) {
+    const url = getAbsoluteStreamUrl(item)
+    if (!url) continue
+    const name = getFileName(item)
+    m3uContent += `#EXTINF:-1 tvg-name="${name}" group-title="TG-Drive",${name}\n${url}\n`
+  }
+
+  const blob = new Blob([m3uContent], { type: 'audio/x-mpegurl;charset=utf-8' })
+  const downloadUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = downloadUrl
+  const playlistName = isInsideGroup.value
+    ? `${currentFolderName.value || 'album'}_playlist.m3u`
+    : `tg_drive_playlist_${new Date().toISOString().slice(0, 10)}.m3u`
+  link.download = playlistName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(downloadUrl)
+  ElMessage.success(`已导出包含 ${mediaFiles.length} 项的 M3U 播放列表`)
+}
+
+function openExternalPlayer(playerType: string, item?: TelegramDriveItem | null) {
+  const target = item || previewItem.value
+  if (!target) return
+  const absUrl = getAbsoluteStreamUrl(target)
+  if (!absUrl) {
+    ElMessage.warning('该文件暂无可用直链')
+    return
+  }
+
+  let protocolUrl = ''
+  if (playerType === 'potplayer') {
+    protocolUrl = `potplayer://${absUrl}`
+  } else if (playerType === 'vlc') {
+    protocolUrl = `vlc://${absUrl}`
+  } else if (playerType === 'iina') {
+    protocolUrl = `iina://weblink?url=${encodeURIComponent(absUrl)}`
+  }
+
+  if (protocolUrl) {
+    window.location.href = protocolUrl
+  }
+}
+
+function triggerPlayerPiP() {
+  if (videoPlayerRef.value && typeof videoPlayerRef.value.togglePiP === 'function') {
+    videoPlayerRef.value.togglePiP()
+  }
+}
+
+const playableMediaList = computed(() => {
+  return items.value.filter(it => isFile(it) && (isVideo(it) || (previewType.value === 'audio' && isAudio(it))))
+})
+
+const currentPlayableIndex = computed(() => {
+  if (!previewItem.value) return -1
+  const key = getItemKey(previewItem.value)
+  return playableMediaList.value.findIndex(it => getItemKey(it) === key)
+})
+
+const hasPrevMedia = computed(() => currentPlayableIndex.value > 0)
+const hasNextMedia = computed(() => currentPlayableIndex.value >= 0 && currentPlayableIndex.value < playableMediaList.value.length - 1)
+
+function playPrevMedia() {
+  if (!hasPrevMedia.value) return
+  const prev = playableMediaList.value[currentPlayableIndex.value - 1]
+  handlePreview(prev)
+}
+
+function playNextMedia() {
+  if (!hasNextMedia.value) return
+  const next = playableMediaList.value[currentPlayableIndex.value + 1]
+  handlePreview(next)
+}
+
+function handleMediaEnded() {
+  if (autoplayNext.value && hasNextMedia.value) {
+    playNextMedia()
+  }
+}
+
+function handleKeydown(e: KeyboardEvent) {
+  if (e.key === 'Shift') {
+    isShiftPressed = true
+  }
+  if (!showPreview.value) return
+  const tag = (e.target as HTMLElement)?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return
+
+  if (e.key === 'ArrowLeft') {
+    if (hasPrevMedia.value) {
+      e.preventDefault()
+      playPrevMedia()
+    }
+  } else if (e.key === 'ArrowRight') {
+    if (hasNextMedia.value) {
+      e.preventDefault()
+      playNextMedia()
+    }
+  }
 }
 
 function handleDownload(item: TelegramDriveItem) {
@@ -589,6 +1600,8 @@ function handlePreview(item: TelegramDriveItem) {
     previewType.value = 'image'
   } else if (isVideo(item)) {
     previewType.value = 'video'
+  } else if (isAudio(item)) {
+    previewType.value = 'audio'
   } else {
     handleDownload(item)
     return
@@ -604,6 +1617,7 @@ function closePreview() {
   previewItem.value = null
   previewType.value = 'unknown'
   previewUrl.value = ''
+  isWebFullscreen.value = false
 }
 
 async function handleDelete(item: TelegramDriveItem) {
@@ -707,144 +1721,753 @@ async function handleClearAll() {
   }
 }
 
-watch(sortOption, handleSearch)
+function handleKeyup(e: KeyboardEvent) {
+  if (e.key === 'Shift') {
+    isShiftPressed = false
+  }
+}
 
-onMounted(refreshAll)
+onMounted(() => {
+  window.addEventListener('keydown', handleKeydown)
+  window.addEventListener('keyup', handleKeyup)
+  refreshAll()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('keyup', handleKeyup)
+  stopThumbPolling()
+})
 </script>
 
 <style scoped>
-.drive-page {
-  padding: 20px;
+/* 缩略图预热胶囊组件 */
+.thumb-warmup-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(255, 143, 171, 0.35);
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  user-select: none;
 }
 
-.drive-header {
+.thumb-warmup-pill:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 117, 151, 0.55);
+  box-shadow: 0 4px 14px rgba(255, 117, 151, 0.18);
+  transform: translateY(-1px);
+}
+
+.thumb-warmup-pill.is-running {
+  background: linear-gradient(135deg, rgba(255, 117, 151, 0.14), rgba(56, 189, 248, 0.14));
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #0284c7;
+}
+
+.warmup-icon {
+  font-size: 14px;
+  color: #ff7597;
+}
+
+.thumb-warmup-pill.is-running .warmup-icon {
+  color: #0284c7;
+}
+
+.warmup-icon.is-spinning {
+  animation: spin 1.2s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.drive-page {
+  padding: 0;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* 顶部头部毛玻璃容器 */
+.drive-header-card {
+  padding: 24px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 143, 171, 0.22);
+  box-shadow: 0 8px 24px rgba(255, 117, 151, 0.08);
+}
+
+.drive-header-main {
+  display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
+  margin-bottom: 22px;
 }
 
-.drive-header h2 {
+.drive-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.drive-title {
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  line-height: 1.2;
 }
 
-.drive-header-subtitle {
-  margin: 6px 0 0;
+.drive-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #ff7597;
+  background: rgba(255, 117, 151, 0.12);
+  border: 1px solid rgba(255, 117, 151, 0.25);
+}
+
+.drive-subtitle {
+  margin: 8px 0 0;
   font-size: 13px;
   color: #64748b;
+  line-height: 1.5;
 }
 
-.drive-header-actions,
-.toolbar {
+.drive-header-actions {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
 }
 
-.stats-row {
-  margin-bottom: 20px;
+.header-btn {
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 12px;
+  font-weight: 500;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-.toolbar {
-  padding: 16px;
-  background: #f8fafc;
+.refresh-btn {
+  border: 1px solid rgba(255, 143, 171, 0.35);
+  background: rgba(255, 255, 255, 0.85);
+  color: #374151;
+}
+
+.refresh-btn:hover {
+  background: #ffffff;
+  color: #ff7597;
+  border-color: #ff7597;
+  box-shadow: 0 4px 12px rgba(255, 117, 151, 0.2);
+  transform: translateY(-1px);
+}
+
+.clear-all-btn {
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.22);
+}
+
+.clear-all-btn:hover {
+  box-shadow: 0 6px 16px rgba(239, 68, 68, 0.35);
+  transform: translateY(-1px);
+}
+
+/* 现代流光统计卡片 */
+.stats-row {
+  margin-top: 6px;
+}
+
+.stat-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(255, 143, 171, 0.18);
+  box-shadow: 0 2px 10px rgba(255, 117, 151, 0.04);
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card:hover {
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(255, 117, 151, 0.45);
+  box-shadow: 0 8px 20px rgba(255, 117, 151, 0.16);
+  transform: translateY(-2px);
+}
+
+.stat-card.is-active {
+  background: linear-gradient(135deg, rgba(255, 241, 245, 0.95), rgba(240, 249, 255, 0.9));
+  border-color: #ff7597;
+  box-shadow: 0 8px 22px rgba(255, 117, 151, 0.22);
+}
+
+.stat-card-size {
+  cursor: default;
+}
+
+.stat-icon-wrapper {
+  width: 44px;
+  height: 44px;
   border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  flex-shrink: 0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  transition: transform 0.25s ease;
+}
+
+.stat-card:hover .stat-icon-wrapper {
+  transform: scale(1.08) rotate(3deg);
+}
+
+.stat-icon-files {
+  background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%);
+}
+
+.stat-icon-storage {
+  background: linear-gradient(135deg, #38bdf8 0%, #0ea5e9 100%);
+}
+
+.stat-icon-video {
+  background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
+}
+
+.stat-icon-image {
+  background: linear-gradient(135deg, #f472b6 0%, #ec4899 100%);
+}
+
+.stat-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1f2937;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value-size {
+  font-size: 17px;
+}
+
+.stat-label {
+  margin-top: 3px;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+/* 主内容容器 */
+.drive-main-card {
+  padding: 24px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 143, 171, 0.22);
+  box-shadow: 0 8px 24px rgba(255, 117, 151, 0.08);
+  min-height: 520px;
+}
+
+/* 工具栏 */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, rgba(255, 245, 248, 0.8), rgba(240, 249, 255, 0.7));
+  border: 1px solid rgba(255, 143, 171, 0.2);
+  border-radius: 16px;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .search-input {
-  width: 280px;
+  width: 270px;
 }
 
 .type-select,
 .sort-select {
-  width: 150px;
+  width: 145px;
 }
 
+.view-mode-toggle :deep(.el-radio-button__inner) {
+  padding: 8px 14px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+}
 
+/* 媒体快捷分类 Pills */
+.quick-filter-pills {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 2px 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.quick-filter-pills::-webkit-scrollbar {
+  display: none;
+}
+
+.filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 143, 171, 0.22);
+  background: rgba(255, 255, 255, 0.7);
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  white-space: nowrap;
+}
+
+.filter-pill:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: #ff7597;
+  color: #ff7597;
+  transform: translateY(-1px);
+}
+
+.filter-pill.is-active {
+  background: var(--gradient-primary);
+  border-color: transparent;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(255, 117, 151, 0.35);
+}
+
+.pill-icon {
+  font-size: 14px;
+}
+
+.pill-count {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.08);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.filter-pill.is-active .pill-count {
+  background: rgba(255, 255, 255, 0.28);
+  color: #ffffff;
+}
+
+/* 面包屑与路径状态栏 */
 .breadcrumb-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-top: 14px;
-  padding: 10px 4px 0;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 4px 6px;
+}
+
+.back-root-btn {
+  border-radius: 10px;
+  font-weight: 600;
+  color: #ff7597;
+  transition: all 0.2s ease;
+}
+
+.back-root-btn:hover {
+  background: rgba(255, 117, 151, 0.12);
+  transform: translateX(-2px);
+}
+
+.drive-breadcrumb {
+  display: flex;
+  align-items: center;
 }
 
 .breadcrumb-link {
-  color: #409eff;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #3b82f6;
+  font-weight: 600;
   cursor: pointer;
+  transition: all 0.2s ease;
 }
 
 .breadcrumb-link:hover {
+  color: #ff7597;
   text-decoration: underline;
 }
 
+.breadcrumb-current-group {
+  display: inline-flex;
+  align-items: center;
+  color: #1f2937;
+  font-weight: 600;
+}
+
+.items-total-pill {
+  margin-left: auto;
+  font-size: 12px;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+/* 批量操作浮动栏 */
 .selection-toolbar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 44px;
-  margin-top: 12px;
-  padding: 6px 10px;
-  border: 1px solid #dbe2ea;
-  border-radius: 8px;
-  background: #f8fafc;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 48px;
+  margin-top: 14px;
+  padding: 8px 16px;
+  border: 1px solid rgba(255, 143, 171, 0.28);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(255, 241, 245, 0.95), rgba(240, 249, 255, 0.95));
+  box-shadow: 0 4px 16px rgba(255, 117, 151, 0.08);
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.selection-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
 }
 
 .selection-count {
-  color: #64748b;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  background: rgba(255, 117, 151, 0.14);
+  color: #ff7597;
   font-size: 13px;
+  font-weight: 600;
   white-space: nowrap;
 }
 
 .selection-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.batch-btn {
+  border-radius: 10px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.batch-download-btn {
+  border-color: rgba(56, 189, 248, 0.4);
+  background: rgba(255, 255, 255, 0.9);
+  color: #0284c7;
+}
+
+.batch-download-btn:hover:not(:disabled) {
+  background: #38bdf8;
+  color: #ffffff;
+  border-color: #38bdf8;
+  box-shadow: 0 4px 12px rgba(56, 189, 248, 0.35);
+  transform: translateY(-1px);
+}
+
+.batch-delete-btn {
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
+}
+
+.batch-delete-btn:hover:not(:disabled) {
+  box-shadow: 0 6px 16px rgba(239, 68, 68, 0.35);
+  transform: translateY(-1px);
+}
+
+.batch-cancel-btn {
+  color: #64748b;
+  font-weight: 500;
+}
+
+.batch-cancel-btn:hover {
+  color: #ff7597;
+}
+
+/* 列表模式表格美化 */
+.table-container {
+  margin-top: 16px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 143, 171, 0.18);
+}
+
+.drive-table {
+  width: 100%;
 }
 
 .file-name {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
 }
 
+.file-icon-badge {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+  overflow: hidden;
+}
+
+.file-mini-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 10px;
+}
+
+.file-name:hover .file-icon-badge {
+  transform: scale(1.08);
+}
+
+.icon-badge-album {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+}
+
+.icon-badge-video {
+  background: rgba(99, 102, 241, 0.12);
+  color: #6366f1;
+}
+
+.icon-badge-image {
+  background: rgba(244, 63, 94, 0.12);
+  color: #f43f5e;
+}
+
+.icon-badge-audio {
+  background: rgba(168, 85, 247, 0.12);
+  color: #a855f7;
+}
+
+.icon-badge-document {
+  background: rgba(100, 116, 139, 0.12);
+  color: #64748b;
+}
+
+.file-title {
+  font-weight: 500;
+  color: #1f2937;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-tag {
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+  border: none;
+  font-weight: 600;
+}
+
+.type-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.type-badge-album {
+  background: rgba(245, 158, 11, 0.1);
+  color: #b45309;
+}
+
+.type-badge-video {
+  background: rgba(99, 102, 241, 0.1);
+  color: #4f46e5;
+}
+
+.type-badge-image {
+  background: rgba(244, 63, 94, 0.1);
+  color: #e11d48;
+}
+
+.type-badge-audio {
+  background: rgba(168, 85, 247, 0.1);
+  color: #9333ea;
+}
+
+.type-badge-document {
+  background: rgba(100, 116, 139, 0.1);
+  color: #475569;
+}
+
+.size-text {
+  font-weight: 500;
+  color: #374151;
+  font-variant-numeric: tabular-nums;
+}
+
+.content-text {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.message-id-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.05);
+  color: #64748b;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.time-text {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.table-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.table-actions :deep(.el-button.is-link) {
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 4px 8px !important;
+  border-radius: 6px !important;
+  font-weight: 500;
+  height: 28px !important;
+}
+
+.table-actions :deep(.el-button--primary.is-link) {
+  color: #ff7597 !important;
+}
+
+.table-actions :deep(.el-button--primary.is-link:hover) {
+  background: rgba(255, 117, 151, 0.12) !important;
+  color: #f43f6e !important;
+}
+
+.table-actions :deep(.el-button--success.is-link) {
+  color: #0284c7 !important;
+}
+
+.table-actions :deep(.el-button--success.is-link:hover) {
+  background: rgba(56, 189, 248, 0.12) !important;
+  color: #0369a1 !important;
+}
+
+.table-actions :deep(.el-button--danger.is-link) {
+  color: #ef4444 !important;
+}
+
+.table-actions :deep(.el-button--danger.is-link:hover) {
+  background: rgba(239, 68, 68, 0.12) !important;
+  color: #dc2626 !important;
+}
+
+/* 网格模式卡片设计 */
 .grid-view {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 16px;
-  margin-top: 20px;
-  min-height: 160px;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+  min-height: 200px;
 }
 
 .grid-item {
   position: relative;
-  padding: 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 143, 171, 0.2);
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 4px 14px rgba(255, 117, 151, 0.06);
   cursor: pointer;
-  transition: all 0.2s ease;
+  overflow: hidden;
+  transition: all 0.28s cubic-bezier(0.34, 1.56, 0.64, 1);
+  display: flex;
+  flex-direction: column;
 }
 
 .grid-item:hover {
-  border-color: #409eff;
-  box-shadow: 0 8px 18px rgba(64, 158, 255, 0.14);
-  transform: translateY(-2px);
+  border-color: #ff7597;
+  box-shadow: 0 12px 28px rgba(255, 117, 151, 0.2), 0 4px 12px rgba(56, 189, 248, 0.12);
+  transform: translateY(-4px);
 }
 
 .grid-item.is-selected {
-  border-color: #409eff;
-  background: #f0f7ff;
-  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.14);
+  border-color: #ff7597;
+  background: rgba(255, 241, 245, 0.95);
+  box-shadow: 0 0 0 2px #ff7597, 0 8px 24px rgba(255, 117, 151, 0.2);
 }
 
 .grid-item-checkbox {
   position: absolute;
-  z-index: 2;
+  z-index: 4;
   top: 10px;
   left: 10px;
   display: inline-flex;
@@ -852,81 +2475,556 @@ onMounted(refreshAll)
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(255, 143, 171, 0.25);
+  transition: all 0.2s ease;
+}
+
+.grid-item:hover .grid-item-checkbox {
+  border-color: #ff7597;
 }
 
 .grid-item-preview {
   position: relative;
-  height: 120px;
+  aspect-ratio: 16 / 10;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #f1f5f9;
-  border-radius: 10px;
   overflow: hidden;
+  background: #f8fafc;
+}
+
+.cover-album {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+}
+
+.cover-video {
+  background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%);
+}
+
+.cover-image {
+  background: linear-gradient(135deg, #ffe4e6 0%, #fbcfe8 100%);
+}
+
+.cover-audio {
+  background: linear-gradient(135deg, #f3e8ff 0%, #e9d5ff 100%);
+}
+
+.cover-doc {
+  background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
 }
 
 .grid-thumbnail {
   width: 100%;
   height: 100%;
+  object-fit: cover;
+  transition: transform 0.35s ease;
+}
+
+.grid-item:hover .grid-thumbnail {
+  transform: scale(1.05);
 }
 
 .grid-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.placeholder-icon-halo {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
   color: #64748b;
+  transition: transform 0.25s ease;
+}
+
+.grid-item:hover .placeholder-icon-halo {
+  transform: scale(1.1);
 }
 
 .type-badge {
   position: absolute;
   right: 8px;
   top: 8px;
+  z-index: 3;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+.grid-album-chip {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(15, 23, 42, 0.72);
+  color: #ffffff;
+  backdrop-filter: blur(6px);
+}
+
+/* 卡片悬浮快捷动作底栏 */
+.grid-card-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.4);
+  backdrop-filter: blur(4px);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.25s ease;
+}
+
+.grid-item:hover .grid-card-overlay {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.overlay-action-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.95);
+  color: #1f2937;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.overlay-action-btn:hover {
+  transform: scale(1.15);
+  color: #ff7597;
+  background: #ffffff;
+}
+
+.overlay-action-btn.overlay-download:hover {
+  color: #0284c7;
+}
+
+.overlay-action-btn.overlay-delete:hover {
+  color: #ef4444;
+}
+
+.grid-item-body {
+  padding: 12px 14px 12px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
 }
 
 .grid-item-name {
-  margin-top: 10px;
-  font-weight: 500;
+  font-weight: 600;
+  color: #1f2937;
+  font-size: 14px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.grid-item-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+  gap: 8px;
+}
+
 .grid-item-meta {
-  margin-top: 4px;
   color: #64748b;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
 }
 
 .grid-item-actions {
   display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  margin-top: 10px;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
+.card-action-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: none;
+  background: rgba(0, 0, 0, 0.04);
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 13px;
+}
+
+.card-action-btn:hover {
+  background: rgba(255, 117, 151, 0.14);
+  color: #ff7597;
+  transform: translateY(-1px);
+}
+
+.card-action-btn.card-action-delete:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+/* 空状态卡片 */
+.empty-state-box {
+  padding: 60px 20px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.empty-icon-halo {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(255, 117, 151, 0.14), rgba(56, 189, 248, 0.14));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ff7597;
+  margin-bottom: 16px;
+  box-shadow: 0 8px 24px rgba(255, 117, 151, 0.15);
+  animation: float 4s ease-in-out infinite;
+}
+
+.empty-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.empty-hint {
+  margin: 6px 0 20px;
+  font-size: 13px;
+  color: #64748b;
+  max-width: 360px;
+}
+
+.empty-actions {
+  display: flex;
+  gap: 12px;
+}
+
+/* 分页 */
 .pagination-container {
   display: flex;
   justify-content: flex-end;
-  margin-top: 20px;
+  margin-top: 24px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 143, 171, 0.15);
 }
 
+/* 视频预览弹窗头部 */
+.video-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.video-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.video-badge-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, rgba(255, 117, 151, 0.2) 0%, rgba(56, 189, 248, 0.2) 100%);
+  color: #ff7597;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.video-header-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1e293b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-header-pill {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 12px;
+  background: rgba(56, 189, 248, 0.15);
+  color: #0284c7;
+  flex-shrink: 0;
+}
+
+.video-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+.header-tool-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  background: rgba(255, 255, 255, 0.85);
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.header-tool-btn:hover {
+  background: #ffffff;
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.4);
+  transform: translateY(-1px);
+}
+
+.header-tool-btn.btn-close:hover {
+  color: #ff7597;
+  border-color: rgba(255, 117, 151, 0.4);
+}
+
+/* 视频容器 */
 .video-container {
   width: 100%;
-  min-height: 500px;
-  background: #000;
+  height: clamp(320px, 60vh, 680px);
+  max-height: calc(88vh - 120px);
+  background: #000000;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.video-container.fullscreen-container {
+  height: calc(95vh - 120px) !important;
+  max-height: calc(95vh - 120px) !important;
 }
 
 .video-container :deep(.video-js) {
-  min-height: 500px;
+  width: 100% !important;
+  height: 100% !important;
 }
 
+/* 弹窗底部操作区 */
+.dialog-footer-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.footer-meta-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-size-tag {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+  background: rgba(241, 245, 249, 0.9);
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.file-mime-tag {
+  color: #64748b;
+  font-size: 12px;
+  background: rgba(248, 250, 252, 0.85);
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fullscreen-toggle-btn {
+  border-radius: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #0284c7;
+  background: rgba(240, 249, 255, 0.85);
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.fullscreen-toggle-btn:hover {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: #38bdf8;
+  color: #0369a1;
+}
+
+.download-action-btn {
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+/* 音频试听弹窗 */
+.audio-player-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 0;
+  text-align: center;
+}
+
+.audio-vinyl {
+  width: 110px;
+  height: 110px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+  border: 4px solid #ff7597;
+  box-shadow: 0 10px 28px rgba(255, 117, 151, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  margin-bottom: 18px;
+}
+
+.audio-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1f2937;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-meta {
+  font-size: 13px;
+  color: #64748b;
+  margin: 4px 0 18px;
+}
+
+.audio-native-player {
+  width: 100%;
+  border-radius: 12px;
+}
+
+/* 响应式适配 */
 @media (max-width: 768px) {
   .drive-page {
     padding: 0;
   }
 
-  .toolbar > * {
+  .drive-header-card,
+  .drive-main-card {
+    padding: 16px;
+    border-radius: 16px;
+  }
+
+  .drive-header-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .thumb-warmup-pill {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar-left {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar-left > * {
     width: 100% !important;
+  }
+
+  .toolbar-right {
+    justify-content: flex-end;
+  }
+
+  .selection-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 10px;
+    gap: 10px;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .selection-left {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .selection-actions {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+    margin-left: 0;
+    gap: 6px;
+  }
+
+  .selection-actions :deep(.el-button) {
+    width: 100%;
+    margin-left: 0 !important;
   }
 
   .pagination-container {
@@ -934,25 +3032,117 @@ onMounted(refreshAll)
     overflow-x: auto;
   }
 
-  .selection-toolbar,
-  .selection-actions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .selection-actions {
-    width: 100%;
-    margin-left: 0;
-  }
-
-  .selection-actions :deep(.el-button) {
-    width: 100%;
-    margin-left: 0;
-  }
-
-  .video-container,
-  .video-container :deep(.video-js) {
-    min-height: 260px;
+  .video-container {
+    height: clamp(240px, 50vh, 420px);
   }
 }
+
+.footer-tool-btn {
+  border-radius: 10px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  color: #475569;
+  background: rgba(248, 250, 252, 0.9);
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.footer-tool-btn:hover {
+  background: #ffffff;
+  border-color: rgba(56, 189, 248, 0.4);
+  color: #0284c7;
+}
+
+.nav-media-btn:disabled {
+  opacity: 0.35 !important;
+  cursor: not-allowed !important;
+  pointer-events: none;
+}
+
+.autoplay-switch {
+  margin-left: 8px;
+}
+
+.player-menu-item {
+  display: flex;
+  flex-direction: column;
+  padding: 3px 6px;
+}
+
+.player-menu-title {
+  font-weight: 600;
+  color: #1e293b;
+  font-size: 13px;
+}
+
+.player-menu-hint {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+
+.action-copy-link {
+  color: #0284c7 !important;
+}
+
+.action-copy-link:hover {
+  color: #38bdf8 !important;
+}
+
+.overlay-link {
+  background: rgba(255, 255, 255, 0.85);
+  color: #0284c7;
+}
+
+.overlay-link:hover {
+  background: #38bdf8;
+  color: #ffffff;
+}
+
+.card-action-link:hover {
+  background: rgba(56, 189, 248, 0.15);
+  color: #0284c7;
+}
+
+
+.dc-tag-inline {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(14, 165, 233, 0.1);
+  color: #0284c7;
+  border: 1px solid rgba(14, 165, 233, 0.2);
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
+.grid-dc-badge {
+  position: absolute;
+  top: 8px;
+  left: 36px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(8px);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  z-index: 2;
+}
+
+.dc-tag-dialog {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(255, 117, 151, 0.15));
+  color: #0284c7;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+}
+
 </style>

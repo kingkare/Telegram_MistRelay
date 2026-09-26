@@ -1,5 +1,9 @@
 <template>
   <el-container class="app-layout">
+    <div class="ambient-glow glow-sakura"></div>
+    <div class="ambient-glow glow-sky"></div>
+    <div class="ambient-glow glow-center"></div>
+
     <AppSidebar @collapse-change="handleCollapseChange" />
     <el-container class="main-container" :style="{ marginLeft: sidebarWidth }">
       <AppHeader />
@@ -38,21 +42,46 @@ function handleCollapseChange(collapsed: boolean) {
 <style scoped>
 .app-layout {
   @apply min-h-screen;
-  background: linear-gradient(135deg, #f5f7fa 0%, #e8eaf6 50%, #f3e5f5 100%);
+  background-color: #fcf6f8;
   position: relative;
+  overflow-x: hidden;
 }
 
-.app-layout::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-image: 
-    radial-gradient(circle at 20% 50%, rgba(102, 126, 234, 0.03) 0%, transparent 50%),
-    radial-gradient(circle at 80% 80%, rgba(118, 75, 162, 0.03) 0%, transparent 50%);
+/* 二次元柔和双色光晕背景球 */
+.ambient-glow {
+  position: fixed;
+  border-radius: 9999px;
+  filter: blur(80px);
   pointer-events: none;
+  z-index: 0;
+  opacity: 0.65;
+}
+
+.glow-sakura {
+  top: -100px;
+  left: 10%;
+  width: 480px;
+  height: 480px;
+  background: radial-gradient(circle, rgba(255, 143, 171, 0.35) 0%, rgba(255, 182, 193, 0.05) 70%, transparent 100%);
+  animation: floatSlow 12s ease-in-out infinite alternate;
+}
+
+.glow-sky {
+  bottom: -80px;
+  right: 5%;
+  width: 520px;
+  height: 520px;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.28) 0%, rgba(125, 211, 252, 0.05) 70%, transparent 100%);
+  animation: floatSlow 14s ease-in-out infinite alternate-reverse;
+}
+
+.glow-center {
+  top: 40%;
+  left: 45%;
+  width: 360px;
+  height: 360px;
+  background: radial-gradient(circle, rgba(255, 192, 203, 0.2) 0%, rgba(224, 242, 254, 0.08) 70%, transparent 100%);
+  animation: pulse 8s ease-in-out infinite;
 }
 
 .main-container {
@@ -82,11 +111,14 @@ function handleCollapseChange(collapsed: boolean) {
 .main-content {
   @apply p-6;
   min-height: calc(100vh - 64px);
-  animation: fadeIn 0.4s ease-out;
+  animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .loading-container {
   @apply p-6;
-  animation: pulse 1.5s ease-in-out infinite;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 143, 171, 0.2);
 }
 </style>

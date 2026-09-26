@@ -1,195 +1,384 @@
 <template>
-  <div class="dashboard">
-    <!-- 统计卡片 -->
-    <el-row :gutter="20" class="stats-row">
-      <el-col :xs="24" :sm="12" :md="6" v-for="stat in stats" :key="stat.key">
-        <el-card shadow="hover" class="stat-card">
-          <div class="stat-content">
-            <div class="stat-icon" :style="{ background: stat.color }">
-              <el-icon :size="24"><component :is="stat.icon" /></el-icon>
-            </div>
-            <div class="stat-info">
-              <div class="stat-value">{{ stat.value }}</div>
-              <div class="stat-label">{{ stat.label }}</div>
+  <div class="dashboard-page animate-fade-in">
+    <!-- 头部品牌横幅与控制区 -->
+    <div class="dashboard-header-card glass-card">
+      <div class="dashboard-header-main">
+        <div class="dashboard-title-group">
+          <div class="dashboard-title-row">
+            <h2 class="dashboard-title text-gradient-sakura">系统监控仪表板</h2>
+            <span class="dashboard-badge">System Overview</span>
+          </div>
+          <p class="dashboard-subtitle">
+            实时监测系统硬件负荷、Aria2 传输流量趋势与各 Bot 节点吞吐分流状态。
+          </p>
+        </div>
+
+        <div class="dashboard-header-actions">
+          <div class="status-indicator-pill">
+            <span class="status-indicator-dot" :class="statusDotClass"></span>
+            <span class="status-indicator-text">{{ serverStatusLabel }}</span>
+          </div>
+
+          <el-button
+            class="header-btn auto-refresh-btn"
+            :type="autoRefresh ? 'primary' : ''"
+            :plain="autoRefresh"
+            size="default"
+            @click="toggleAutoRefresh"
+            :title="autoRefresh ? '点击暂停自动轮询' : '点击开启 2 秒平滑自动采样'"
+          >
+            <span class="refresh-indicator" :class="{ 'is-active': autoRefresh }"></span>
+            {{ autoRefresh ? '自动采样中' : '自动采样已停' }}
+          </el-button>
+
+          <el-button
+            class="header-btn refresh-btn"
+            :icon="RefreshRight"
+            @click="handleManualRefresh"
+            :loading="isRefreshing"
+            size="default"
+          >
+            刷新数据
+          </el-button>
+
+          <el-button
+            type="primary"
+            class="header-btn jump-btn"
+            :icon="Download"
+            @click="$router.push('/downloads')"
+            size="default"
+          >
+            任务中心
+          </el-button>
+        </div>
+      </div>
+
+      <!-- 4 大流光指标卡片 -->
+      <el-row :gutter="14" class="stats-row">
+        <el-col :xs="12" :sm="6" v-for="stat in stats" :key="stat.key">
+          <div
+            class="stat-card glass-card"
+            :class="`stat-card--${stat.key}`"
+            @click="$router.push('/downloads')"
+            title="点击跳转任务调度中心查看详情"
+          >
+            <div class="stat-card-glow"></div>
+            <div class="stat-card-inner">
+              <div class="stat-card-top">
+                <span class="stat-label">{{ stat.label }}</span>
+                <div class="stat-icon-wrap" :style="{ background: stat.color }">
+                  <el-icon :size="18"><component :is="stat.icon" /></el-icon>
+                </div>
+              </div>
+              <div class="stat-value-group">
+                <span class="stat-value">{{ stat.value.toLocaleString() }}</span>
+                <span class="stat-unit">条任务</span>
+              </div>
+              <div class="stat-desc">
+                <span>{{ stat.desc }}</span>
+                <el-icon class="stat-arrow"><ArrowRight /></el-icon>
+              </div>
             </div>
           </div>
-        </el-card>
-      </el-col>
-    </el-row>
+        </el-col>
+      </el-row>
+    </div>
 
-    <!-- 图表区域 -->
-    <el-row :gutter="20" class="charts-row">
+    <!-- 实时图表与硬件资源监控 -->
+    <el-row :gutter="16" class="charts-row">
+      <!-- 实时传输图表 -->
       <el-col :xs="24" :lg="16">
-        <el-card shadow="hover" class="chart-card">
-          <template #header>
-            <span>实时监控</span>
-          </template>
-          <div class="chart-container" ref="chartRef"></div>
-        </el-card>
+        <div class="chart-card glass-card">
+          <div class="panel-header">
+            <div class="panel-title-wrap">
+              <div class="panel-icon-pill icon-pill-primary">
+                <el-icon><TrendCharts /></el-icon>
+              </div>
+              <div>
+                <h3 class="panel-title">实时网络与传输趋势</h3>
+                <p class="panel-subtitle">最近采样窗口上传速度、下载速度及 IO 吞吐监测</p>
+              </div>
+            </div>
+            <div class="panel-tags">
+              <el-tag size="small" effect="plain" class="metric-tag tag-upload">
+                <span class="dot dot-upload"></span> 上传 {{ currentUploadSpeed }}
+              </el-tag>
+              <el-tag size="small" effect="plain" class="metric-tag tag-download">
+                <span class="dot dot-download"></span> 下载 {{ currentDownloadSpeed }}
+              </el-tag>
+            </div>
+          </div>
+          <div class="chart-body">
+            <div class="chart-container" ref="chartRef"></div>
+          </div>
+        </div>
       </el-col>
-      
+
+      <!-- 系统硬件负载 -->
       <el-col :xs="24" :lg="8">
-        <el-card shadow="hover" class="system-load-card">
-          <template #header>
-            <span>系统负载</span>
-          </template>
+        <div class="system-load-card glass-card">
+          <div class="panel-header">
+            <div class="panel-title-wrap">
+              <div class="panel-icon-pill icon-pill-sky">
+                <el-icon><Cpu /></el-icon>
+              </div>
+              <div>
+                <h3 class="panel-title">系统核心负载</h3>
+                <p class="panel-subtitle">CPU 占用、内存消耗与本地磁盘可用余量</p>
+              </div>
+            </div>
+          </div>
+
           <div v-if="systemResources" class="system-resources">
             <!-- CPU -->
             <div class="resource-item">
-              <div class="resource-header">
-                <div class="resource-label">
-                  <el-icon><Cpu /></el-icon>
-                  <span>CPU</span>
+              <div class="resource-top">
+                <div class="resource-label-group">
+                  <span class="resource-icon-badge badge-cpu"><el-icon><Cpu /></el-icon></span>
+                  <span class="resource-name">中央处理器 CPU</span>
                 </div>
-                <el-tag :type="getResourceTagType(systemResources.cpu.percent)" size="small">
+                <span class="resource-val-tag" :class="getResourceTagClass(systemResources.cpu.percent)">
                   {{ systemResources.cpu.percent.toFixed(1) }}%
-                </el-tag>
+                </span>
               </div>
-              <el-progress
-                :percentage="systemResources.cpu.percent"
-                :color="getResourceColor(systemResources.cpu.percent)"
-                :stroke-width="8"
-              />
+              <div class="resource-progress-wrap">
+                <el-progress
+                  :percentage="Math.min(100, Math.max(0, systemResources.cpu.percent))"
+                  :stroke-width="8"
+                  :show-text="false"
+                  :color="getResourceColor(systemResources.cpu.percent)"
+                />
+              </div>
             </div>
-            
+
             <!-- 内存 -->
             <div class="resource-item">
-              <div class="resource-header">
-                <div class="resource-label">
-                  <el-icon><DataBoard /></el-icon>
-                  <span>内存</span>
+              <div class="resource-top">
+                <div class="resource-label-group">
+                  <span class="resource-icon-badge badge-mem"><el-icon><DataBoard /></el-icon></span>
+                  <span class="resource-name">运行内存 RAM</span>
                 </div>
-                <el-tag :type="getResourceTagType(systemResources.memory.percent)" size="small">
+                <span class="resource-val-tag" :class="getResourceTagClass(systemResources.memory.percent)">
                   {{ systemResources.memory.percent.toFixed(1) }}%
-                </el-tag>
+                </span>
               </div>
-              <el-progress
-                :percentage="systemResources.memory.percent"
-                :color="getResourceColor(systemResources.memory.percent)"
-                :stroke-width="8"
-              />
-              <div class="resource-detail">
-                {{ formatBytes(systemResources.memory.used) }} / {{ formatBytes(systemResources.memory.total) }}
+              <div class="resource-progress-wrap">
+                <el-progress
+                  :percentage="Math.min(100, Math.max(0, systemResources.memory.percent))"
+                  :stroke-width="8"
+                  :show-text="false"
+                  :color="getResourceColor(systemResources.memory.percent)"
+                />
+              </div>
+              <div class="resource-detail-bar">
+                <span>已用 {{ formatBytes(systemResources.memory.used) }}</span>
+                <span class="text-separator">/</span>
+                <span>总量 {{ formatBytes(systemResources.memory.total) }}</span>
               </div>
             </div>
-            
+
             <!-- 硬盘 -->
             <div class="resource-item">
-              <div class="resource-header">
-                <div class="resource-label">
-                  <el-icon><Files /></el-icon>
-                  <span>硬盘</span>
+              <div class="resource-top">
+                <div class="resource-label-group">
+                  <span class="resource-icon-badge badge-disk"><el-icon><Files /></el-icon></span>
+                  <span class="resource-name">本地存储 Disk</span>
                 </div>
-                <el-tag :type="getResourceTagType(systemResources.disk.percent)" size="small">
+                <span class="resource-val-tag" :class="getResourceTagClass(systemResources.disk.percent)">
                   {{ systemResources.disk.percent.toFixed(1) }}%
-                </el-tag>
+                </span>
               </div>
-              <el-progress
-                :percentage="systemResources.disk.percent"
-                :color="getResourceColor(systemResources.disk.percent)"
-                :stroke-width="8"
-              />
-              <div class="resource-detail">
-                {{ formatBytes(systemResources.disk.used) }} / {{ formatBytes(systemResources.disk.total) }}
+              <div class="resource-progress-wrap">
+                <el-progress
+                  :percentage="Math.min(100, Math.max(0, systemResources.disk.percent))"
+                  :stroke-width="8"
+                  :show-text="false"
+                  :color="getResourceColor(systemResources.disk.percent)"
+                />
+              </div>
+              <div class="resource-detail-bar">
+                <span>已用 {{ formatBytes(systemResources.disk.used) }}</span>
+                <span class="text-separator">/</span>
+                <span>总量 {{ formatBytes(systemResources.disk.total) }}</span>
               </div>
             </div>
           </div>
-          <el-skeleton v-else :rows="4" animated />
-        </el-card>
+          <el-skeleton v-else :rows="5" animated class="p-4" />
+        </div>
       </el-col>
     </el-row>
 
-    <!-- 最近活动 -->
-    <el-row :gutter="20" class="activity-row">
+    <!-- 最近活动与系统环境信息 -->
+    <el-row :gutter="16" class="activity-row">
+      <!-- 最近下载任务 -->
       <el-col :xs="24" :lg="12">
-        <el-card shadow="hover" class="activity-card">
-          <template #header>
-            <div class="card-header">
-              <span>最近下载</span>
-              <el-button size="small" @click="$router.push('/downloads')">查看全部</el-button>
+        <div class="activity-card glass-card">
+          <div class="panel-header">
+            <div class="panel-title-wrap">
+              <div class="panel-icon-pill icon-pill-primary">
+                <el-icon><Download /></el-icon>
+              </div>
+              <div>
+                <h3 class="panel-title">最近任务动态</h3>
+                <p class="panel-subtitle">最近 10 项下载与转存任务最新流转</p>
+              </div>
             </div>
-          </template>
-          <el-table 
-            :data="recentDownloads" 
-            style="width: 100%" 
-            size="small"
-            :show-header="recentDownloads.length > 0"
-            empty-text="暂无下载记录"
-          >
-            <el-table-column prop="file_name" label="文件名" show-overflow-tooltip min-width="120" />
-            <el-table-column label="状态" width="80">
-              <template #default="{ row }">
-                <el-tag :type="getStatusTagType(row.status)" size="small">
-                  {{ getStatusText(row.status) }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="created_at" label="时间" width="160">
-              <template #default="{ row }">
-                {{ formatDate(row.created_at) }}
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
+            <el-button size="small" round class="more-link-btn" @click="$router.push('/downloads')">
+              查看全部 <el-icon class="ml-1"><ArrowRight /></el-icon>
+            </el-button>
+          </div>
+
+          <div class="table-wrap">
+            <el-table
+              :data="recentDownloads"
+              style="width: 100%"
+              size="default"
+              :show-header="recentDownloads.length > 0"
+              empty-text="暂无下载记录"
+              class="custom-table"
+            >
+              <el-table-column prop="file_name" label="文件名" min-width="160">
+                <template #default="{ row }">
+                  <div class="file-name-cell">
+                    <el-icon class="file-type-icon" :class="getFileIconClass(row.file_name)">
+                      <component :is="getFileIcon(row.file_name)" />
+                    </el-icon>
+                    <span class="file-name-text" :title="row.file_name">{{ row.file_name }}</span>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="100" align="center">
+                <template #default="{ row }">
+                  <span class="custom-status-badge" :class="`badge-status-${row.status}`">
+                    {{ getStatusText(row.status) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column prop="created_at" label="时间" width="140" align="right">
+                <template #default="{ row }">
+                  <span class="time-cell">{{ formatDate(row.created_at) }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+        </div>
       </el-col>
-      
+
+      <!-- 系统与节点信息 -->
       <el-col :xs="24" :lg="12">
-        <el-card shadow="hover" class="activity-card">
-          <template #header>
-            <span>系统信息</span>
-          </template>
-          <div v-if="status" class="system-info-content">
-            <el-descriptions :column="1" border size="small" class="system-descriptions">
-              <el-descriptions-item label="运行状态">
-                <el-tag type="success" size="small">{{ status.server_status }}</el-tag>
-              </el-descriptions-item>
-              <el-descriptions-item label="运行时长">{{ status.uptime }}</el-descriptions-item>
-              <el-descriptions-item label="Telegram Bot">{{ status.telegram_bot }}</el-descriptions-item>
-              <el-descriptions-item label="已连接机器人">{{ status.connected_bots }}</el-descriptions-item>
-              <el-descriptions-item label="版本">{{ status.version }}</el-descriptions-item>
-            </el-descriptions>
-            
+        <div class="activity-card glass-card">
+          <div class="panel-header">
+            <div class="panel-title-wrap">
+              <div class="panel-icon-pill icon-pill-sky">
+                <el-icon><InfoFilled /></el-icon>
+              </div>
+              <div>
+                <h3 class="panel-title">系统与节点运行状态</h3>
+                <p class="panel-subtitle">服务生命周期、TG Bot 连通度及各分流负载</p>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="status" class="system-info-body">
+            <div class="info-grid">
+              <div class="info-box">
+                <span class="info-label">运行状态</span>
+                <div class="info-value-wrap">
+                  <span class="online-pill">
+                    <span class="online-dot"></span>
+                    {{ status.server_status || '运行中' }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="info-box">
+                <span class="info-label">运行时长</span>
+                <span class="info-val-highlight">{{ status.uptime || '-' }}</span>
+              </div>
+
+              <div class="info-box">
+                <span class="info-label">Telegram Bot</span>
+                <span class="info-val-text">{{ status.telegram_bot || '-' }}</span>
+              </div>
+
+              <div class="info-box">
+                <span class="info-label">已连接机器人</span>
+                <span class="info-val-badge">{{ status.connected_bots || 0 }} 个节点</span>
+              </div>
+
+              <div class="info-box col-span-full">
+                <span class="info-label">核心版本</span>
+                <span class="version-tag">{{ status.version || 'v2.2.5' }}</span>
+              </div>
+            </div>
+
             <!-- 机器人负载 -->
             <div v-if="status.loads && Object.keys(status.loads).length > 0" class="bot-loads">
-              <div class="bot-loads-title">机器人负载</div>
-              <div class="bot-loads-list">
-                <div v-for="(load, bot) in status.loads" :key="bot" class="bot-load-item">
-                  <div class="bot-load-header">
-                    <span class="bot-load-name">{{ bot }}</span>
-                    <el-tag :type="getLoadTagType(load)" size="small">{{ load }}</el-tag>
+              <div class="bot-loads-header">
+                <div class="flex items-center gap-2">
+                  <span class="bot-loads-title">分流机器人节点负荷</span>
+                  <span v-if="status.channel_info?.no_join_balancing_active" class="no-join-indicator" title="免加群自动负载均衡已激活">
+                    ✨ 免加频道分流就绪
+                  </span>
+                </div>
+                <span class="bot-loads-count">共 {{ Object.keys(status.loads).length }} 个活跃 Worker</span>
+              </div>
+              <div class="bot-loads-grid">
+                <div v-for="(load, bot) in status.loads" :key="bot" class="bot-load-chip">
+                  <div class="bot-chip-top">
+                    <span class="bot-chip-name" :title="getBotDisplayName(bot)">{{ getBotDisplayName(bot) }}</span>
+                    <span class="bot-chip-tag" :class="getLoadChipClass(load)">{{ load }} 项</span>
                   </div>
-                  <el-progress
-                    :percentage="getLoadPercentage(load)"
-                    :color="getLoadColor(load)"
-                    :stroke-width="6"
-                  />
+                  <div class="bot-chip-bar">
+                    <div
+                      class="bot-chip-fill"
+                      :style="{ width: `${getLoadPercentage(load)}%`, background: getLoadColor(load) }"
+                    ></div>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-          <el-skeleton v-else :rows="5" animated />
-        </el-card>
+          <el-skeleton v-else :rows="5" animated class="p-4" />
+        </div>
       </el-col>
     </el-row>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useIntervalFn, useResizeObserver } from '@vueuse/core'
 import * as echarts from 'echarts'
 import {
   Check,
-  Warning,
   Delete,
+  Warning,
   Document,
   Cpu,
   DataBoard,
-  Files
+  Files,
+  RefreshRight,
+  Download,
+  TrendCharts,
+  ArrowRight,
+  VideoCamera,
+  Headset,
+  Picture,
+  Box,
+  InfoFilled
 } from '@element-plus/icons-vue'
-import { getStatus, getDownloads, getSystemTrend, getDownloadStatistics, getUploadStatistics, getSystemResources, type TrendPoint } from '@/api'
+import {
+  getStatus,
+  getDownloads,
+  getSystemTrend,
+  getDownloadStatistics,
+  getUploadStatistics,
+  getSystemResources,
+  type TrendPoint
+} from '@/api'
 import type { ServerStatus, DownloadRecord, SystemResources } from '@/types/api'
-import { formatDate, getStatusText, getStatusTagType } from '@/utils/formatters'
+import { formatDate, getStatusText } from '@/utils/formatters'
 
 const status = ref<ServerStatus | null>(null)
 const systemResources = ref<SystemResources | null>(null)
@@ -197,109 +386,171 @@ const recentDownloads = ref<DownloadRecord[]>([])
 const chartRef = ref<HTMLElement | null>(null)
 let chartInstance: echarts.ECharts | null = null
 
+const isRefreshing = ref(false)
+const autoRefresh = ref(true)
+const currentUploadSpeed = ref('0 B/s')
+const currentDownloadSpeed = ref('0 B/s')
+
 const stats = ref([
   {
     key: 'completed',
-    label: '完成',
+    label: '传输完成',
+    desc: '已成功下载并转存',
     value: 0,
     icon: Check,
     color: 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
   },
   {
     key: 'cleaned',
-    label: '清理',
+    label: '清理归档',
+    desc: '本地生命周期已释放',
     value: 0,
     icon: Delete,
-    color: 'linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)'
+    color: 'linear-gradient(135deg, #06b6d4 0%, #0284c7 100%)'
   },
   {
     key: 'failed',
-    label: '失败',
+    label: '失败待查',
+    desc: '传输中断或鉴权异常',
     value: 0,
     icon: Warning,
-    color: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)'
+    color: 'linear-gradient(135deg, #fb7185 0%, #e11d48 100%)'
   },
   {
     key: 'total',
-    label: '总计',
+    label: '总调度量',
+    desc: '累计全量流转任务',
     value: 0,
     icon: Document,
-    color: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
+    color: 'linear-gradient(135deg, #ff7597 0%, #38bdf8 100%)'
   }
 ])
 
+const serverStatusLabel = computed(() => {
+  if (!status.value) return '检测中...'
+  return status.value.server_status === 'running' ? '服务运行良好' : (status.value.server_status || '在线')
+})
+
+const statusDotClass = computed(() => {
+  if (!status.value) return 'status-dot--warning'
+  return status.value.server_status === 'running' ? 'status-dot--success' : 'status-dot--warning'
+})
+
+function formatSpeed(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec <= 0) return '0 B/s'
+  if (bytesPerSec > 1024 * 1024) {
+    return (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s'
+  } else if (bytesPerSec > 1024) {
+    return (bytesPerSec / 1024).toFixed(1) + ' KB/s'
+  }
+  return bytesPerSec.toFixed(0) + ' B/s'
+}
+
 function initChart() {
   if (!chartRef.value) return
-  
+
   chartInstance = echarts.init(chartRef.value)
-  
-  const option = {
+
+  const option: echarts.EChartsOption = {
     tooltip: {
       trigger: 'axis',
+      backgroundColor: 'rgba(255, 255, 255, 0.94)',
+      borderColor: 'rgba(255, 143, 171, 0.35)',
+      borderWidth: 1,
+      padding: [10, 14],
+      textStyle: {
+        color: '#1f2937',
+        fontSize: 12
+      },
+      extraCssText: 'box-shadow: 0 10px 25px rgba(255, 117, 151, 0.15); border-radius: 12px; backdrop-filter: blur(8px);',
       formatter: function (params: any) {
-        let result = params[0].axisValueLabel + '<br/>'
+        let result = `<div style="font-weight: 600; margin-bottom: 6px; color: #4b5563;">${params[0].axisValueLabel}</div>`
         params.forEach((param: any) => {
           let value = param.value
-          
+          let formattedValue = ''
+
           if (value > 1024 * 1024) {
-            value = (value / (1024 * 1024)).toFixed(2) + ' MB/s'
+            formattedValue = (value / (1024 * 1024)).toFixed(2) + ' MB/s'
           } else if (value > 1024) {
-            value = (value / 1024).toFixed(2) + ' KB/s'
+            formattedValue = (value / 1024).toFixed(2) + ' KB/s'
           } else {
-            value = value + ' B/s'
+            formattedValue = (value || 0) + ' B/s'
           }
-          
-          result += param.marker + param.seriesName + ': ' + value + '<br/>'
+
+          result += `<div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 3px 0;">
+            <span style="display: flex; align-items: center; gap: 6px;">
+              ${param.marker} <span style="color: #6b7280;">${param.seriesName}</span>
+            </span>
+            <span style="font-weight: 600; font-family: monospace;">${formattedValue}</span>
+          </div>`
         })
         return result
       }
     },
     legend: {
       data: ['上传速度', '下载速度', 'IO占用'],
-      bottom: 0
+      bottom: 0,
+      icon: 'circle',
+      itemWidth: 8,
+      itemHeight: 8,
+      textStyle: {
+        color: '#6b7280',
+        fontSize: 12
+      }
     },
     grid: {
-      left: '3%',
-      right: '4%',
-      bottom: '10%',
-      top: '3%',
+      left: '2%',
+      right: '3%',
+      bottom: '12%',
+      top: '6%',
       containLabel: true
     },
     xAxis: {
       type: 'category',
       boundaryGap: false,
       data: [],
+      axisLine: {
+        lineStyle: { color: 'rgba(255, 143, 171, 0.25)' }
+      },
       axisLabel: {
+        color: '#9ca3af',
+        fontSize: 11,
         formatter: (value: string) => {
-          // 时间戳是UTC时间戳（毫秒），需要转换为中国时区（UTC+8）
           const timestamp = parseInt(value)
+          if (isNaN(timestamp)) return value
           const date = new Date(timestamp)
-          
-          // 获取UTC时间的小时、分钟、秒
           const utcHours = date.getUTCHours()
           const utcMinutes = date.getUTCMinutes()
           const utcSeconds = date.getUTCSeconds()
-          
-          // 转换为中国时区（UTC+8）
           const cnHours = (utcHours + 8) % 24
-          
-          // 格式化时间
-          return cnHours.toString().padStart(2, '0') + ':' + 
-                 utcMinutes.toString().padStart(2, '0') + ':' + 
-                 utcSeconds.toString().padStart(2, '0')
+          return (
+            cnHours.toString().padStart(2, '0') +
+            ':' +
+            utcMinutes.toString().padStart(2, '0') +
+            ':' +
+            utcSeconds.toString().padStart(2, '0')
+          )
         }
       }
     },
     yAxis: {
       type: 'value',
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(229, 231, 235, 0.6)',
+          type: 'dashed'
+        }
+      },
       axisLabel: {
+        color: '#9ca3af',
+        fontSize: 11,
         formatter: (value: number) => {
           if (value > 1024 * 1024) {
             return (value / (1024 * 1024)).toFixed(1) + ' M'
           } else if (value > 1024) {
             return (value / 1024).toFixed(1) + ' K'
           }
-          return value
+          return value.toString()
         }
       }
     },
@@ -307,42 +558,77 @@ function initChart() {
       {
         name: '上传速度',
         type: 'line',
-        smooth: true,
+        smooth: 0.35,
         showSymbol: false,
-        areaStyle: { opacity: 0.1 },
+        lineStyle: {
+          width: 2.5,
+          color: '#ff7597'
+        },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(255, 117, 151, 0.35)' },
+            { offset: 1, color: 'rgba(255, 117, 151, 0.01)' }
+          ])
+        },
         data: []
       },
       {
         name: '下载速度',
         type: 'line',
-        smooth: true,
+        smooth: 0.35,
         showSymbol: false,
-        areaStyle: { opacity: 0.1 },
+        lineStyle: {
+          width: 2.5,
+          color: '#38bdf8'
+        },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(56, 189, 248, 0.35)' },
+            { offset: 1, color: 'rgba(56, 189, 248, 0.01)' }
+          ])
+        },
         data: []
       },
       {
         name: 'IO占用',
         type: 'line',
-        smooth: true,
+        smooth: 0.35,
         showSymbol: false,
-        areaStyle: { opacity: 0.1 },
+        lineStyle: {
+          width: 2,
+          color: '#fbbf24',
+          type: 'dotted'
+        },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(251, 191, 36, 0.2)' },
+            { offset: 1, color: 'rgba(251, 191, 36, 0.01)' }
+          ])
+        },
         data: []
       }
     ],
-    color: ['#667eea', '#10b981', '#f59e0b']
+    color: ['#ff7597', '#38bdf8', '#fbbf24']
   }
-  
+
   chartInstance.setOption(option)
 }
 
 function updateChart(data: TrendPoint[]) {
-  if (!chartInstance) return
-  
+  if (!chartInstance || !data || data.length === 0) return
+
   const timestamps = data.map(p => p.timestamp)
   const uploads = data.map(p => p.upload)
   const downloads = data.map(p => p.download)
   const ios = data.map(p => p.io)
-  
+
+  // 更新当前速度展示
+  const latest = data[data.length - 1]
+  if (latest) {
+    currentUploadSpeed.value = formatSpeed(latest.upload)
+    currentDownloadSpeed.value = formatSpeed(latest.download)
+  }
+
   chartInstance.setOption({
     xAxis: {
       data: timestamps
@@ -366,7 +652,6 @@ function fetchTrend() {
 }
 
 function fetchSystemResources() {
-  // 获取系统资源（实时更新）
   getSystemResources()
     .then(response => {
       if (response.success && response.data) {
@@ -377,14 +662,12 @@ function fetchSystemResources() {
 }
 
 function fetchData() {
-  // 获取状态
   getStatus()
     .then(data => {
       status.value = data
     })
     .catch(err => console.error('获取状态失败:', err))
 
-  // 获取下载统计和上传统计
   Promise.all([
     getDownloadStatistics(),
     getUploadStatistics()
@@ -392,9 +675,8 @@ function fetchData() {
     .then(([downloadResponse, uploadResponse]) => {
       const downloadData = downloadResponse.success ? downloadResponse.data : null
       const uploadData = uploadResponse.success ? uploadResponse.data : null
-      
+
       if (downloadData || uploadData) {
-        // 总数应该是下载任务总数（因为上传任务关联下载任务，避免重复计算）
         const totalTasks = downloadData?.total || 0
         updateStats({
           completed: downloadData?.completed || 0,
@@ -406,13 +688,10 @@ function fetchData() {
     })
     .catch(err => console.error('获取统计失败:', err))
 
-  // 获取最近下载（仅用于显示最近活动）
   getDownloads(10)
     .then(response => {
       if (response.success) {
-        // 处理分组数据
         if (response.grouped && Array.isArray(response.data)) {
-          // 展平分组数据
           const allDownloads: DownloadRecord[] = []
           response.data.forEach((group: any) => {
             if (group.downloads && Array.isArray(group.downloads)) {
@@ -421,14 +700,13 @@ function fetchData() {
           })
           recentDownloads.value = allDownloads.slice(0, 10)
         } else {
-          // 非分组数据
           const data = (response.data as DownloadRecord[]) || []
           recentDownloads.value = data.slice(0, 10)
         }
       }
     })
     .catch(err => console.error('获取下载记录失败:', err))
-    
+
   fetchTrend()
 }
 
@@ -453,11 +731,65 @@ function updateStats(statistics: { completed: number; cleaned: number; failed: n
   })
 }
 
-function getLoadTagType(load: number): 'success' | 'warning' | 'danger' {
-  if (load === 0) return 'success'
-  if (load <= 2) return 'success'
-  if (load <= 5) return 'warning'
-  return 'danger'
+async function handleManualRefresh() {
+  isRefreshing.value = true
+  try {
+    fetchData()
+    fetchSystemResources()
+    fetchTrend()
+  } finally {
+    setTimeout(() => {
+      isRefreshing.value = false
+    }, 600)
+  }
+}
+
+// 定时轮询
+const { pause: pauseTrend, resume: resumeTrend } = useIntervalFn(fetchTrend, 2000)
+const { pause: pauseResources, resume: resumeResources } = useIntervalFn(fetchSystemResources, 2000)
+const { pause: pauseData, resume: resumeData } = useIntervalFn(fetchData, 30000)
+
+function toggleAutoRefresh() {
+  autoRefresh.value = !autoRefresh.value
+  if (autoRefresh.value) {
+    resumeTrend()
+    resumeResources()
+    resumeData()
+  } else {
+    pauseTrend()
+    pauseResources()
+    pauseData()
+  }
+}
+
+function getFileIcon(fileName: string) {
+  const ext = fileName?.split('.').pop()?.toLowerCase() || ''
+  if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'ts'].includes(ext)) return VideoCamera
+  if (['mp3', 'flac', 'wav', 'aac', 'ogg', 'm4a'].includes(ext)) return Headset
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return Picture
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'iso'].includes(ext)) return Box
+  return Document
+}
+
+function getFileIconClass(fileName: string) {
+  const ext = fileName?.split('.').pop()?.toLowerCase() || ''
+  if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'ts'].includes(ext)) return 'icon-video'
+  if (['mp3', 'flac', 'wav', 'aac', 'ogg', 'm4a'].includes(ext)) return 'icon-audio'
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return 'icon-image'
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'iso'].includes(ext)) return 'icon-archive'
+  return 'icon-doc'
+}
+
+function getResourceTagClass(percent: number): string {
+  if (percent < 50) return 'tag-normal'
+  if (percent < 80) return 'tag-medium'
+  return 'tag-high'
+}
+
+function getResourceColor(percent: number): string {
+  if (percent < 50) return '#38bdf8'
+  if (percent < 80) return '#f59e0b'
+  return '#ff7597'
 }
 
 function getLoadPercentage(load: number): number {
@@ -465,22 +797,25 @@ function getLoadPercentage(load: number): number {
 }
 
 function getLoadColor(load: number): string {
-  if (load === 0) return '#10b981'
-  if (load <= 2) return '#10b981'
+  if (load <= 2) return '#38bdf8'
   if (load <= 5) return '#f59e0b'
-  return '#ef4444'
+  return '#ff7597'
 }
 
-function getResourceTagType(percent: number): 'success' | 'warning' | 'danger' {
-  if (percent < 50) return 'success'
-  if (percent < 80) return 'warning'
-  return 'danger'
+function getBotDisplayName(botKey: string): string {
+  if (status.value?.bot_details) {
+    const detail = status.value.bot_details.find(b => b.name === botKey)
+    if (detail && detail.username) {
+      return detail.username
+    }
+  }
+  return botKey
 }
 
-function getResourceColor(percent: number): string {
-  if (percent < 50) return '#10b981'
-  if (percent < 80) return '#f59e0b'
-  return '#ef4444'
+function getLoadChipClass(load: number): string {
+  if (load <= 2) return 'chip-green'
+  if (load <= 5) return 'chip-yellow'
+  return 'chip-red'
 }
 
 function formatBytes(bytes: number): string {
@@ -498,402 +833,806 @@ onMounted(() => {
     initChart()
     fetchTrend()
   })
-  
-  // 每2秒更新图表
-  const { pause: pauseTrend } = useIntervalFn(fetchTrend, 2000)
-  // 每2秒更新系统资源（实时显示）
-  const { pause: pauseResources } = useIntervalFn(fetchSystemResources, 2000)
-  // 每30秒更新其他数据
-  const { pause: pauseData } = useIntervalFn(fetchData, 30000)
-  
+
   useResizeObserver(document.body, () => {
     chartInstance?.resize()
   })
-  
-  onUnmounted(() => {
-    pauseTrend()
-    pauseResources()
-    pauseData()
-    chartInstance?.dispose()
-  })
+})
+
+onUnmounted(() => {
+  pauseTrend()
+  pauseResources()
+  pauseData()
+  chartInstance?.dispose()
 })
 </script>
 
 <style scoped>
-.dashboard {
-  @apply space-y-8;
-  animation: fadeIn 0.5s ease-out;
+.dashboard-page {
+  @apply space-y-6;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
-.page-header {
-  @apply mb-8;
-  animation: slideInLeft 0.6s ease-out;
-}
-
-.page-title {
-  @apply text-4xl font-bold mb-3;
+/* 头部品牌横幅 */
+.dashboard-header-card {
+  padding: 24px 28px 20px;
   position: relative;
+  overflow: hidden;
+  border-radius: 20px;
+}
+
+.dashboard-header-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+
+.dashboard-title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dashboard-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dashboard-title {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  margin: 0;
+  line-height: 1.2;
+}
+
+.dashboard-badge {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  background: linear-gradient(135deg, rgba(255, 117, 151, 0.15) 0%, rgba(56, 189, 248, 0.15) 100%);
+  color: #ff7597;
+  border: 1px solid rgba(255, 143, 171, 0.35);
+}
+
+.dashboard-subtitle {
+  color: #64748b;
+  font-size: 13.5px;
+  margin: 0;
+}
+
+.dashboard-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.status-indicator-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 143, 171, 0.25);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.status-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.status-dot--success {
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2), 0 0 8px #10b981;
+}
+
+.status-dot--warning {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+}
+
+.header-btn {
+  border-radius: 12px;
+  font-weight: 600;
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.header-btn:hover {
+  transform: translateY(-1px);
+}
+
+.auto-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.refresh-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #cbd5e1;
   display: inline-block;
 }
 
-.title-text {
-  background: linear-gradient(135deg, #1f2937 0%, #667eea 50%, #764ba2 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  position: relative;
-  z-index: 1;
+.refresh-indicator.is-active {
+  background: #10b981;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.35);
+  animation: pulse 1.8s infinite;
 }
 
-.title-decoration {
-  position: absolute;
-  bottom: -8px;
-  left: 0;
-  width: 80px;
-  height: 4px;
-  background: var(--gradient-primary);
-  border-radius: 2px;
-  animation: slideInLeft 0.8s ease-out 0.2s both;
-}
-
-.page-subtitle {
-  @apply text-gray-600 text-base;
-  font-weight: 500;
-}
-
+/* 4 大统计卡片 */
 .stats-row {
-  @apply mb-8;
-}
-
-.stat-card {
-  @apply cursor-pointer;
-  @apply transition-all duration-300;
-  border-radius: 16px;
-  overflow: hidden;
-  position: relative;
-  background: white;
-  border: 1px solid rgba(229, 231, 235, 0.8);
-}
-
-.stat-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.05), rgba(118, 75, 162, 0.05));
-  opacity: 0;
-  transition: opacity 0.3s ease;
-}
-
-.stat-card:hover {
-  transform: translateY(-8px);
-  box-shadow: 0 12px 24px rgba(102, 126, 234, 0.15);
-  border-color: rgba(102, 126, 234, 0.3);
-}
-
-.stat-card:hover::before {
-  opacity: 1;
-}
-
-.stat-card :deep(.el-card__body) {
-  padding: 24px;
-}
-
-.stat-content {
-  @apply flex items-center gap-5;
-  position: relative;
-  z-index: 1;
-}
-
-.stat-icon {
-  @apply w-14 h-14 rounded-xl flex items-center justify-center text-white;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  transition: all 0.3s ease;
-}
-
-.stat-card:hover .stat-icon {
-  transform: scale(1.1) rotate(5deg);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
-}
-
-.stat-info {
-  @apply flex-1;
-}
-
-.stat-value {
-  @apply text-3xl font-bold text-gray-900 mb-1;
-  font-variant-numeric: tabular-nums;
-  transition: all 0.3s ease;
-}
-
-.stat-card:hover .stat-value {
-  color: #667eea;
-  transform: scale(1.05);
-}
-
-.stat-label {
-  @apply text-sm text-gray-600 font-medium;
-}
-
-.charts-row {
-  @apply mb-8;
-  display: flex;
-  align-items: stretch;
-}
-
-.charts-row :deep(.el-col) {
-  display: flex;
-}
-
-.chart-card {
-  border-radius: 16px;
-  overflow: hidden;
-  border: 1px solid rgba(229, 231, 235, 0.8);
-  transition: all 0.3s ease;
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 320px;
-}
-
-.chart-card:hover {
-  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.08);
-  border-color: rgba(102, 126, 234, 0.2);
-}
-
-.chart-card :deep(.el-card__header) {
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(249, 250, 251, 0.9));
-  border-bottom: 1px solid rgba(229, 231, 235, 0.8);
-  padding: 20px 24px;
-  flex-shrink: 0;
-}
-
-.chart-card :deep(.el-card__body) {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  padding: 20px 24px;
-}
-
-.system-load-card {
-  border-radius: 16px;
-  border: 1px solid rgba(229, 231, 235, 0.8);
-  transition: all 0.3s ease;
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 320px;
-}
-
-.system-load-card:hover {
-  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.08);
-  border-color: rgba(102, 126, 234, 0.2);
-}
-
-.system-load-card :deep(.el-card__header) {
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(249, 250, 251, 0.9));
-  border-bottom: 1px solid rgba(229, 231, 235, 0.8);
-  padding: 20px 24px;
-  flex-shrink: 0;
-}
-
-.system-load-card :deep(.el-card__body) {
-  flex: 1;
-  overflow: visible;
-  padding: 20px 24px;
-}
-
-.card-header {
-  @apply flex items-center justify-between;
-}
-
-.card-header span {
-  @apply text-lg font-semibold text-gray-800;
-}
-
-.chart-container {
-  @apply w-full;
-  flex: 1;
-  min-height: 250px;
-}
-
-.system-resources {
-  @apply space-y-4;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.resource-item {
-  @apply space-y-2;
-  padding: 12px 16px;
-  border-radius: 12px;
-  background: rgba(249, 250, 251, 0.5);
-  transition: all 0.3s ease;
-  flex-shrink: 0;
-}
-
-.resource-item:hover {
-  background: rgba(102, 126, 234, 0.05);
-  transform: translateX(4px);
-}
-
-.resource-header {
-  @apply flex items-center justify-between;
-}
-
-.resource-label {
-  @apply flex items-center gap-2;
-  font-weight: 600;
-  color: #374151;
-  font-size: 15px;
-}
-
-.resource-detail {
-  @apply text-xs text-gray-500;
   margin-top: 4px;
 }
 
-.bot-loads {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid rgba(229, 231, 235, 0.8);
+.stat-card {
+  position: relative;
+  padding: 16px 18px;
+  border-radius: 16px;
+  cursor: pointer;
+  overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  background: rgba(255, 255, 255, 0.72) !important;
+  border: 1px solid rgba(255, 143, 171, 0.25) !important;
 }
 
-.bot-loads-title {
-  @apply font-semibold text-gray-700 mb-3;
-  font-size: 14px;
+.stat-card:hover {
+  transform: translateY(-3px);
+  background: rgba(255, 255, 255, 0.95) !important;
+  box-shadow: 0 12px 28px rgba(255, 117, 151, 0.18), 0 6px 16px rgba(56, 189, 248, 0.12) !important;
 }
 
-.bot-loads-list {
-  @apply space-y-3;
+.stat-card-inner {
+  position: relative;
+  z-index: 1;
 }
 
-.bot-load-item {
-  @apply space-y-2;
+.stat-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
 }
 
-.bot-load-header {
-  @apply flex items-center justify-between;
-}
-
-.bot-load-name {
-  @apply font-medium text-gray-700;
+.stat-label {
   font-size: 13px;
+  font-weight: 600;
+  color: #64748b;
 }
 
+.stat-icon-wrap {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
+  transition: transform 0.3s ease;
+}
+
+.stat-card:hover .stat-icon-wrap {
+  transform: scale(1.08) rotate(4deg);
+}
+
+.stat-value-group {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.stat-value {
+  font-size: 26px;
+  font-weight: 800;
+  color: #1e293b;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: -0.5px;
+}
+
+.stat-unit {
+  font-size: 12px;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.stat-desc {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: #94a3b8;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(226, 232, 240, 0.8);
+}
+
+.stat-arrow {
+  font-size: 12px;
+  color: #cbd5e1;
+  transition: transform 0.25s ease, color 0.25s ease;
+}
+
+.stat-card:hover .stat-arrow {
+  color: #ff7597;
+  transform: translateX(3px);
+}
+
+/* 图表与负载容器 */
+.charts-row,
 .activity-row {
-  @apply mt-8;
   display: flex;
   align-items: stretch;
 }
 
-.activity-row :deep(.el-col) {
-  display: flex;
-}
-
+.chart-card,
+.system-load-card,
 .activity-card {
-  border-radius: 16px;
-  border: 1px solid rgba(229, 231, 235, 0.8);
-  transition: all 0.3s ease;
+  padding: 20px 22px;
+  border-radius: 18px;
   display: flex;
   flex-direction: column;
-  flex: 1;
+  height: 100%;
+  border: 1px solid rgba(255, 143, 171, 0.22) !important;
 }
 
-.activity-row :deep(.el-card) {
-  border-radius: 16px;
-  border: 1px solid rgba(229, 231, 235, 0.8);
-  transition: all 0.3s ease;
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
-.activity-row :deep(.el-card:hover) {
-  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.08);
-  border-color: rgba(102, 126, 234, 0.2);
+.panel-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.activity-card :deep(.el-card__header),
-.activity-row :deep(.el-card__header) {
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(249, 250, 251, 0.9));
-  border-bottom: 1px solid rgba(229, 231, 235, 0.8);
-  padding: 20px 24px;
+.panel-icon-pill {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: #ffffff;
   flex-shrink: 0;
 }
 
-.activity-card :deep(.el-card__body),
-.activity-row :deep(.el-card__body) {
+.icon-pill-primary {
+  background: var(--gradient-primary);
+  box-shadow: 0 4px 12px rgba(255, 117, 151, 0.35);
+}
+
+.icon-pill-sky {
+  background: var(--gradient-sky);
+  box-shadow: 0 4px 12px rgba(56, 189, 248, 0.35);
+}
+
+.panel-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 0 0 2px;
+}
+
+.panel-subtitle {
+  font-size: 12px;
+  color: #64748b;
+  margin: 0;
+}
+
+.panel-tags {
+  display: flex;
+  gap: 8px;
+}
+
+.metric-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  font-family: monospace;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.tag-upload {
+  border-color: rgba(255, 117, 151, 0.35) !important;
+  color: #ff7597 !important;
+  background: rgba(255, 117, 151, 0.08) !important;
+}
+
+.tag-download {
+  border-color: rgba(56, 189, 248, 0.35) !important;
+  color: #0284c7 !important;
+  background: rgba(56, 189, 248, 0.08) !important;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.dot-upload {
+  background: #ff7597;
+}
+
+.dot-download {
+  background: #38bdf8;
+}
+
+.chart-body {
   flex: 1;
+  min-height: 270px;
   display: flex;
   flex-direction: column;
-  padding: 20px 24px;
 }
 
-.activity-row :deep(.el-card__header span) {
-  @apply text-lg font-semibold text-gray-800;
+.chart-container {
+  width: 100%;
+  flex: 1;
+  min-height: 270px;
 }
 
-.system-info-content {
+/* 硬件资源面板 */
+.system-resources {
   display: flex;
   flex-direction: column;
+  gap: 16px;
   flex: 1;
+  justify-content: center;
 }
 
-.system-descriptions {
-  flex-shrink: 0;
+.resource-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(248, 250, 252, 0.65);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  transition: all 0.25s ease;
 }
 
-.activity-row :deep(.el-table) {
-  border-radius: 8px;
+.resource-item:hover {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 143, 171, 0.35);
+  transform: translateX(2px);
+}
+
+.resource-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.resource-label-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.resource-icon-badge {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: #fff;
+}
+
+.badge-cpu {
+  background: linear-gradient(135deg, #ff7597, #f43f5e);
+}
+
+.badge-mem {
+  background: linear-gradient(135deg, #38bdf8, #0ea5e9);
+}
+
+.badge-disk {
+  background: linear-gradient(135deg, #a855f7, #6366f1);
+}
+
+.resource-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.resource-val-tag {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.tag-normal {
+  background: rgba(56, 189, 248, 0.12);
+  color: #0284c7;
+}
+
+.tag-medium {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+}
+
+.tag-high {
+  background: rgba(255, 117, 151, 0.15);
+  color: #e11d48;
+}
+
+.resource-progress-wrap {
+  margin-bottom: 4px;
+}
+
+.resource-detail-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #64748b;
+  margin-top: 6px;
+}
+
+.text-separator {
+  color: #cbd5e1;
+}
+
+/* 最近下载表格 */
+.more-link-btn {
+  border-radius: 999px;
+  color: #ff7597;
+  border-color: rgba(255, 143, 171, 0.3);
+  font-weight: 600;
+}
+
+.more-link-btn:hover {
+  background: rgba(255, 117, 151, 0.08);
+  border-color: #ff7597;
+}
+
+.table-wrap {
   flex: 1;
-}
-
-.activity-row :deep(.el-table__row) {
-  transition: all 0.2s ease;
-}
-
-.activity-row :deep(.el-table__row:hover) {
-  background: linear-gradient(90deg, rgba(102, 126, 234, 0.05), rgba(118, 75, 162, 0.03));
-}
-
-.activity-row :deep(.el-descriptions) {
-  border-radius: 8px;
-}
-
-.activity-row :deep(.el-descriptions__label) {
-  @apply font-semibold;
-}
-
-/* 进度条美化 */
-:deep(.el-progress__text) {
-  @apply font-semibold;
-}
-
-:deep(.el-progress-bar__outer) {
-  border-radius: 10px;
   overflow: hidden;
 }
 
-:deep(.el-progress-bar__inner) {
-  border-radius: 10px;
-  transition: all 0.3s ease;
+.custom-table {
+  background: transparent !important;
 }
 
-/* 标签美化 */
-:deep(.el-tag) {
-  border-radius: 6px;
+.custom-table :deep(tr) {
+  background: transparent !important;
+}
+
+.custom-table :deep(.el-table__row:hover > td) {
+  background: linear-gradient(90deg, rgba(255, 117, 151, 0.08), rgba(56, 189, 248, 0.04)) !important;
+}
+
+.file-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.file-type-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.icon-video {
+  color: #38bdf8;
+}
+
+.icon-audio {
+  color: #a855f7;
+}
+
+.icon-image {
+  color: #ff7597;
+}
+
+.icon-archive {
+  color: #f59e0b;
+}
+
+.icon-doc {
+  color: #94a3b8;
+}
+
+.file-name-text {
+  font-size: 13px;
   font-weight: 500;
-  border: none;
+  color: #1e293b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* 按钮组美化 */
-:deep(.el-button-group .el-button) {
+.custom-status-badge {
+  display: inline-block;
+  padding: 3px 10px;
   border-radius: 8px;
-  transition: all 0.2s ease;
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
-:deep(.el-button-group .el-button:hover) {
-  transform: translateY(-1px);
+.badge-status-completed,
+.badge-status-success {
+  background: rgba(56, 189, 248, 0.12);
+  color: #0284c7;
+}
+
+.badge-status-downloading,
+.badge-status-running {
+  background: rgba(255, 117, 151, 0.12);
+  color: #e11d48;
+}
+
+.badge-status-failed,
+.badge-status-error {
+  background: rgba(244, 63, 94, 0.12);
+  color: #e11d48;
+}
+
+.badge-status-waiting,
+.badge-status-paused {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+}
+
+.time-cell {
+  font-size: 11.5px;
+  color: #94a3b8;
+  font-family: monospace;
+}
+
+/* 系统运行信息卡片 */
+.system-info-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex: 1;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.info-box {
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.65);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.info-box.col-span-full {
+  grid-column: span 2;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.info-label {
+  font-size: 11.5px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.info-value-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.online-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #059669;
+}
+
+.online-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+}
+
+.info-val-highlight {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #0284c7;
+  font-family: monospace;
+}
+
+.info-val-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #334155;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.info-val-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ff7597;
+}
+
+.version-tag {
+  font-size: 12px;
+  font-family: monospace;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 8px;
+  background: var(--gradient-primary);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(255, 117, 151, 0.35);
+}
+
+/* 机器人负载 */
+.bot-loads {
+  padding-top: 14px;
+  border-top: 1px dashed rgba(226, 232, 240, 0.9);
+}
+
+.bot-loads-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.bot-loads-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #334155;
+}
+
+.no-join-indicator {
+  font-size: 11px;
+  font-weight: 600;
+  color: #0284c7;
+  background: rgba(56, 189, 248, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.bot-loads-count {
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+
+.bot-loads-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.bot-load-chip {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.85);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+}
+
+.bot-chip-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.bot-chip-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #475569;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bot-chip-tag {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.chip-green {
+  background: rgba(56, 189, 248, 0.12);
+  color: #0284c7;
+}
+
+.chip-yellow {
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+}
+
+.chip-red {
+  background: rgba(255, 117, 151, 0.15);
+  color: #e11d48;
+}
+
+.bot-chip-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.8);
+  overflow: hidden;
+}
+
+.bot-chip-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .dashboard-header-card {
+    padding: 16px;
+  }
+
+  .dashboard-title {
+    font-size: 20px;
+  }
+
+  .dashboard-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .stats-row :deep(.el-col) {
+    margin-bottom: 10px;
+  }
+
+  .chart-card,
+  .system-load-card,
+  .activity-card {
+    padding: 16px;
+  }
+
+  .info-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .info-box.col-span-full {
+    grid-column: span 1;
+  }
 }
 </style>

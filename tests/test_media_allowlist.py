@@ -1,3 +1,4 @@
+import tests  # noqa: F401
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch

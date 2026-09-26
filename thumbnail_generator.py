@@ -52,7 +52,13 @@ class ThumbnailGenerator:
             cache_max_age_days: 缓存有效期(天)
             memory_cache_size: 内存缓存大小(LRU)
         """
-        self.cache_dir = Path(cache_dir)
+        resolved_dir = Path(cache_dir)
+        if cache_dir == "/app/cache/thumbnails":
+            local_cache = Path(__file__).resolve().parent / "cache" / "thumbnails"
+            if local_cache != resolved_dir and local_cache.exists() and any(local_cache.rglob("*.webp")):
+                if not resolved_dir.exists() or not any(resolved_dir.rglob("*.webp")):
+                    resolved_dir = local_cache
+        self.cache_dir = resolved_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         # 内存缓存(存储缓存路径)
@@ -85,37 +91,58 @@ class ThumbnailGenerator:
         return None
     
     def _is_cache_valid(self, cache_path: Path) -> bool:
-        """检查缓存是否有效(未过期)"""
+        """检查缓存是否有效(未过期且大小有效)"""
         if not cache_path.exists():
             return False
-        
-        cache_time = datetime.fromtimestamp(cache_path.stat().st_mtime)
-        expiry_time = datetime.now() - timedelta(days=self.cache_max_age_days)
-        
-        if cache_time < expiry_time:
-            logger.info(f"缓存已过期: {cache_path}")
-            cache_path.unlink()  # 删除过期缓存
+
+        try:
+            if cache_path.stat().st_size <= 64:
+                try:
+                    cache_path.unlink()
+                except Exception:
+                    pass
+                return False
+
+            cache_time = datetime.fromtimestamp(cache_path.stat().st_mtime)
+            expiry_time = datetime.now() - timedelta(days=self.cache_max_age_days)
+
+            if cache_time < expiry_time:
+                logger.info(f"缓存已过期: {cache_path}")
+                try:
+                    cache_path.unlink()
+                except Exception:
+                    pass
+                return False
+        except Exception:
             return False
-        
+
         return True
-    
+
     def is_cached(self, remote_name: str, file_path: str) -> bool:
         """检查缩略图是否已缓存且有效"""
         cache_path = self._get_cache_path(remote_name, file_path)
-        
-        if not cache_path.exists():
-            return False
-        
-        # 检查缓存是否过期
-        cache_time = datetime.fromtimestamp(cache_path.stat().st_mtime)
-        expiry_time = datetime.now() - timedelta(days=self.cache_max_age_days)
-        
-        if cache_time < expiry_time:
-            logger.info(f"缓存已过期: {cache_path}")
-            cache_path.unlink()  # 删除过期缓存
-            return False
-        
-        return True
+        return self._is_cache_valid(cache_path)
+
+    def _is_image_content(self, path: Path) -> bool:
+        """检测文件是否包含有效图片头（例如从 TG 下载的视频内嵌 JPEG 封面）"""
+        try:
+            if not path.exists() or path.stat().st_size < 12:
+                return False
+            with path.open("rb") as f:
+                header = f.read(12)
+            if header.startswith(b"\xff\xd8\xff"):
+                return True
+            if header.startswith(b"\x89PNG\r\n\x1a\n"):
+                return True
+            if header.startswith((b"GIF87a", b"GIF89a")):
+                return True
+            if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+                return True
+            if header.startswith(b"BM"):
+                return True
+        except Exception:
+            pass
+        return False
     
     def get_cached_thumbnail(self, remote_name: str, file_path: str) -> Optional[Path]:
         """获取缓存的缩略图路径"""
@@ -257,7 +284,11 @@ class ThumbnailGenerator:
         
         # 根据文件类型生成缩略图
         success = False
-        if self._is_image(file_path):
+        if (
+            self._is_image_content(source_local_path)
+            or self._is_image(str(source_local_path))
+            or self._is_image(file_path)
+        ):
             success = self.generate_image_thumbnail(source_local_path, output_path)
         elif self._is_video(file_path):
             success = self.generate_video_thumbnail(source_local_path, output_path)
@@ -265,7 +296,7 @@ class ThumbnailGenerator:
             logger.warning(f"不支持的文件类型: {file_path}")
             return None
         
-        if success and output_path.exists():
+        if success and output_path.exists() and output_path.stat().st_size > 64:
             return output_path
         
         return None

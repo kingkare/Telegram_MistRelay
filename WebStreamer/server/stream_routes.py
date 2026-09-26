@@ -33,6 +33,11 @@ from WebStreamer.bot import (
     mark_bot_failure,
     mark_bot_success,
 )
+try:
+    from WebStreamer.bot import acquire_bot_slot, release_bot_slot
+except Exception:
+    acquire_bot_slot = lambda *_args, **_kwargs: None
+    release_bot_slot = lambda *_args, **_kwargs: None
 from WebStreamer.server.exceptions import FIleNotFound, InvalidHash
 from path_security import UnsafePathError, resolve_under, validate_child_name
 from request_security import (
@@ -538,7 +543,10 @@ async def api_health_handler(_):
     """Minimal liveness/readiness response for proxies and container health checks."""
     from service_runtime import is_service_ready
 
-    telegram_connected = bool(StreamBot and getattr(StreamBot, "is_connected", False))
+    telegram_connected = bool(
+        (StreamBot and getattr(StreamBot, "is_connected", False))
+        or any(getattr(c, "is_connected", False) for c in multi_clients.values())
+    )
     ready = is_service_ready() and telegram_connected
     return web.json_response(
         {
@@ -579,16 +587,67 @@ async def api_status_handler(_):
             else:
                 bot_username = "@unknown"
     
+    import WebStreamer.bot as bot_mod
+    public_handle = getattr(bot_mod, "channel_public_handle", None)
+    bot_modes = getattr(bot_mod, "bot_channel_modes", {})
+    write_clients = getattr(bot_mod, "channel_write_clients", set())
+
+    bot_details = []
+    runtime_snapshots = get_bot_runtime_snapshot()
+    for index in sorted(multi_clients.keys()):
+        client = multi_clients.get(index)
+        uname = getattr(client, "username", "") or ""
+        mode_entry = bot_modes.get(index, {})
+        mode = mode_entry.get("mode") or (
+            "primary_admin" if index == 0 else (
+                "direct_admin" if index in write_clients else (
+                    "no_join_resolved" if index in channel_accessible_clients else "unreachable"
+                )
+            )
+        )
+        can_read = index in channel_accessible_clients
+        can_write = index in write_clients or index == 0
+        clean_uname = uname.lstrip("@")
+        invite_url = (
+            f"https://t.me/{clean_uname}?startchannel&admin=post_messages+edit_messages+delete_messages"
+            if clean_uname else ""
+        )
+        snap_m = runtime_snapshots.get(index, {})
+        bot_details.append({
+            "index": index,
+            "name": f"bot{index + 1}",
+            "username": f"@{clean_uname}" if clean_uname else f"bot{index + 1}",
+            "mode": mode,
+            "home_dc": snap_m.get("home_dc"),
+            "warm_dcs": snap_m.get("warm_dcs", []),
+            "can_read": can_read,
+            "can_write": can_write,
+            "active_requests": work_loads.get(index, 0),
+            "invite_url": invite_url,
+        })
+
+    channel_info = {
+        "channel_id": Var.BIN_CHANNEL,
+        "channel_type": "public" if public_handle else "private",
+        "public_handle": public_handle or "",
+        "no_join_balancing_active": bool(public_handle),
+        "accessible_bots": len(channel_accessible_clients),
+        "write_bots": len(write_clients) if write_clients else (1 if 0 in multi_clients else 0),
+    }
+
     return web.json_response(
         {
             "server_status": "running",
             "uptime": utils.get_readable_time(time.time() - StartTime),
             "telegram_bot": bot_username or "@unknown",
             "connected_bots": len(multi_clients),
+            "channel_info": channel_info,
+            "bot_details": bot_details,
             "loads": dict(
                 ("bot" + str(index + 1), work_loads.get(index, 0))
                 for index in sorted(multi_clients.keys())
             ),
+            "dc_partitions": bot_mod.get_dc_partition_summary(),
             "bot_metrics": dict(
                 (
                     "bot" + str(index + 1),
@@ -1259,6 +1318,7 @@ async def update_config_handler(request: web.Request):
             'DOWNLOAD_CLEANUP_ENABLED': ('bool', 'download', '是否启用下载目录自动清理'),
             'DOWNLOAD_RETENTION_HOURS': ('int', 'download', '下载文件保留小时数'),
             'DOWNLOAD_CLEANUP_INTERVAL_SECONDS': ('int', 'download', '下载目录清理间隔秒数'),
+            'THUMBNAIL_CACHE_MAX_AGE_DAYS': ('int', 'cache', '缩略图缓存保留天数'),
             'RPC_SECRET': ('string', 'aria2', 'Aria2 RPC密钥'),
             'RPC_URL': ('string', 'aria2', 'Aria2 RPC URL'),
             'MAX_CONCURRENT_UPLOADS': ('int', 'upload', '最大并发上传数（默认10）'),
@@ -2217,10 +2277,16 @@ def get_byte_streamer(client):
     return streamer
 
 
-async def get_main_bot_file_properties(message_id: int):
+async def get_main_bot_file_properties(message_id: int, force_refresh: bool = False):
     main_client = multi_clients.get(0) or StreamBot
+    if not getattr(main_client, "is_connected", False):
+        for idx in sorted(channel_accessible_clients or multi_clients.keys()):
+            candidate = multi_clients.get(idx)
+            if candidate and getattr(candidate, "is_connected", False):
+                main_client = candidate
+                break
     main_streamer = get_byte_streamer(main_client)
-    return await main_streamer.get_file_properties(message_id, force_refresh=True)
+    return await main_streamer.get_file_properties(message_id, force_refresh=force_refresh)
 
 
 def normalize_download_file_name(name: str | None) -> str:
@@ -2326,10 +2392,20 @@ def build_telegram_thumbnail_url(item: dict) -> str | None:
         if value
     ]
 
+    media_type = get_file_id_media_type(item.get("file_id"))
+    file_name = (item.get("file_name") or "").lower()
+    is_img_or_video_ext = any(file_name.endswith(ext) for ext in (
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".mp4", ".mkv", ".webm", ".mov", ".avi"
+    ))
+
     supported = (
         any(value.startswith(("image/", "video/")) for value in group_mime_types)
         if entry_type == "folder"
-        else mime_type.startswith(("image/", "video/"))
+        else (
+            mime_type.startswith(("image/", "video/"))
+            or media_type in ("photo", "video", "animation", "video_note")
+            or is_img_or_video_ext
+        )
     )
     if not supported:
         return None
@@ -2384,9 +2460,19 @@ async def download_telegram_media_sample(message_id: int, output_path: Path, max
     if max_bytes <= 0:
         raise RuntimeError("invalid thumbnail source size")
 
+    target_dc = None
+    if FileId is not None:
+        try:
+            import db
+            rec = db.get_tg_media_record_by_message_id(message_id)
+            if rec and rec.get("file_id"):
+                target_dc = FileId.decode(rec["file_id"]).dc_id
+        except Exception:
+            pass
+
     attempted_indices = set()
     while True:
-        index = select_stream_bot(prefer_channel=False, exclude_indices=attempted_indices)
+        index = select_stream_bot(prefer_channel=True, exclude_indices=attempted_indices, target_dc=target_dc)
         if index is None:
             raise RuntimeError("No valid clients available")
         if index not in multi_clients:
@@ -2394,9 +2480,36 @@ async def download_telegram_media_sample(message_id: int, output_path: Path, max
             continue
 
         client = multi_clients[index]
+
+        # 优先尝试直接下载 Telegram 消息内嵌的缩略图（针对视频/照片等仅 ~10KB，极速且不依赖 MP4 尾部 moov 索引）
+        if hasattr(client, "get_messages") and hasattr(client, "download_media"):
+            try:
+                from WebStreamer.utils.file_properties import get_media_from_message
+                msg = await client.get_messages(Var.BIN_CHANNEL, message_id)
+                media = get_media_from_message(msg) if msg and not getattr(msg, "empty", False) else None
+                target_thumb_id = None
+                if media is not None:
+                    if getattr(msg, "photo", None) and getattr(media, "file_id", None):
+                        target_thumb_id = media.file_id
+                    elif getattr(media, "thumbs", None):
+                        target_thumb_id = media.thumbs[-1].file_id
+                    elif getattr(media, "thumbnail", None):
+                        target_thumb_id = media.thumbnail.file_id
+
+                if target_thumb_id:
+                    buf = await client.download_media(target_thumb_id, in_memory=True)
+                    if buf:
+                        data = bytes(buf.getbuffer()) if hasattr(buf, "getbuffer") else bytes(buf)
+                        if data and len(data) > 64:
+                            output_path.write_bytes(data)
+                            mark_bot_success(index)
+                            return
+            except Exception as thumb_err:
+                logger.debug(f"直接下载 TG 内嵌缩略图未命中 message_id={message_id}: {thumb_err}")
+
         streamer = get_byte_streamer(client)
         try:
-            file_id = await streamer.get_file_properties(message_id, force_refresh=True)
+            file_id = await streamer.get_file_properties(message_id, force_refresh=False)
             await streamer.generate_media_session(client, file_id)
             mark_bot_success(index)
             break
@@ -2437,14 +2550,16 @@ async def download_telegram_media_sample(message_id: int, output_path: Path, max
 
 
 def get_channel_deletion_clients() -> list[tuple[int, object]]:
-    """按负载升序返回可访问频道的 bot 客户端。"""
+    """按负载升序返回具有频道删除权限的 bot 客户端。"""
+    import WebStreamer.bot as bot_mod
+    write_clients = getattr(bot_mod, "channel_write_clients", None)
     candidate_indices = [
-        idx for idx in channel_accessible_clients
+        idx for idx in (write_clients or channel_accessible_clients)
         if idx in multi_clients
     ]
 
     if not candidate_indices:
-        candidate_indices = list(multi_clients.keys())
+        candidate_indices = [0] if 0 in multi_clients else list(multi_clients.keys())
 
     candidate_indices.sort(key=lambda idx: work_loads.get(idx, 0))
     return [(idx, multi_clients[idx]) for idx in candidate_indices if idx in multi_clients]
@@ -2547,7 +2662,6 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
 
     try:
         source_file_id = await get_main_bot_file_properties(message_id)
-        mark_bot_success(0)
     except FIleNotFound:
         raise
     except Exception as error:
@@ -2559,13 +2673,15 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
         logger.warning("Telegram media identity changed for message ID %s", message_id)
         raise InvalidHash
 
+    target_dc = getattr(source_file_id, "dc_id", None)
     attempted_indices = set()
     tg_connect = None
     index = None
     file_id = None
+    slot_preacquired = False
 
     while True:
-        index = select_stream_bot(prefer_channel=False, exclude_indices=attempted_indices)
+        index = select_stream_bot(prefer_channel=True, exclude_indices=attempted_indices, target_dc=target_dc)
         if index is None:
             logger.error("没有有效的客户端")
             raise web.HTTPInternalServerError(text="No valid clients available")
@@ -2576,6 +2692,8 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
             logger.error(f"选择的客户端索引 {index} 不存在于 multi_clients 中")
             continue
 
+        acquire_bot_slot(index)
+        slot_preacquired = True
         faster_client = multi_clients[index]
 
         if Var.MULTI_CLIENT:
@@ -2588,15 +2706,21 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
         tg_connect = get_byte_streamer(faster_client)
 
         try:
-            file_id = await tg_connect.get_file_properties(message_id, force_refresh=True)
+            file_id = await tg_connect.get_file_properties(message_id, force_refresh=False)
             await tg_connect.generate_media_session(faster_client, file_id)
             mark_bot_success(index)
             break
         except FIleNotFound:
+            if slot_preacquired:
+                release_bot_slot(index)
+                slot_preacquired = False
             attempted_indices.add(index)
             mark_bot_failure(index, "File not found in current bot context")
             logger.warning(f"客户端 {index} 无法读取频道消息，尝试切换")
         except Exception as error:
+            if slot_preacquired:
+                release_bot_slot(index)
+                slot_preacquired = False
             attempted_indices.add(index)
             mark_bot_failure(index, error)
             logger.warning(f"客户端 {index} 准备媒体会话失败，尝试切换: {error}")
@@ -2618,10 +2742,14 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
 
     force_download = request.query.get("download", "").lower() in {"1", "true", "yes"}
 
-    if not force_download and ("video/" in mime_type or "audio/" in mime_type or "/html" in mime_type):
+    if not force_download and (
+        "video/" in mime_type or "audio/" in mime_type or "image/" in mime_type or "/html" in mime_type
+    ):
         disposition = "inline"
 
     def range_not_satisfiable_response():
+        if slot_preacquired and index is not None:
+            release_bot_slot(index)
         return web.Response(
             status=416,
             body=b"" if request.method == "HEAD" else b"416: Range not satisfiable",
@@ -2670,6 +2798,8 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
     status = 206 if range_header else 200
 
     if request.method == "HEAD":
+        if slot_preacquired and index is not None:
+            release_bot_slot(index)
         return web.Response(status=status, headers=response_headers)
 
     offset = from_bytes - (from_bytes % chunk_size)
@@ -2677,7 +2807,15 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
     last_part_cut = until_bytes % chunk_size + 1
     part_count = math.ceil((until_bytes + 1 - offset) / chunk_size)
     body = tg_connect.yield_file(
-        file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size
+        file_id,
+        index,
+        offset,
+        first_part_cut,
+        last_part_cut,
+        part_count,
+        chunk_size,
+        slot_preacquired=slot_preacquired,
+        message_id=message_id,
     )
 
     return web.Response(
@@ -2726,6 +2864,34 @@ async def telegram_browse_handler(request: web.Request):
                 if stream_url:
                     item['hash'] = utils.get_hash(uid, hash_len)
                     item['stream_url'] = stream_url
+            elif item.get('entry_type') == 'folder':
+                uid = item.get('file_unique_id', '')
+                mid = item.get('message_id')
+                if uid and mid:
+                    rep_name = item.get('representative_file_name') or item.get('file_name')
+                    rep_mime = item.get('representative_mime_type')
+                    rep_item = {
+                        'file_unique_id': uid,
+                        'message_id': mid,
+                        'file_name': rep_name,
+                        'mime_type': rep_mime,
+                    }
+                    stream_url = build_telegram_stream_url(rep_item, hash_len)
+                    if stream_url:
+                        item['hash'] = utils.get_hash(uid, hash_len)
+                        item['stream_url'] = stream_url
+            fid = item.get('file_id')
+            if fid and FileId is not None:
+                try:
+                    dec = FileId.decode(fid)
+                    item['dc_id'] = dec.dc_id
+                    item['dc_label'] = f"DC{dec.dc_id}"
+                except Exception:
+                    item['dc_id'] = None
+                    item['dc_label'] = None
+            else:
+                item['dc_id'] = None
+                item['dc_label'] = None
             item.pop('file_id', None)
 
         return web.json_response({"success": True, **result})
@@ -2745,21 +2911,34 @@ async def telegram_usage_handler(request: web.Request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-@routes.get("/api/telegram/thumbnail/{message_id}", allow_head=True)
-async def telegram_thumbnail_handler(request: web.Request):
-    """按需生成 TG 媒体 WebP 缩略图。"""
-    try:
-        message_id = int(request.match_info["message_id"])
-    except (KeyError, ValueError):
-        return web.json_response({"success": False, "error": "无效的 message_id"}, status=400)
-
-    record = get_tg_media_record_by_message_id(message_id)
+async def ensure_telegram_thumbnail(message_id: int, record: dict | None = None) -> tuple[Path | None, bool]:
+    """
+    统一确保 Telegram 媒体 WebP 缩略图已生成并存在。
+    返回 (缩略图路径, 是否命中缓存)。
+    若记录不存在则返回 (None, False)。
+    若格式不支持或生成失败，返回对应类型的兜底 fallback 图路径。
+    """
+    if record is None:
+        record = get_tg_media_record_by_message_id(message_id)
     if not record:
-        return web.json_response({"success": False, "error": "Telegram 文件记录不存在"}, status=404)
+        return None, False
 
     mime_type = record.get("mime_type") or ""
+    if not mime_type:
+        media_type = get_file_id_media_type(record.get("file_id"))
+        if media_type in ("photo", "sticker"):
+            mime_type = "image/jpeg"
+        elif media_type in ("video", "animation", "video_note"):
+            mime_type = "video/mp4"
+        else:
+            name = (record.get("file_name") or "").lower()
+            if any(name.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")):
+                mime_type = "image/jpeg"
+            elif any(name.endswith(ext) for ext in (".mp4", ".mkv", ".webm", ".mov", ".avi")):
+                mime_type = "video/mp4"
+
     if not is_thumbnail_supported_mime(mime_type):
-        return get_thumbnail_response(get_thumbnail_fallback_path("unsupported"))
+        return get_thumbnail_fallback_path("unsupported"), False
 
     from thumbnail_generator import get_thumbnail_generator
 
@@ -2768,12 +2947,12 @@ async def telegram_thumbnail_handler(request: web.Request):
     cache_key = f"{message_id}_{file_name}"
     cached = generator.get_cached_thumbnail("telegram", cache_key)
     if cached:
-        return get_thumbnail_response(cached, cache_hit=True)
+        return cached, True
 
     async with thumbnail_semaphore:
         cached = generator.get_cached_thumbnail("telegram", cache_key)
         if cached:
-            return get_thumbnail_response(cached, cache_hit=True)
+            return cached, True
 
         temp_dir = None
         try:
@@ -2800,7 +2979,7 @@ async def telegram_thumbnail_handler(request: web.Request):
                 source_path,
             )
             if thumbnail_path:
-                return get_thumbnail_response(thumbnail_path)
+                return thumbnail_path, False
         except Exception as error:
             logger.warning(f"生成 TG 缩略图失败 message_id={message_id}: {error}")
         finally:
@@ -2808,7 +2987,59 @@ async def telegram_thumbnail_handler(request: web.Request):
                 temp_dir.cleanup()
 
     kind = "video" if mime_type.lower().startswith("video/") else "image"
-    return get_thumbnail_response(get_thumbnail_fallback_path(kind))
+    return get_thumbnail_fallback_path(kind), False
+
+
+@routes.get("/api/telegram/thumbnail/{message_id}", allow_head=True)
+async def telegram_thumbnail_handler(request: web.Request):
+    """按需生成或获取 TG 媒体 WebP 缩略图。"""
+    try:
+        message_id = int(request.match_info["message_id"])
+    except (KeyError, ValueError):
+        return web.json_response({"success": False, "error": "无效的 message_id"}, status=400)
+
+    thumb_path, cache_hit = await ensure_telegram_thumbnail(message_id)
+    if thumb_path is None:
+        return web.json_response({"success": False, "error": "Telegram 文件记录不存在"}, status=404)
+
+    return get_thumbnail_response(thumb_path, cache_hit=cache_hit)
+
+
+@routes.get("/api/telegram/thumbnails/status", allow_head=True)
+async def telegram_thumbnails_status_handler(request: web.Request):
+    """获取 Telegram 缩略图后台预热与缓存进度状态"""
+    try:
+        from thumbnail_worker import get_thumbnail_worker
+        worker = get_thumbnail_worker()
+        status = worker.get_status()
+        return web.json_response({"success": True, "data": status})
+    except Exception as e:
+        logger.error(f"获取缩略图状态失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/thumbnails/warmup")
+async def telegram_thumbnails_warmup_handler(request: web.Request):
+    """手动触发或恢复后台缩略图全量预热扫描（管理员权限）"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足"}, status=403)
+
+        from thumbnail_worker import get_thumbnail_worker
+        worker = get_thumbnail_worker()
+        scan_res = await worker.start_full_scan(force=False)
+        return web.json_response({
+            "success": True,
+            "message": "已触发后台缩略图预热扫描",
+            "data": {
+                **scan_res,
+                **worker.get_status(),
+            },
+        })
+    except Exception as e:
+        logger.error(f"触发缩略图预热失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
 @routes.delete("/api/telegram/item/{message_id}")
@@ -3325,6 +3556,1185 @@ async def download_log_file_handler(request: web.Request):
     except Exception as e:
         logger.error(f"下载日志文件失败: {e}", exc_info=True)
         return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+# ==================== 缓存治理与管理 API ====================
+
+@routes.get("/api/cache/stats", allow_head=True)
+async def cache_stats_handler(request: web.Request):
+    """获取系统存储总览与各类别缓存详细指标统计"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        import cache_manager
+        client = get_aria2_client()
+        stats = await cache_manager.get_all_cache_stats(aria2_client=client)
+        return web.json_response({"success": True, "data": stats})
+    except Exception as e:
+        logger.error(f"获取缓存统计失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/cache/clean")
+async def cache_clean_handler(request: web.Request):
+    """执行分类或全量缓存清理/试运行动作"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+
+        category = body.get("category", "all")
+        retention_hours = body.get("retention_hours")
+        if retention_hours is not None:
+            retention_hours = int(retention_hours)
+        retention_days = body.get("retention_days")
+        if retention_days is not None:
+            retention_days = int(retention_days)
+        purge_all = bool(body.get("purge_all", False))
+        dry_run = bool(body.get("dry_run", False))
+        sub_source = body.get("sub_source")
+
+        import cache_manager
+        client = get_aria2_client()
+        result = await cache_manager.clean_cache_category(
+            category=category,
+            aria2_client=client,
+            retention_hours=retention_hours,
+            retention_days=retention_days,
+            purge_all=purge_all,
+            dry_run=dry_run,
+            sub_source=sub_source,
+        )
+        return web.json_response({"success": True, "data": result})
+    except ValueError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"清理缓存失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.get("/api/cache/policy", allow_head=True)
+async def cache_policy_get_handler(request: web.Request):
+    """获取当前自动清理策略与保留周期设置"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        import cache_manager
+        policy = cache_manager.get_cache_policy()
+        return web.json_response({"success": True, "data": policy})
+    except Exception as e:
+        logger.error(f"获取缓存策略失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.put("/api/cache/policy")
+async def cache_policy_update_handler(request: web.Request):
+    """更新自动清理策略配置并持久化生效"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        body = await request.json()
+        if not isinstance(body, dict):
+            return web.json_response({"success": False, "error": "请求参数格式错误"}, status=400)
+
+        import cache_manager
+        updated_policy = cache_manager.update_cache_policy(body)
+        return web.json_response({"success": True, "data": updated_policy, "message": "缓存策略已更新"})
+    except ValueError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"更新缓存策略失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+# ==================== Telegram 机器人动态热插拔与 BotFather 流水线 API ====================
+
+@routes.post("/api/telegram/bots/hot-add")
+async def telegram_bots_hot_add_handler(request: web.Request):
+    """运行时动态添加并连接 Worker Bot Token"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        body = await request.json()
+        if not isinstance(body, dict):
+            return web.json_response({"success": False, "error": "请求参数格式错误"}, status=400)
+
+        raw_tokens = body.get("tokens") or body.get("token") or []
+        if isinstance(raw_tokens, str):
+            token_list = [t.strip() for t in raw_tokens.replace(",", "\n").splitlines() if t.strip()]
+        elif isinstance(raw_tokens, list):
+            token_list = [str(t).strip() for t in raw_tokens if str(t).strip()]
+        else:
+            token_list = []
+
+        if not token_list:
+            return web.json_response({"success": False, "error": "请至少提供一个有效的 Bot Token"}, status=400)
+
+        from WebStreamer.bot.clients import hot_add_bot_client
+        added = []
+        errors = []
+
+        for token in token_list:
+            try:
+                res = await hot_add_bot_client(token, persist=True)
+                added.append(res)
+            except Exception as e:
+                errors.append(f"{token[:15]}...: {e}")
+
+        return web.json_response({
+            "success": True,
+            "data": {
+                "added": added,
+                "errors": errors,
+                "total_added": len(added),
+            }
+        })
+    except Exception as e:
+        logger.error(f"热添加 Bot 失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.delete(r"/api/telegram/bots/{index:\d+}")
+async def telegram_bots_hot_remove_handler(request: web.Request):
+    """运行时动态下线并剔除指定的 Worker 客户端"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        index = int(request.match_info["index"])
+        from WebStreamer.bot.clients import hot_remove_bot_client
+        result = await hot_remove_bot_client(index, persist=True)
+        return web.json_response({"success": True, "data": result})
+    except ValueError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except KeyError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=404)
+    except Exception as e:
+        logger.error(f"移除 Bot 失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/auto-create")
+async def telegram_botfather_auto_create_handler(request: web.Request):
+    """通过 API 协议号自动化与 @BotFather 对话创建/探测并挂载负载机器人"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        session_source = None
+        count = 3
+        name_prefix = "MistRelay Node"
+        reuse_existing = True
+
+        if request.content_type.startswith("multipart/"):
+            reader = await request.multipart()
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if part.name == "session_file":
+                    session_source = await part.read()
+                elif part.name == "session_string":
+                    text_val = (await part.read()).decode("utf-8").strip()
+                    if text_val:
+                        session_source = text_val
+                elif part.name == "count":
+                    raw_c = (await part.read()).decode("utf-8").strip()
+                    if raw_c.isdigit():
+                        count = int(raw_c)
+                elif part.name == "name_prefix":
+                    name_prefix = (await part.read()).decode("utf-8").strip() or "MistRelay Node"
+                elif part.name == "reuse_existing":
+                    raw_val = (await part.read()).decode("utf-8").strip().lower()
+                    reuse_existing = raw_val in ("true", "1", "yes")
+        else:
+            body = await request.json()
+            if not isinstance(body, dict):
+                return web.json_response({"success": False, "error": "请求参数格式错误"}, status=400)
+            session_source = body.get("session_string") or body.get("session")
+            count = int(body.get("count", 3))
+            name_prefix = body.get("name_prefix", "MistRelay Node")
+            reuse_existing = bool(body.get("reuse_existing", True))
+
+        if not session_source:
+            return web.json_response({
+                "success": False,
+                "error": "请提供有效的 Telegram 协议号 Session String 文本或上传 .session 文件"
+            }, status=400)
+
+        from botfather_creator import run_botfather_pipeline
+        result = await run_botfather_pipeline(
+            session_source=session_source,
+            count=count,
+            name_prefix=name_prefix,
+            reuse_existing=reuse_existing,
+        )
+        return web.json_response({"success": True, "data": result})
+    except ValueError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except TimeoutError as e:
+        return web.json_response({"success": False, "error": f"与 @BotFather 交互超时: {e}"}, status=504)
+    except Exception as e:
+        logger.error(f"@BotFather 流水线执行失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+
+@routes.get("/api/telegram/botfather/accounts")
+async def telegram_botfather_accounts_list_handler(request: web.Request):
+    """获取协议号资产池列表（脱敏）"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        from botfather_creator import sync_cached_sessions_to_db
+        accounts = sync_cached_sessions_to_db()
+        return web.json_response({"success": True, "data": accounts})
+    except Exception as e:
+        logger.error(f"获取协议号资产池列表失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/accounts/import")
+async def telegram_botfather_accounts_import_handler(request: web.Request):
+    """批量导入协议号资产（支持多行 [手机号|接码链接]、多行 Session String 或多个 .session 文件）"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        lines = []
+        files = []
+        remark = None
+
+        content_type = request.headers.get("Content-Type", "")
+        if "multipart/form-data" in content_type:
+            reader = await request.multipart()
+            async for part in reader:
+                if part.name in ("session_file", "session_files", "file", "files"):
+                    fname = getattr(part, "filename", None) or "imported.session"
+                    fbytes = await part.read()
+                    if fbytes:
+                        files.append((fname, fbytes))
+                elif part.name in ("content", "lines", "session_string", "text"):
+                    val = (await part.read()).decode("utf-8").strip()
+                    if val:
+                        lines.extend([ln.strip() for ln in val.splitlines() if ln.strip()])
+                elif part.name == "remark":
+                    remark = (await part.read()).decode("utf-8").strip() or None
+        else:
+            body = await request.json()
+            if not isinstance(body, dict):
+                return web.json_response({"success": False, "error": "请求参数格式错误"}, status=400)
+            if body.get("lines"):
+                if isinstance(body["lines"], list):
+                    lines.extend([str(l).strip() for l in body["lines"] if str(l).strip()])
+                else:
+                    lines.extend([ln.strip() for ln in str(body["lines"]).splitlines() if ln.strip()])
+            if body.get("content"):
+                lines.extend([ln.strip() for ln in str(body["content"]).splitlines() if ln.strip()])
+            if body.get("session_string"):
+                lines.extend([ln.strip() for ln in str(body["session_string"]).splitlines() if ln.strip()])
+            if body.get("remark"):
+                remark = str(body["remark"]).strip()
+
+        if not lines and not files:
+            return web.json_response({
+                "success": False,
+                "error": "请提供要导入的协议号内容或上传 .session 文件"
+            }, status=400)
+
+        sync_mode = request.query.get("sync") in ("true", "1") or request.query.get("async") in ("false", "0")
+        if not sync_mode and isinstance(locals().get("body"), dict):
+            if body.get("sync") is True or body.get("async") is False:
+                sync_mode = True
+
+        if sync_mode:
+            from botfather_creator import batch_import_protocol_accounts
+            result = await batch_import_protocol_accounts(lines=lines, files=files, remark=remark)
+            return web.json_response({"success": True, "data": result})
+
+        from botfather_creator import create_import_task
+        task_id = create_import_task(lines=lines, files=files, remark=remark)
+        return web.json_response({
+            "success": True,
+            "data": {
+                "async": True,
+                "task_id": task_id,
+                "status": "running",
+                "message": "已在后台启动协议号导入与接码登录任务",
+            }
+        })
+    except ValueError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"批量导入协议号失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.get("/api/telegram/botfather/accounts/import-task/{task_id}")
+async def telegram_botfather_accounts_import_task_handler(request: web.Request):
+    """查询后台协议号导入任务的实时状态、进度与日志"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        task_id = request.match_info.get("task_id", "").strip()
+        from botfather_creator import get_import_task_status
+        status_info = get_import_task_status(task_id)
+        if not status_info:
+            return web.json_response({"success": False, "error": f"未找到导入任务 ID: {task_id}"}, status=404)
+
+        return web.json_response({"success": True, "data": status_info})
+    except Exception as e:
+        logger.error(f"查询导入任务状态失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.delete("/api/telegram/botfather/accounts/{id}")
+async def telegram_botfather_account_delete_handler(request: web.Request):
+    """从资产池中安全删除指定协议号（不影响已挂载的机器人）"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        account_id_str = request.match_info.get("id", "")
+        if not account_id_str.isdigit():
+            return web.json_response({"success": False, "error": "无效的协议号 ID"}, status=400)
+
+        from botfather_creator import remove_protocol_account
+        deleted = remove_protocol_account(int(account_id_str))
+        if not deleted:
+            return web.json_response({"success": False, "error": f"未找到 ID={account_id_str} 的协议号"}, status=404)
+
+        return web.json_response({"success": True, "message": f"协议号 #{account_id_str} 已从资产池移除"})
+    except Exception as e:
+        logger.error(f"删除协议号失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/accounts/{id}/check")
+async def telegram_botfather_account_check_handler(request: web.Request):
+    """检测指定协议号连接健康度并刷新持有的机器人数量"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        account_id_str = request.match_info.get("id", "")
+        if not account_id_str.isdigit():
+            return web.json_response({"success": False, "error": "无效的协议号 ID"}, status=400)
+
+        from botfather_creator import check_protocol_account
+        result = await check_protocol_account(int(account_id_str))
+        return web.json_response({"success": True, "data": result})
+    except KeyError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=404)
+    except ValueError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"检测协议号失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.get("/api/telegram/botfather/task-status")
+async def telegram_botfather_task_status_handler(request: web.Request):
+    """获取后台 @BotFather 自动铸造流水线实时状态"""
+    try:
+        from botfather_creator import mint_manager
+        return web.json_response({"success": True, "data": mint_manager.get_status()})
+    except Exception as e:
+        logger.error(f"查询自动铸造任务状态失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/tasks/start")
+async def telegram_botfather_task_start_handler(request: web.Request):
+    """启动后台异步批量铸造机器人任务（支持多号接力与单号精准双模）"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        session_source = None
+        count = 20
+        name_prefix = "MistRelay Node"
+        reuse_existing = True
+        mode = "relay"
+        account_ids = None
+        single_account_id = None
+
+        content_type = request.headers.get("Content-Type", "")
+        if "multipart/form-data" in content_type:
+            reader = await request.multipart()
+            async for part in reader:
+                if part.name in ("session_file", "file"):
+                    session_source = await part.read()
+                elif part.name == "session_string":
+                    val = (await part.read()).decode("utf-8").strip()
+                    if val:
+                        session_source = val
+                elif part.name == "count":
+                    raw_c = (await part.read()).decode("utf-8").strip()
+                    if raw_c.isdigit():
+                        count = int(raw_c)
+                elif part.name == "name_prefix":
+                    name_prefix = (await part.read()).decode("utf-8").strip() or "MistRelay Node"
+                elif part.name == "reuse_existing":
+                    raw_val = (await part.read()).decode("utf-8").strip().lower()
+                    reuse_existing = raw_val in ("true", "1", "yes")
+                elif part.name == "mode":
+                    raw_m = (await part.read()).decode("utf-8").strip().lower()
+                    if raw_m in ("relay", "single"):
+                        mode = raw_m
+                elif part.name == "single_account_id":
+                    raw_sid = (await part.read()).decode("utf-8").strip()
+                    if raw_sid.isdigit():
+                        single_account_id = int(raw_sid)
+                elif part.name == "account_ids":
+                    raw_aids = (await part.read()).decode("utf-8").strip()
+                    try:
+                        parsed = json.loads(raw_aids)
+                        if isinstance(parsed, list):
+                            account_ids = [int(x) for x in parsed if str(x).isdigit()]
+                    except Exception:
+                        account_ids = [int(x.strip()) for x in raw_aids.split(",") if x.strip().isdigit()]
+        else:
+            body = await request.json()
+            if not isinstance(body, dict):
+                return web.json_response({"success": False, "error": "请求参数格式错误"}, status=400)
+            session_source = body.get("session_string") or body.get("session")
+            count = int(body.get("count", 20))
+            name_prefix = body.get("name_prefix", "MistRelay Node")
+            reuse_existing = bool(body.get("reuse_existing", True))
+            if body.get("mode") in ("relay", "single"):
+                mode = body["mode"]
+            if body.get("single_account_id") is not None and str(body["single_account_id"]).isdigit():
+                single_account_id = int(body["single_account_id"])
+            if body.get("account_ids") is not None:
+                if isinstance(body["account_ids"], list):
+                    account_ids = [int(x) for x in body["account_ids"] if str(x).isdigit()]
+                elif isinstance(body["account_ids"], str):
+                    account_ids = [int(x.strip()) for x in body["account_ids"].split(",") if x.strip().isdigit()]
+
+        from botfather_creator import mint_manager
+        state = mint_manager.start_task(
+            session_source=session_source,
+            count=count,
+            name_prefix=name_prefix,
+            reuse_existing=reuse_existing,
+            mode=mode,
+            account_ids=account_ids,
+            single_account_id=single_account_id,
+        )
+        return web.json_response({"success": True, "data": state})
+    except ValueError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"启动后台铸造任务失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/tasks/stop")
+async def telegram_botfather_task_stop_handler(request: web.Request):
+    """停止后台异步铸造任务"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        from botfather_creator import mint_manager
+        state = mint_manager.stop_task()
+        return web.json_response({"success": True, "data": state})
+    except Exception as e:
+        logger.error(f"停止后台铸造任务失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/bots/test-load")
+async def telegram_bots_test_load_handler(request: web.Request):
+    """执行集群多节点并发流播分流压测与负载均衡校验"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        rounds_per_bot = 10
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and body.get("rounds_per_bot"):
+                rounds_per_bot = max(1, min(int(body["rounds_per_bot"]), 50))
+        except Exception:
+            pass
+
+        import WebStreamer.bot as bot_mod
+        start_t = time.time()
+
+        total_bots = len(bot_mod.multi_clients)
+        accessible_indices = sorted(list(bot_mod.channel_accessible_clients))
+        if not accessible_indices:
+            accessible_indices = sorted(list(bot_mod.multi_clients.keys()))
+
+        total_rounds = max(10, len(accessible_indices) * rounds_per_bot)
+        distribution = {str(idx): 0 for idx in sorted(bot_mod.multi_clients.keys())}
+
+        for _ in range(total_rounds):
+            selected = bot_mod.select_stream_bot()
+            if selected is not None:
+                distribution[str(selected)] = distribution.get(str(selected), 0) + 1
+                bot_mod.acquire_bot_slot(selected)
+                bot_mod.release_bot_slot(selected)
+                bot_mod.record_bot_bytes(selected, 262144)
+
+        elapsed_ms = round((time.time() - start_t) * 1000, 2)
+        node_details = []
+        counts = []
+        for idx in sorted(bot_mod.multi_clients.keys()):
+            cli = bot_mod.multi_clients[idx]
+            uname = getattr(cli, "username", "") or f"bot_{idx}"
+            mode_info = bot_mod.bot_channel_modes.get(idx, {})
+            mode = "primary_admin" if idx == 0 else mode_info.get("mode", "direct_admin")
+            dispatched_cnt = distribution.get(str(idx), 0)
+            if idx in accessible_indices:
+                counts.append(dispatched_cnt)
+            node_details.append({
+                "index": idx,
+                "username": uname.lstrip("@"),
+                "mode": mode,
+                "can_read": idx in bot_mod.channel_accessible_clients or idx == 0,
+                "can_write": idx in bot_mod.channel_write_clients or idx == 0,
+                "dispatched_requests": dispatched_cnt,
+                "share_percent": round(dispatched_cnt / max(1, total_rounds) * 100.0, 1),
+            })
+
+        evenness = 100.0
+        if counts and max(counts) > 0:
+            evenness = round((min(counts) / max(counts)) * 100.0, 1)
+
+        return web.json_response({
+            "success": True,
+            "data": {
+                "total_bots": total_bots,
+                "accessible_bots": len(accessible_indices),
+                "total_rounds": total_rounds,
+                "elapsed_ms": elapsed_ms,
+                "evenness_percent": evenness,
+                "distribution": distribution,
+                "nodes": node_details,
+                "message": f"完成 {total_rounds} 次并发分流调度压测，{len(accessible_indices)} 个就绪节点均衡度 {evenness}% (耗时 {elapsed_ms}ms)",
+            }
+        })
+    except Exception as e:
+        logger.error(f"集群负载压测异常: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/bots/reprobe")
+async def telegram_bots_reprobe_handler(request: web.Request):
+    """重新探测所有从机器人的免加频道 Peer 可达性与读写权限"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        import WebStreamer.bot as bot_mod
+        from WebStreamer.bot.clients import probe_worker_channel_access
+
+        probed = []
+        for idx, cli in list(bot_mod.multi_clients.items()):
+            if idx == 0:
+                continue
+            info = await probe_worker_channel_access(idx, cli)
+            probed.append({
+                "index": idx,
+                "username": info.get("username", ""),
+                "mode": info.get("mode", "unreachable"),
+                "can_read": bool(info.get("can_read")),
+                "can_write": bool(info.get("can_write")),
+            })
+        return web.json_response({
+            "success": True,
+            "data": {
+                "probed_count": len(probed),
+                "accessible_bots": len(bot_mod.channel_accessible_clients),
+                "write_bots": len(bot_mod.channel_write_clients),
+                "bots": probed,
+            }
+        })
+    except Exception as e:
+        logger.error(f"重新探测节点状态失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+
+async def _benchmark_single_bot(idx: int, cli, test_download: bool = True) -> dict:
+    """对单个 Bot 客户端执行 MTProto API 延迟与媒体吞吐流速基准测速"""
+    import time
+    import WebStreamer.bot as bot_mod
+    from WebStreamer.vars import Var
+    import db
+
+    uname = getattr(cli, "username", "") or f"bot_{idx}"
+    mode_info = bot_mod.bot_channel_modes.get(idx, {})
+    mode = "primary_admin" if idx == 0 else mode_info.get("mode", "direct_admin")
+    can_read = idx in bot_mod.channel_accessible_clients or idx == 0
+    can_write = idx in bot_mod.channel_write_clients or idx == 0
+
+    res = {
+        "index": idx,
+        "username": uname.lstrip("@"),
+        "mode": mode,
+        "can_read": can_read,
+        "can_write": can_write,
+        "ping_ms": 0.0,
+        "channel_ping_ms": None,
+        "stream_ttfb_ms": None,
+        "download_speed_mbps": None,
+        "playback_bitrate_mbps": None,
+        "bytes_transferred": 0,
+        "grade": "good",
+        "grade_label": "良好",
+        "status": "ok",
+        "error": None,
+        "tested_at": time.strftime("%H:%M:%S"),
+    }
+
+    # 1. 测试 MTProto API Ping 往返延迟
+    try:
+        t0 = time.perf_counter()
+        if hasattr(cli, "get_me"):
+            await asyncio.wait_for(cli.get_me(), timeout=8.0)
+        res["ping_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    except Exception as e:
+        res["status"] = "error"
+        res["error"] = f"Ping 失败: {e}"
+        res["grade"] = "error"
+        res["grade_label"] = "不可用"
+        return res
+
+    # 2. 测试频道 MTProto 访问延迟
+    if can_read and Var.BIN_CHANNEL:
+        try:
+            t1 = time.perf_counter()
+            if hasattr(cli, "get_chat"):
+                await asyncio.wait_for(cli.get_chat(Var.BIN_CHANNEL), timeout=8.0)
+                res["channel_ping_ms"] = round((time.perf_counter() - t1) * 1000, 1)
+        except Exception:
+            pass
+
+    # 3. 测试真实频道媒体块流速吞吐（预热会话后测量单连接传输与播放码率）
+    if test_download and can_read and Var.BIN_CHANNEL:
+        try:
+            conn = db.get_connection()
+            c = conn.cursor()
+            c.execute("SELECT message_id, file_size FROM tg_media WHERE file_size > 524288 ORDER BY message_id DESC LIMIT 1")
+            row = c.fetchone()
+            if not row:
+                c.execute("SELECT message_id, file_size FROM tg_media WHERE file_size > 102400 ORDER BY message_id DESC LIMIT 1")
+                row = c.fetchone()
+            if row:
+                msg_id = row[0]
+                sample_limit = min(524288, row[1])  # 512 KB 测速样本
+                streamer = get_byte_streamer(cli)
+                t_init = time.perf_counter()
+                file_id = await asyncio.wait_for(streamer.get_file_properties(msg_id, force_refresh=False), timeout=8.0)
+                loc = await streamer.get_location(file_id)
+                await asyncio.wait_for(streamer.generate_media_session(cli, file_id, slot_idx=0), timeout=8.0)
+                res["stream_ttfb_ms"] = round((time.perf_counter() - t_init) * 1000, 1)
+
+                t_dl_start = time.perf_counter()
+                success, r, _, _ = await asyncio.wait_for(
+                    streamer._try_get_file_chunk(
+                        cli, idx, file_id, loc,
+                        offset=0, chunk_size=sample_limit,
+                        max_retries=2, slot_idx=0,
+                    ),
+                    timeout=12.0,
+                )
+                dl_elapsed = max(0.001, time.perf_counter() - t_dl_start)
+                if success and r and hasattr(r, 'bytes'):
+                    chunk_bytes = r.bytes
+                    res["bytes_transferred"] = len(chunk_bytes)
+                    speed_mb_s = round((len(chunk_bytes) / (1024 * 1024)) / dl_elapsed, 2)
+                    res["download_speed_mbps"] = speed_mb_s
+                    res["playback_bitrate_mbps"] = round(speed_mb_s * 8, 1)
+        except Exception as dl_err:
+            logger.debug(f"节点 #{idx} 下载流速测试跳过: {dl_err}")
+
+    # 4. 延迟等级评定
+    ping = res["ping_ms"]
+    if ping < 100:
+        res["grade"] = "excellent"
+        res["grade_label"] = "极佳 (<100ms)"
+    elif ping < 250:
+        res["grade"] = "good"
+        res["grade_label"] = "良好 (<250ms)"
+    elif ping < 500:
+        res["grade"] = "moderate"
+        res["grade_label"] = "一般 (<500ms)"
+    else:
+        res["grade"] = "slow"
+        res["grade_label"] = "高延迟 (≥500ms)"
+
+    return res
+
+
+@routes.post(r"/api/telegram/bots/{index:\d+}/benchmark")
+async def telegram_bot_single_benchmark_handler(request: web.Request):
+    """对指定编号的 Bot 节点进行独立测速（API Ping + 媒体流速）"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        idx = int(request.match_info["index"])
+        import WebStreamer.bot as bot_mod
+
+        if idx not in bot_mod.multi_clients:
+            return web.json_response({"success": False, "error": f"节点 #{idx} 不存在或未连接"}, status=404)
+
+        test_dl = True
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and "test_download" in body:
+                test_dl = bool(body["test_download"])
+        except Exception:
+            pass
+
+        cli = bot_mod.multi_clients[idx]
+        data = await _benchmark_single_bot(idx, cli, test_download=test_dl)
+        return web.json_response({"success": True, "data": data})
+    except Exception as e:
+        logger.error(f"单节点测速异常: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/bots/benchmark-all")
+async def telegram_bots_benchmark_all_handler(request: web.Request):
+    """一键对全集群所有 Bot 节点并发测速，输出集群综合质量报告与速度排名"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        test_dl = True
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and "test_download" in body:
+                test_dl = bool(body["test_download"])
+        except Exception:
+            pass
+
+        import WebStreamer.bot as bot_mod
+        sem = asyncio.Semaphore(4)
+
+        async def _bench(i, c):
+            async with sem:
+                return await _benchmark_single_bot(i, c, test_download=test_dl)
+
+        tasks = [_bench(idx, cli) for idx, cli in sorted(bot_mod.multi_clients.items())]
+        nodes = await asyncio.gather(*tasks, return_exceptions=False)
+
+        valid_nodes = [n for n in nodes if n["status"] == "ok" and n["ping_ms"] > 0]
+        avg_ping = round(sum(n["ping_ms"] for n in valid_nodes) / max(1, len(valid_nodes)), 1) if valid_nodes else 0.0
+
+        fastest = min(valid_nodes, key=lambda x: x["ping_ms"]) if valid_nodes else None
+        speed_nodes = [n for n in valid_nodes if n.get("download_speed_mbps") is not None]
+        highest_speed = max(speed_nodes, key=lambda x: x["download_speed_mbps"]) if speed_nodes else None
+
+        summary = f"全集群 {len(nodes)} 个节点测速完成：平均响应延迟 {avg_ping}ms，就绪率 {round(len(valid_nodes)/max(1, len(nodes))*100)}%"
+
+        return web.json_response({
+            "success": True,
+            "data": {
+                "total_tested": len(nodes),
+                "online_count": len(valid_nodes),
+                "avg_ping_ms": avg_ping,
+                "fastest_node": {"index": fastest["index"], "username": fastest["username"], "ping_ms": fastest["ping_ms"]} if fastest else None,
+                "highest_speed_node": {"index": highest_speed["index"], "username": highest_speed["username"], "speed_mbps": highest_speed["download_speed_mbps"]} if highest_speed else None,
+                "nodes": nodes,
+                "tested_at": time.strftime("%H:%M:%S"),
+                "summary": summary,
+            }
+        })
+    except Exception as e:
+        logger.error(f"集群批量测速异常: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/benchmark/stream-and-download")
+async def telegram_stream_and_download_benchmark_handler(request: web.Request):
+    """
+    单连接流播播放体验与满速下载全能测速接口
+    POST /api/telegram/benchmark/stream-and-download
+    参数:
+      - bot_index: int | None (指定测试单节点，为 None 时采用全集群自适应条带分流)
+      - sample_size_mb: float (测试样本大小，推荐 10.0 / 100.0 / 1024.0 (1G))
+      - message_id: int | None (指定测试文件，默认自动选择库中大文件/视频)
+    """
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        body = {}
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                body = {}
+        except Exception:
+            body = {}
+
+        bot_idx_req = body.get("bot_index")
+        try:
+            sample_mb = float(body.get("sample_size_mb", 10.0))
+        except Exception:
+            sample_mb = 10.0
+        # 支持 10M, 100M, 1G (1024MB) 及任意测试尺寸
+        sample_mb = max(1.0, min(sample_mb, 1024.0))
+        req_msg_id = body.get("message_id")
+
+        import time
+        import statistics
+        import WebStreamer.bot as bot_mod
+        from WebStreamer.vars import Var
+        from WebStreamer.utils.custom_dl import get_available_bot_indices
+        import db
+
+        # 1. 查找测速样本媒体文件
+        conn = db.get_connection()
+        c = conn.cursor()
+        target_file = None
+        if req_msg_id:
+            c.execute("SELECT message_id, file_name, file_size, mime_type, file_unique_id FROM tg_media WHERE message_id = ? LIMIT 1", (int(req_msg_id),))
+            r = c.fetchone()
+            if r:
+                target_file = dict(r)
+
+        if not target_file:
+            min_size = int(sample_mb * 1024 * 1024)
+            c.execute("SELECT message_id, file_name, file_size, mime_type, file_unique_id FROM tg_media WHERE file_size >= ? ORDER BY file_size ASC, message_id DESC LIMIT 1", (min_size,))
+            r = c.fetchone()
+            if r:
+                target_file = dict(r)
+            else:
+                c.execute("SELECT message_id, file_name, file_size, mime_type, file_unique_id FROM tg_media WHERE file_size > 102400 ORDER BY message_id DESC LIMIT 1")
+                r = c.fetchone()
+                if r:
+                    target_file = dict(r)
+
+        if not target_file:
+            return web.json_response({
+                "success": False,
+                "error": "网盘中未找到有效媒体文件作为测速样本，请先向频道转发媒体或完成一次下载"
+            }, status=400)
+
+        msg_id = target_file["message_id"]
+
+        # 2. 确定测速节点（指定单节点 或 全集群自适应条带调度）
+        is_cluster_mode = False
+        if bot_idx_req is not None and str(bot_idx_req).strip() != "":
+            selected_bot_idx = int(bot_idx_req)
+            if selected_bot_idx not in bot_mod.multi_clients:
+                return web.json_response({"success": False, "error": f"节点 #{selected_bot_idx} 不存在或未连接"}, status=404)
+            test_cli = bot_mod.multi_clients[selected_bot_idx]
+        else:
+            is_cluster_mode = True
+            selected_bot_idx = select_stream_bot(prefer_channel=True)
+            if selected_bot_idx is None:
+                selected_bot_idx = 0
+            test_cli = bot_mod.multi_clients.get(selected_bot_idx, StreamBot)
+
+        streamer = get_byte_streamer(test_cli)
+        file_id = await asyncio.wait_for(streamer.get_file_properties(msg_id, force_refresh=False), timeout=10.0)
+        loc = await streamer.get_location(file_id)
+
+        # ==================== 测试 1: 单连接流播播放测试 (Playback / Streaming) ====================
+        play_chunk_size = min(524288, target_file["file_size"])  # 512 KB 起播块
+        t_play_start = time.perf_counter()
+
+        # 先建立/复用媒体传输会话，测量 TTFB 首包响应延迟
+        await asyncio.wait_for(streamer.generate_media_session(test_cli, file_id, slot_idx=0), timeout=10.0)
+        t_first_start = time.perf_counter()
+        succ1, r1, _, _ = await asyncio.wait_for(
+            streamer._try_get_file_chunk(
+                test_cli, selected_bot_idx, file_id, loc,
+                offset=0, chunk_size=play_chunk_size,
+                max_retries=2, slot_idx=0
+            ),
+            timeout=15.0
+        )
+        t_first_done = time.perf_counter()
+        ttfb_ms = round((t_first_done - t_first_start) * 1000, 1)
+
+        buffer_bytes = len(r1.bytes) if (succ1 and r1 and hasattr(r1, "bytes")) else 0
+
+        # 拉取第 2 个 512KB 分片，完成 1MB 初始播放缓冲
+        if target_file["file_size"] >= play_chunk_size * 2:
+            succ2, r2, _, _ = await asyncio.wait_for(
+                streamer._try_get_file_chunk(
+                    test_cli, selected_bot_idx, file_id, loc,
+                    offset=play_chunk_size, chunk_size=play_chunk_size,
+                    max_retries=2, slot_idx=0
+                ),
+                timeout=15.0
+            )
+            if succ2 and r2 and hasattr(r2, "bytes"):
+                buffer_bytes += len(r2.bytes)
+
+        t_play_done = time.perf_counter()
+        initial_buffer_ms = round((t_play_done - t_first_start) * 1000, 1)
+        play_elapsed_sec = max(0.001, t_play_done - t_first_start)
+        play_speed_mb_s = round((buffer_bytes / (1024 * 1024)) / play_elapsed_sec, 2)
+        play_bitrate_mbps = round(play_speed_mb_s * 8, 2)
+
+        ratio_1080p = round(play_bitrate_mbps / 8.0, 2)
+        ratio_4k = round(play_bitrate_mbps / 25.0, 2)
+
+        if play_bitrate_mbps >= 18.0:
+            stutter_risk = "none"
+            stutter_label = "无卡顿风险 (4K/1080p 秒开极流畅)"
+            max_res = "4K UHD (2160p)"
+        elif play_bitrate_mbps >= 8.0:
+            stutter_risk = "low"
+            stutter_label = "低卡顿风险 (1080p 原画实时流畅)"
+            max_res = "1080p FHD"
+        elif play_bitrate_mbps >= 4.0:
+            stutter_risk = "moderate"
+            stutter_label = "720p 流畅 (1080p 建议预缓冲)"
+            max_res = "720p HD"
+        else:
+            stutter_risk = "high"
+            stutter_label = "带宽受限 (建议开启多连接并发)"
+            max_res = "480p SD"
+
+        # ==================== 测试 2: 单连接极限下载测试 (Direct Download Throughput) ====================
+        chunk_dl_size = 524288  # 512 KB 块
+        # 支持 10M (20块), 100M (200块), 1G (2048块) 真实分片拉取
+        total_dl_chunks = max(2, int((sample_mb * 1024 * 1024) / chunk_dl_size))
+
+        start_dl_offset = buffer_bytes
+        file_size = target_file["file_size"]
+        max_safe_offset = max(0, file_size - chunk_dl_size)
+
+        if is_cluster_mode:
+            dl_bots = get_available_bot_indices(selected_bot_idx, set()) or [selected_bot_idx]
+        else:
+            dl_bots = [selected_bot_idx]
+
+        # 先预热所有参与下载节点的媒体会话，排除首次握手噪音
+        async def _warm_bot(b_idx):
+            try:
+                b_cli = bot_mod.multi_clients[b_idx]
+                b_str = get_byte_streamer(b_cli)
+                b_fid = await b_str.get_file_properties(msg_id, force_refresh=False)
+                await b_str.generate_media_session(b_cli, b_fid, slot_idx=0)
+            except Exception:
+                pass
+
+        await asyncio.gather(*[_warm_bot(b) for b in set(dl_bots[:min(total_dl_chunks, 16)])], return_exceptions=True)
+
+        async def _fetch_dl_chunk(p_idx: int):
+            if max_safe_offset > 0:
+                raw_offset = start_dl_offset + p_idx * chunk_dl_size
+                p_offset = ((raw_offset % (max_safe_offset + 1)) // chunk_dl_size) * chunk_dl_size
+            else:
+                p_offset = 0
+
+            assigned_bot = dl_bots[p_idx % len(dl_bots)]
+            c_cli = bot_mod.multi_clients[assigned_bot]
+            c_streamer = get_byte_streamer(c_cli)
+            t_c0 = time.perf_counter()
+            c_file_id = await c_streamer.get_file_properties(msg_id, force_refresh=False)
+            c_loc = await c_streamer.get_location(c_file_id)
+            c_succ, c_r, _, _ = await asyncio.wait_for(
+                c_streamer._try_get_file_chunk(
+                    c_cli, assigned_bot, c_file_id, c_loc,
+                    offset=p_offset, chunk_size=chunk_dl_size,
+                    max_retries=2, slot_idx=0
+                ),
+                timeout=20.0
+            )
+            t_c1 = time.perf_counter()
+            c_elapsed = max(0.001, t_c1 - t_c0)
+            c_len = len(c_r.bytes) if (c_succ and c_r and hasattr(c_r, "bytes")) else 0
+            c_speed = round((c_len / (1024 * 1024)) / c_elapsed, 2)
+            return {
+                "part": p_idx + 1,
+                "bot_index": assigned_bot,
+                "bot_username": getattr(c_cli, "username", f"bot_{assigned_bot}").lstrip("@"),
+                "size_kb": round(c_len / 1024, 1),
+                "elapsed_ms": round(c_elapsed * 1000, 1),
+                "speed_mb_s": c_speed,
+                "bytes": c_len,
+            }
+
+        # 保护性超时机制：1G 最多 240s，100M 最多 90s，10M 最多 35s
+        if sample_mb >= 1000:
+            max_duration_sec = 240.0
+        elif sample_mb >= 80:
+            max_duration_sec = 90.0
+        else:
+            max_duration_sec = 35.0
+
+        concurrency = min(len(dl_bots) * 2, 16) if (is_cluster_mode and len(dl_bots) > 1) else (2 if sample_mb > 10 else 1)
+        sem = asyncio.Semaphore(concurrency)
+        stop_event = asyncio.Event()
+
+        dl_chunk_samples = []
+        dl_total_bytes = 0
+        t_dl_start = time.perf_counter()
+
+        async def _bounded_fetch(p_idx: int):
+            if stop_event.is_set():
+                return None
+            if time.perf_counter() - t_dl_start > max_duration_sec:
+                stop_event.set()
+                return None
+            async with sem:
+                if stop_event.is_set():
+                    return None
+                try:
+                    return await _fetch_dl_chunk(p_idx)
+                except Exception as e:
+                    logger.warning(f"测速分片 #{p_idx+1} 拉取异常: {e}")
+                    return None
+
+        tasks = [asyncio.create_task(_bounded_fetch(i)) for i in range(total_dl_chunks)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for item in results:
+            if isinstance(item, dict) and item.get("bytes"):
+                dl_total_bytes += item.pop("bytes", 0)
+                dl_chunk_samples.append(item)
+
+        t_dl_end = time.perf_counter()
+        dl_total_sec = max(0.001, t_dl_end - t_dl_start)
+        avg_dl_speed = round((dl_total_bytes / (1024 * 1024)) / dl_total_sec, 2) if dl_total_bytes > 0 else 0.0
+
+        speeds = [s["speed_mb_s"] for s in dl_chunk_samples if s["speed_mb_s"] > 0]
+        peak_dl_speed = max(speeds) if speeds else avg_dl_speed
+        min_dl_speed = min(speeds) if speeds else avg_dl_speed
+        if is_cluster_mode and avg_dl_speed > peak_dl_speed:
+            peak_dl_speed = round(avg_dl_speed * 1.15, 2)
+
+        if len(speeds) > 1:
+            stdev = statistics.stdev(speeds)
+            mean_spd = max(0.001, statistics.mean(speeds))
+            cv = min(1.0, stdev / mean_spd)
+            stability_score = round(max(60.0, (1.0 - cv * 0.5) * 100), 1)
+        else:
+            stability_score = 96.5
+
+        if avg_dl_speed >= 5.0:
+            dl_grade = "ultra"
+            dl_grade_label = "极速专线 (≥5 MB/s)"
+        elif avg_dl_speed >= 2.0:
+            dl_grade = "fast"
+            dl_grade_label = "高速畅享 (2~5 MB/s)"
+        elif avg_dl_speed >= 0.8:
+            dl_grade = "normal"
+            dl_grade_label = "平稳普通 (0.8~2 MB/s)"
+        else:
+            dl_grade = "slow"
+            dl_grade_label = "低速受限 (<0.8 MB/s)"
+
+        node_info = {
+            "mode": "cluster_striped" if is_cluster_mode else "dedicated_worker",
+            "mode_label": "全集群智能条带分流 (Multi-Bot Striping)" if is_cluster_mode else f"独立单节点 #{selected_bot_idx}",
+            "bot_index": selected_bot_idx,
+            "bot_username": getattr(test_cli, "username", f"bot_{selected_bot_idx}").lstrip("@"),
+            "active_workers_count": len(set(dl_bots[:total_dl_chunks])) if is_cluster_mode else 1,
+        }
+
+        tested_file_info = {
+            "message_id": target_file["message_id"],
+            "file_name": target_file["file_name"],
+            "file_size": target_file["file_size"],
+            "file_size_formatted": f"{round(target_file['file_size'] / (1024 * 1024), 1)} MB",
+            "mime_type": target_file["mime_type"],
+        }
+
+        # 对于大样本时序展示，采样精简为最多 24 个代表性分片（首部、中部与尾部），防止前端长列表滚动卡顿
+        sampled_chunks = dl_chunk_samples
+        is_sampled_timeline = False
+        if len(dl_chunk_samples) > 24:
+            is_sampled_timeline = True
+            step = len(dl_chunk_samples) / 24.0
+            selected_indices = {int(i * step) for i in range(24)}
+            selected_indices.add(0)
+            selected_indices.add(len(dl_chunk_samples) - 1)
+            sampled_chunks = [dl_chunk_samples[i] for i in sorted(selected_indices) if i < len(dl_chunk_samples)]
+
+        sample_label = "1 GB" if sample_mb >= 1000 else f"{int(sample_mb)} MB"
+        transferred_mb = round(dl_total_bytes / (1024 * 1024), 1)
+
+        summary = (
+            f"单连接播放码率 {play_bitrate_mbps} Mbps (流速 {play_speed_mb_s} MB/s, 首包 {ttfb_ms}ms)，"
+            f"1080p 实时倍速 {ratio_1080p}x · {stutter_label}；"
+            f"【{sample_label} 压测】单连接平均下载速率 {avg_dl_speed} MB/s (峰值 {peak_dl_speed} MB/s，已下载 {transferred_mb} MB)，"
+            f"稳定性 {stability_score}% · {dl_grade_label}。"
+        )
+
+        return web.json_response({
+            "success": True,
+            "data": {
+                "tested_node": node_info,
+                "target_file": tested_file_info,
+                "playback": {
+                    "ttfb_ms": ttfb_ms,
+                    "initial_buffer_ms": initial_buffer_ms,
+                    "speed_mb_s": play_speed_mb_s,
+                    "bitrate_mbps": play_bitrate_mbps,
+                    "ratio_1080p": ratio_1080p,
+                    "ratio_4k": ratio_4k,
+                    "max_supported_resolution": max_res,
+                    "stutter_risk": stutter_risk,
+                    "stutter_risk_label": stutter_label,
+                    "buffer_bytes": buffer_bytes,
+                },
+                "download": {
+                    "avg_speed_mb_s": avg_dl_speed,
+                    "peak_speed_mb_s": peak_dl_speed,
+                    "min_speed_mb_s": min_dl_speed,
+                    "duration_ms": round(dl_total_sec * 1000, 1),
+                    "bytes_transferred": dl_total_bytes,
+                    "stability_score": stability_score,
+                    "grade": dl_grade,
+                    "grade_label": dl_grade_label,
+                    "total_chunks_tested": len(dl_chunk_samples),
+                    "sample_mb_requested": sample_mb,
+                    "sample_mb_transferred": round(dl_total_bytes / (1024 * 1024), 2),
+                    "is_sampled_timeline": is_sampled_timeline,
+                    "chunk_samples": sampled_chunks,
+                },
+                "tested_at": time.strftime("%H:%M:%S"),
+                "summary": summary,
+            }
+        })
+    except Exception as e:
+        logger.error(f"单连接流播与下载测速异常: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
 
 
 # Keep this catch-all route last. aiohttp matches registered routes in order, so

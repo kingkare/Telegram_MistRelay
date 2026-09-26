@@ -1,3 +1,4 @@
+import tests  # noqa: F401
 import os
 import sqlite3
 import tempfile

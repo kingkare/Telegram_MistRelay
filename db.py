@@ -301,6 +301,27 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions (user_id)"
         )
 
+        # Telegram 协议号资产池表
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tg_protocol_accounts (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone          TEXT NOT NULL UNIQUE,
+                session_type   TEXT NOT NULL DEFAULT 'pyrogram_string',
+                session_data   TEXT NOT NULL,
+                code_url       TEXT,
+                bot_count      INTEGER NOT NULL DEFAULT 0,
+                status         TEXT NOT NULL DEFAULT 'active',
+                last_used_at   TEXT,
+                remark         TEXT,
+                created_at     TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tg_protocol_accounts_phone ON tg_protocol_accounts (phone)"
+        )
+
         # Older releases created this now-unused index table but did not enable
         # SQLite foreign keys. Preserve its records while applying the declared
         # ON DELETE SET NULL result to already-orphaned links.
@@ -408,6 +429,28 @@ def save_tg_media(message, media=None) -> str:
     file_name = getattr(media, "file_name", None) or getattr(file_info, "name", None)
     mime_type = getattr(media, "mime_type", None) or getattr(file_info, "mime_type", None)
     file_size = getattr(media, "file_size", None) or getattr(file_info, "size", None)
+
+    if not mime_type:
+        if getattr(message, "photo", None) is not None or (getattr(media, "width", None) and not getattr(media, "duration", None)):
+            mime_type = "image/jpeg"
+        elif getattr(message, "video", None) is not None or getattr(message, "animation", None) is not None or getattr(message, "video_note", None) is not None:
+            mime_type = "video/mp4"
+        elif getattr(message, "audio", None) is not None:
+            mime_type = "audio/mpeg"
+        elif getattr(message, "voice", None) is not None:
+            mime_type = "audio/ogg"
+
+    if not file_name:
+        if mime_type == "image/jpeg":
+            file_name = f"photo_{message_id}.jpg"
+        elif mime_type == "video/mp4":
+            file_name = f"video_{message_id}.mp4"
+        elif mime_type == "audio/mpeg":
+            file_name = f"audio_{message_id}.mp3"
+        elif mime_type == "audio/ogg":
+            file_name = f"voice_{message_id}.ogg"
+        else:
+            file_name = f"media_{message_id}"
 
     # thumbs 可以以后再扩展，现在先占位为空列表
     thumbs_json = "[]"
@@ -2311,6 +2354,8 @@ def browse_tg_media(
             'entry_type': 'folder',
             'media_group_id': group_id,
             'file_name': display_name,
+            'representative_file_name': representative.get('file_name'),
+            'representative_mime_type': representative.get('mime_type'),
             'message_date': latest_date,
             'file_size': total_size,
             'total_size': total_size,
@@ -2400,8 +2445,10 @@ def get_tg_media_record_by_message_id(message_id: int) -> dict | None:
         cur.execute(
             """
             SELECT
-                file_unique_id, chat_id, message_id, file_name,
-                media_group_id, message_date
+                file_unique_id, chat_id, message_id, file_id,
+                file_name, mime_type, file_size, duration,
+                width, height, caption, message_date,
+                media_group_id, supports_streaming, thumbs
             FROM tg_media
             WHERE message_id = ?
             """,
@@ -2419,8 +2466,10 @@ def get_tg_media_records_by_media_group(media_group_id: str) -> list[dict]:
         cur.execute(
             """
             SELECT
-                file_unique_id, chat_id, message_id, file_name,
-                media_group_id, message_date
+                file_unique_id, chat_id, message_id, file_id,
+                file_name, mime_type, file_size, duration,
+                width, height, caption, message_date,
+                media_group_id, supports_streaming, thumbs
             FROM tg_media
             WHERE media_group_id = ?
             ORDER BY message_id ASC
@@ -2431,7 +2480,7 @@ def get_tg_media_records_by_media_group(media_group_id: str) -> list[dict]:
 
 
 def list_all_tg_media_records() -> list[dict]:
-    """列出全部 tg_media 记录，用于批量清理 tg 网盘。"""
+    """列出全部 tg_media 记录，用于批量清理 tg 网盘及缩略图预热。"""
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -2439,7 +2488,7 @@ def list_all_tg_media_records() -> list[dict]:
             """
             SELECT
                 file_unique_id, chat_id, message_id, file_name,
-                media_group_id, message_date
+                mime_type, file_size, file_id, media_group_id, message_date
             FROM tg_media
             ORDER BY message_id ASC
             """
@@ -2732,3 +2781,129 @@ def list_users() -> list:
         cur = conn.cursor()
         cur.execute("SELECT id, username, role, created_at, updated_at FROM users ORDER BY id")
         return [dict(r) for r in cur.fetchall()]
+
+
+# ==================== 协议号资产池 CRUD ====================
+
+def upsert_protocol_account(
+    phone: str,
+    session_data: str,
+    session_type: str = "pyrogram_string",
+    code_url: str | None = None,
+    bot_count: int | None = None,
+    status: str | None = None,
+    remark: str | None = None,
+) -> dict:
+    """创建或更新协议号资产记录"""
+    now = _now_iso()
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        existing = conn.execute(
+            "SELECT * FROM tg_protocol_accounts WHERE phone = ?", (phone,)
+        ).fetchone()
+
+        if existing:
+            account_id = existing["id"]
+            new_bot_count = bot_count if bot_count is not None else existing["bot_count"]
+            new_status = status if status is not None else existing["status"]
+            new_remark = remark if remark is not None else existing["remark"]
+            new_code_url = code_url if code_url is not None else existing["code_url"]
+
+            conn.execute(
+                """
+                UPDATE tg_protocol_accounts
+                   SET session_data = ?,
+                       session_type = ?,
+                       code_url = ?,
+                       bot_count = ?,
+                       status = ?,
+                       remark = ?,
+                       last_used_at = ?
+                 WHERE id = ?
+                """,
+                (session_data, session_type, new_code_url, new_bot_count, new_status, new_remark, now, account_id),
+            )
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO tg_protocol_accounts (
+                    phone, session_type, session_data, code_url, bot_count, status, remark, created_at, last_used_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    phone,
+                    session_type,
+                    session_data,
+                    code_url,
+                    bot_count if bot_count is not None else 0,
+                    status or "active",
+                    remark,
+                    now,
+                    now,
+                ),
+            )
+            account_id = cur.lastrowid
+
+        row = conn.execute(
+            "SELECT * FROM tg_protocol_accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        return dict(row)
+
+
+def list_protocol_accounts() -> list:
+    """列出所有纳管的协议号资产"""
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM tg_protocol_accounts ORDER BY id ASC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_protocol_account_by_id(account_id: int) -> dict | None:
+    """根据 ID 查询协议号资产"""
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tg_protocol_accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_protocol_account_by_phone(phone: str) -> dict | None:
+    """根据手机号查询协议号资产"""
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tg_protocol_accounts WHERE phone = ?", (phone,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_protocol_account(account_id: int, **kwargs) -> bool:
+    """更新指定协议号的属性"""
+    allowed_keys = {"session_data", "session_type", "code_url", "bot_count", "status", "remark", "last_used_at"}
+    updates = []
+    params = []
+    for k, v in kwargs.items():
+        if k in allowed_keys:
+            updates.append(f"{k} = ?")
+            params.append(v)
+    if not updates:
+        return False
+    params.append(account_id)
+    with db_conn() as conn:
+        cur = conn.execute(
+            f"UPDATE tg_protocol_accounts SET {', '.join(updates)} WHERE id = ?",
+            tuple(params),
+        )
+        return cur.rowcount > 0
+
+
+def delete_protocol_account(account_id: int) -> bool:
+    """删除指定协议号资产"""
+    with db_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM tg_protocol_accounts WHERE id = ?", (account_id,)
+        )
+        return cur.rowcount > 0

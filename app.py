@@ -76,10 +76,14 @@ if not (host == 'localhost' or host == '127.0.0.1' or all(c.isdigit() or c == '.
 else:
     docker_rpc_url = RPC_URL
 
+import os as _os
+_sessions_dir = _os.environ.get("MISTRELAY_SESSION_DIR", "/app/db/sessions")
+_os.makedirs(_sessions_dir, mode=0o700, exist_ok=True)
+_telethon_bot_id = str(BOT_TOKEN or "default").split(":", 1)[0]
+_telethon_session_path = _os.path.join(_sessions_dir, f"telethon_bot_{_telethon_bot_id}")
+
 proxy = (python_socks.ProxyType.HTTP, PROXY_IP, PROXY_PORT) if PROXY_IP is not None else None
-# Bot sessions are cheap to recreate from the token. Keeping the auth key only in
-# memory prevents another filesystem read bug from exposing a reusable session.
-bot = TelegramClient(MemorySession(), API_ID, API_HASH, proxy=proxy).start(bot_token=BOT_TOKEN)
+bot = TelegramClient(_telethon_session_path, API_ID, API_HASH, proxy=proxy)
 client = AsyncAria2Client(RPC_SECRET, f'ws://{docker_rpc_url}', bot)
 
 # 将aria2客户端设置为全局变量，供直链功能使用
@@ -764,21 +768,41 @@ async def main():
 
     await client.connect()
     bot.add_event_handler(BotCallbackHandler)
-    bot_me = await bot.get_me()
-    commands = [
-        BotCommand(command="start", description='开始使用并显示菜单'),
-        BotCommand(command="menu", description='显示功能菜单'),
-        BotCommand(command="help", description='查看帮助信息'),
-        BotCommand(command="info", description='查看系统信息'),
-    ]
-    await bot(
-        SetBotCommandsRequest(
-            scope=BotCommandScopeDefault(),
-            lang_code='',
-            commands=commands
+
+    async def _init_telethon_bot():
+        await bot.start(bot_token=BOT_TOKEN)
+        bot_me = await bot.get_me()
+        commands = [
+            BotCommand(command="start", description='开始使用并显示菜单'),
+            BotCommand(command="menu", description='显示功能菜单'),
+            BotCommand(command="help", description='查看帮助信息'),
+            BotCommand(command="info", description='查看系统信息'),
+        ]
+        await bot(
+            SetBotCommandsRequest(
+                scope=BotCommandScopeDefault(),
+                lang_code='',
+                commands=commands
+            )
         )
-    )
-    log.info(f'{bot_me.username} bot启动成功...')
+        log.info(f'{bot_me.username} bot启动成功...')
+
+    try:
+        await _init_telethon_bot()
+    except Exception as e:
+        wait_match = re.search(r'wait of (\d+)', str(e), re.IGNORECASE) or re.search(r'(\d+)\s*seconds?', str(e), re.IGNORECASE)
+        if wait_match or 'FloodWait' in type(e).__name__:
+            wait_sec = int(wait_match.group(1)) if wait_match else 300
+            log.warning(f'Telethon 主 Bot 登录遇到 FloodWait ({wait_sec}s)，转入后台延迟启动，不阻塞 Web 与直链多 Bot 服务...')
+            async def _delayed_telethon():
+                await asyncio.sleep(wait_sec + 5)
+                try:
+                    await _init_telethon_bot()
+                except Exception as ex:
+                    log.error(f'后台延迟启动 Telethon 主 Bot 失败: {ex}')
+            asyncio.create_task(_delayed_telethon())
+        else:
+            raise
     
     # 启动直链功能（默认启用，作为TG媒体文件下载的前置功能）
     if ENABLE_STREAM and StreamBot is not None:
@@ -903,69 +927,37 @@ async def main():
             if not Var or not Var.BIN_CHANNEL:
                 log.warning('BIN_CHANNEL未配置，直链功能可能无法正常工作')
             
-            # 启动机器人，处理 FLOOD_WAIT 错误（可能被限流阻塞）
-            max_retries = 3
-            retry_count = 0
-            while retry_count < max_retries:
-                try:
-                    await StreamBot.start()
-                    bot_info = await StreamBot.get_me()
-                    StreamBot.username = bot_info.username
-                    log.info(f'直链机器人启动成功: @{bot_info.username}')
-                    break
-                except Exception as e:
-                    error_str = str(e)
-                    error_type = type(e).__name__
-                    
-                    # 检查是否是 FLOOD_WAIT 错误
-                    if 'FLOOD_WAIT' in error_str or 'FloodWait' in error_str or 'flood_420' in error_type:
-                        # 提取等待时间（秒）
-                        wait_time = None
-                        
-                        # 尝试多种格式提取等待时间
-                        patterns = [
-                            r'(\d+)\s+seconds?',  # "502 seconds"
-                            r'FLOOD_WAIT_X.*?(\d+)',  # "FLOOD_WAIT_X 502"
-                            r'wait of (\d+)',  # "wait of 502"
-                            r'(\d+)\s+second',  # "502 second"
-                        ]
-                        
-                        for pattern in patterns:
-                            wait_match = re.search(pattern, error_str, re.IGNORECASE)
-                            if wait_match:
-                                wait_time = int(wait_match.group(1))
-                                break
-                        
-                        # 如果无法提取时间，默认等待 10 分钟（600秒）
-                        if wait_time is None:
-                            wait_time = 600
-                            log.warning(f'无法从错误消息中提取等待时间，使用默认值 10 分钟（600秒）')
-                        
-                        retry_count += 1
-                        
-                        # 将秒数转换为更易读的格式
-                        if wait_time >= 60:
-                            wait_minutes = wait_time // 60
-                            wait_seconds = wait_time % 60
-                            if wait_seconds > 0:
-                                wait_str = f'{wait_minutes} 分 {wait_seconds} 秒'
-                            else:
-                                wait_str = f'{wait_minutes} 分钟'
-                        else:
-                            wait_str = f'{wait_time} 秒'
-                        
-                        if retry_count < max_retries:
-                            log.warning(f'遇到 Telegram 限流，需要等待 {wait_str}（{wait_time} 秒）后重试 (尝试 {retry_count}/{max_retries})...')
-                            await asyncio.sleep(wait_time + 5)  # 多等待5秒，确保安全
-                        else:
-                            log.error(f'遇到 Telegram 限流，需要等待 {wait_str}（{wait_time} 秒），但已达到最大重试次数 ({max_retries})')
-                            raise Exception(f'启动直链机器人失败：Telegram 限流，需要等待 {wait_str}（{wait_time} 秒）')
-                    else:
-                        # 其他错误，直接抛出
-                        raise
-            else:
-                # 如果所有重试都失败（不应该到达这里，因为上面已经抛出异常）
-                raise Exception(f'启动直链机器人失败：已达到最大重试次数 ({max_retries})')
+            # 启动主直链机器人；若主 Bot 遇到 FLOOD_WAIT，转入后台延迟启动，优先初始化 MULTI_BOT_TOKENS
+            try:
+                await StreamBot.start()
+                bot_info = await StreamBot.get_me()
+                StreamBot.username = bot_info.username
+                log.info(f'直链机器人启动成功: @{bot_info.username}')
+            except Exception as e:
+                error_str = str(e)
+                error_type = type(e).__name__
+                if 'FLOOD_WAIT' in error_str or 'FloodWait' in error_str or 'flood_420' in error_type:
+                    wait_match = (
+                        re.search(r'(\d+)\s+seconds?', error_str, re.IGNORECASE)
+                        or re.search(r'FLOOD_WAIT_X.*?(\d+)', error_str, re.IGNORECASE)
+                        or re.search(r'wait of (\d+)', error_str, re.IGNORECASE)
+                    )
+                    wait_time = int(wait_match.group(1)) if wait_match else 600
+                    log.warning(f'主 StreamBot (客户端 0) 遇到 Telegram 限流 ({wait_time}s)，先启动其余多 Bot 客户端，后台等待恢复...')
+                    async def _delayed_streambot_start(delay_sec: int):
+                        await asyncio.sleep(delay_sec + 5)
+                        try:
+                            await StreamBot.start()
+                            info = await StreamBot.get_me()
+                            StreamBot.username = info.username
+                            from WebStreamer.bot.clients import register_primary_streambot
+                            await register_primary_streambot()
+                            log.info(f'主 StreamBot (客户端 0) 后台恢复启动成功: @{info.username}')
+                        except Exception as ex:
+                            log.error(f'主 StreamBot 后台延迟启动失败: {ex}')
+                    asyncio.create_task(_delayed_streambot_start(wait_time))
+                else:
+                    raise
             
             # 然后初始化Telegram客户端（可能被限流阻塞）
             await initialize_clients()
@@ -991,9 +983,21 @@ async def main():
             raise RuntimeError('直链功能启动失败') from e
 
     set_service_ready(True)
+    if ENABLE_STREAM:
+        try:
+            from thumbnail_worker import get_thumbnail_worker
+            asyncio.create_task(get_thumbnail_worker().delayed_startup_scan(5.0))
+            log.info("已安排后台缩略图自动预热扫描（启动5秒后执行）")
+        except Exception as e:
+            log.warning(f"安排后台缩略图预热失败: {e}")
 
 
 async def cleanup():
+    try:
+        from thumbnail_worker import get_thumbnail_worker
+        await get_thumbnail_worker().stop()
+    except Exception:
+        pass
     set_service_ready(False)
     """清理资源"""
     if stream_server:

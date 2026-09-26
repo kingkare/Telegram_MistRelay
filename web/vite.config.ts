@@ -33,7 +33,6 @@ export default defineConfig({
         '**/build/**',
         '**/test-results/**',
         '**/.playwright/**',
-        '**/src-tauri/**',
         '**/*.md'
       ],
       usePolling: false, // 在ARM设备上可能需要设置为true

@@ -13,33 +13,51 @@ from pyrogram import Client
 logger = logging.getLogger("bot")
 
 sessions_dir = os.environ.get("MISTRELAY_SESSION_DIR", "/app/db/sessions")
-if Var.USE_SESSION_FILE:
-    logger.info("Using session files")
-    logger.info("Session folder path: {}".format(sessions_dir))
-    os.makedirs(sessions_dir, mode=0o700, exist_ok=True)
+os.makedirs(sessions_dir, mode=0o700, exist_ok=True)
+try:
     os.chmod(sessions_dir, 0o700)
+except Exception:
+    pass
 
-# 使用Python模块路径而不是文件系统路径（在Docker中更可靠）
+_primary_bot_id = str(Var.BOT_TOKEN or "default").split(":", 1)[0]
+
+# 使用持久化 session 文件避免重启重复触发 ImportBotAuthorization FloodWait
 StreamBot = Client(
-    name="WebStreamer",
+    name=f"pyrogram_bot_{_primary_bot_id}",
     api_id=Var.API_ID,
     api_hash=Var.API_HASH,
-    workdir=sessions_dir if Var.USE_SESSION_FILE else "WebStreamer",
+    workdir=sessions_dir,
     plugins={"root": "WebStreamer.bot.plugins"},
     bot_token=Var.BOT_TOKEN,
     sleep_threshold=Var.SLEEP_THRESHOLD,
     workers=Var.WORKERS,
-    in_memory=not Var.USE_SESSION_FILE,
+    in_memory=False,
 )
 
 multi_clients = {}
 work_loads = {}
-# 跟踪哪些客户端可以访问 BIN_CHANNEL
+# 跟踪哪些客户端可以访问 BIN_CHANNEL 进行读取与分流 (下载/流播/缩略图)
 channel_accessible_clients = set()
+# 跟踪哪些客户端具备 BIN_CHANNEL 写权限 (上传/发帖/删帖)
+channel_write_clients = set()
+# 客户端访问模式与元信息: {idx: {"mode": "primary_admin" | "direct_admin" | "no_join_resolved" | "unreachable", "can_read": bool, "can_write": bool, "username": str}}
+bot_channel_modes = {}
+# 频道的公开标识 (公开用户名或关联讨论组公开用户名)
+channel_public_handle = None
 bot_runtime = {}
 
 _scheduler_lock = threading.Lock()
 _scheduler_cursor = -1
+
+
+# Telegram 数据中心物理分区与地理分布映射
+DC_LOCATIONS = {
+    1: "DC1 (美西 / 迈阿密)",
+    2: "DC2 (欧洲 / 阿姆斯特丹)",
+    3: "DC3 (美东 / 迈阿密)",
+    4: "DC4 (欧洲 / 阿姆斯特丹)",
+    5: "DC5 (亚太 / 新加坡)",
+}
 
 
 def _ensure_bot_runtime(index: int) -> dict:
@@ -57,15 +75,99 @@ def _ensure_bot_runtime(index: int) -> dict:
             "last_byte_at": 0.0,
             "last_selected_at": 0.0,
             "last_error": "",
+            "home_dc": None,
+            "warm_dcs": set(),
+            "dc_requests": {},
         }
         bot_runtime[index] = state
+    else:
+        state.setdefault("home_dc", None)
+        state.setdefault("warm_dcs", set())
+        state.setdefault("dc_requests", {})
     return state
+
+
+def set_bot_home_dc(index: int, dc_id: int | None) -> None:
+    if dc_id is None:
+        return
+    with _scheduler_lock:
+        state = _ensure_bot_runtime(index)
+        state["home_dc"] = int(dc_id)
+        state["warm_dcs"].add(int(dc_id))
+
+
+def mark_bot_warm_dc(index: int, dc_id: int | None) -> None:
+    if dc_id is None:
+        return
+    with _scheduler_lock:
+        state = _ensure_bot_runtime(index)
+        state["warm_dcs"].add(int(dc_id))
+
+
+def get_dc_partition_summary(media_records: list[dict] | None = None) -> dict:
+    try:
+        from pyrogram.file_id import FileId
+    except Exception:
+        FileId = None
+
+    summary = {}
+    for dc_num in range(1, 6):
+        summary[str(dc_num)] = {
+            "dc_id": dc_num,
+            "label": DC_LOCATIONS.get(dc_num, f"DC{dc_num}"),
+            "home_bots": [],
+            "warm_bots": [],
+            "files_count": 0,
+            "requests_count": 0,
+        }
+
+    with _scheduler_lock:
+        for idx in sorted(multi_clients.keys()):
+            st = _ensure_bot_runtime(idx)
+            hdc = st.get("home_dc")
+            if hdc and str(hdc) in summary:
+                summary[str(hdc)]["home_bots"].append(idx)
+            for wdc in sorted(st.get("warm_dcs", ())):
+                if str(wdc) in summary and idx not in summary[str(wdc)]["warm_bots"]:
+                    summary[str(wdc)]["warm_bots"].append(idx)
+            for d_req, count in st.get("dc_requests", {}).items():
+                if str(d_req) in summary:
+                    summary[str(d_req)]["requests_count"] += count
+
+    if media_records is None:
+        try:
+            import db
+            media_records = db.list_all_tg_media_records()
+        except Exception:
+            media_records = []
+
+    if FileId is not None:
+        for rec in (media_records or []):
+            fid = rec.get("file_id")
+            if fid:
+                try:
+                    dec = FileId.decode(fid)
+                    if dec.dc_id and str(dec.dc_id) in summary:
+                        summary[str(dec.dc_id)]["files_count"] += 1
+                except Exception:
+                    pass
+
+    return summary
 
 
 def register_bot_client(index: int) -> None:
     with _scheduler_lock:
         work_loads.setdefault(index, 0)
         _ensure_bot_runtime(index)
+
+
+def unregister_bot_client(index: int) -> None:
+    with _scheduler_lock:
+        work_loads.pop(index, None)
+        bot_runtime.pop(index, None)
+        channel_accessible_clients.discard(index)
+        channel_write_clients.discard(index)
+        bot_channel_modes.pop(index, None)
 
 
 def _channel_candidate_indices(prefer_channel: bool = True) -> list[int]:
@@ -120,7 +222,24 @@ def get_bot_runtime_snapshot() -> dict:
         snapshot = {}
         for idx in sorted(multi_clients.keys()):
             state = _ensure_bot_runtime(idx)
+            client = multi_clients.get(idx)
+            uname = getattr(client, "username", "") or ""
+            mode_entry = bot_channel_modes.get(idx, {})
+            mode = mode_entry.get("mode") or (
+                "primary_admin" if idx == 0 else (
+                    "direct_admin" if idx in channel_write_clients else (
+                        "no_join_resolved" if idx in channel_accessible_clients else "unreachable"
+                    )
+                )
+            )
             snapshot[idx] = {
+                "username": uname,
+                "mode": mode,
+                "home_dc": state.get("home_dc"),
+                "warm_dcs": sorted(list(state.get("warm_dcs", ()))),
+                "dc_requests": dict(state.get("dc_requests", {})),
+                "can_read": idx in channel_accessible_clients,
+                "can_write": idx in channel_write_clients or idx == 0,
                 "active_requests": work_loads.get(idx, 0),
                 "cooldown_remaining": max(0.0, state["cooldown_until"] - now),
                 "cooldown_reason": state["cooldown_reason"],
@@ -195,6 +314,7 @@ def select_stream_bot(
     *,
     exclude_indices: set[int] | None = None,
     prefer_channel: bool = True,
+    target_dc: int | None = None,
 ) -> int | None:
     global _scheduler_cursor
 
@@ -232,13 +352,26 @@ def select_stream_bot(
             active_load = work_loads.get(idx, 0)
             failure_penalty = min(state["failure_streak"], 5) * 0.5
             cooldown_penalty = cooldown_remaining if not ready else 0.0
+
+            dc_penalty = 0.0
+            if target_dc is not None:
+                if state.get("home_dc") == target_dc:
+                    dc_penalty = 0.0
+                elif target_dc in state.get("warm_dcs", ()):
+                    dc_penalty = 0.8
+                else:
+                    dc_penalty = 2.0
+
             return (
-                active_load + failure_penalty + cooldown_penalty,
+                active_load + failure_penalty + cooldown_penalty + dc_penalty,
                 position_map.get(idx, 0),
                 idx,
             )
 
         selected = min(pool, key=score)
         _scheduler_cursor = selected
-        _ensure_bot_runtime(selected)["last_selected_at"] = now
+        st = _ensure_bot_runtime(selected)
+        st["last_selected_at"] = now
+        if target_dc is not None:
+            st["dc_requests"][int(target_dc)] = st["dc_requests"].get(int(target_dc), 0) + 1
         return selected

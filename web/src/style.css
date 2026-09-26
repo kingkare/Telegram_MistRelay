@@ -2,55 +2,71 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ========== 设计令牌 ========== */
+/* ========== 现代二次元设计令牌 (樱花粉 + 天空蓝) ========== */
 :root {
   /* 品牌主色 */
-  --color-primary: #667eea;
-  --color-primary-dark: #5568d3;
-  --color-primary-light: #7c8ef0;
+  --color-primary: #ff7597;
+  --color-primary-dark: #f43f6e;
+  --color-primary-light: #ff9ebb;
+  --color-accent: #38bdf8;
+  --color-accent-light: #7dd3fc;
   
-  /* 渐变色 */
-  --gradient-primary: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  --gradient-success: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  /* 渐变体系 - 二次元晨曦粉蓝流光 */
+  --gradient-primary: linear-gradient(135deg, #ff8fab 0%, #38bdf8 100%);
+  --gradient-sakura: linear-gradient(135deg, #ff7597 0%, #f472b6 100%);
+  --gradient-sky: linear-gradient(135deg, #38bdf8 0%, #60a5fa 100%);
+  --gradient-success: linear-gradient(135deg, #38bdf8 0%, #0ea5e9 100%);
   --gradient-warning: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-  --gradient-danger: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-  --gradient-info: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  --gradient-danger: linear-gradient(135deg, #fb7185 0%, #e11d48 100%);
+  --gradient-info: linear-gradient(135deg, #38bdf8 0%, #2563eb 100%);
   
-  /* 玻璃态效果 */
-  --glass-bg: rgba(255, 255, 255, 0.7);
-  --glass-border: rgba(255, 255, 255, 0.18);
-  --glass-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.15);
+  /* 玻璃态与光晕效果 */
+  --glass-bg: rgba(255, 255, 255, 0.82);
+  --glass-border: rgba(255, 143, 171, 0.25);
+  --glass-shadow: 0 10px 30px 0 rgba(255, 117, 151, 0.12);
   
   /* 阴影系统 */
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-  --shadow-2xl: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
-  --shadow-glow: 0 0 20px rgba(102, 126, 234, 0.3);
+  --shadow-sm: 0 1px 3px 0 rgba(255, 117, 151, 0.08);
+  --shadow-md: 0 6px 16px -2px rgba(255, 117, 151, 0.12), 0 2px 6px -1px rgba(56, 189, 248, 0.08);
+  --shadow-lg: 0 12px 24px -4px rgba(255, 117, 151, 0.16), 0 4px 10px -2px rgba(56, 189, 248, 0.1);
+  --shadow-xl: 0 20px 32px -6px rgba(255, 117, 151, 0.18), 0 8px 16px -4px rgba(56, 189, 248, 0.12);
+  --shadow-2xl: 0 25px 50px -12px rgba(255, 117, 151, 0.25);
+  --shadow-glow: 0 8px 24px rgba(255, 117, 151, 0.35);
   
-  /* 动画时长 */
+  /* 动画时长与缓动 */
   --duration-fast: 150ms;
   --duration-normal: 300ms;
   --duration-slow: 500ms;
-  
-  /* 缓动函数 */
   --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-bounce: cubic-bezier(0.68, -0.55, 0.265, 1.55);
-}
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
 
-/* 暗色模式变量 */
-.dark {
-  --glass-bg: rgba(31, 41, 55, 0.7);
-  --glass-border: rgba(255, 255, 255, 0.1);
-  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  /* Element Plus 全局主题变量覆盖 */
+  --el-color-primary: #ff7597;
+  --el-color-primary-light-3: #ff9ebb;
+  --el-color-primary-light-5: #ffb8cd;
+  --el-color-primary-light-7: #ffd1dc;
+  --el-color-primary-light-8: #ffe4eb;
+  --el-color-primary-light-9: #fff1f5;
+  --el-color-primary-dark-2: #f43f6e;
+  --el-color-success: #38bdf8;
+  --el-color-warning: #f59e0b;
+  --el-color-danger: #fb7185;
+  --el-border-radius-base: 14px;
+  --el-border-radius-small: 10px;
+  --el-border-radius-round: 9999px;
+  --el-card-border-color: rgba(255, 143, 171, 0.22);
+  --el-border-color: rgba(255, 143, 171, 0.22);
+  --el-border-color-light: rgba(255, 143, 171, 0.16);
+  --el-border-color-lighter: rgba(255, 143, 171, 0.1);
+  --el-fill-color-light: #fff5f8;
+  --el-fill-color-blank: rgba(255, 255, 255, 0.92);
 }
 
 /* ========== 动画关键帧 ========== */
 @keyframes fadeIn {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
@@ -61,7 +77,7 @@
 @keyframes slideInLeft {
   from {
     opacity: 0;
-    transform: translateX(-20px);
+    transform: translateX(-18px);
   }
   to {
     opacity: 1;
@@ -72,7 +88,7 @@
 @keyframes slideInRight {
   from {
     opacity: 0;
-    transform: translateX(20px);
+    transform: translateX(18px);
   }
   to {
     opacity: 1;
@@ -83,7 +99,7 @@
 @keyframes scaleIn {
   from {
     opacity: 0;
-    transform: scale(0.95);
+    transform: scale(0.96);
   }
   to {
     opacity: 1;
@@ -96,7 +112,7 @@
     opacity: 1;
   }
   50% {
-    opacity: 0.5;
+    opacity: 0.6;
   }
 }
 
@@ -114,89 +130,124 @@
     transform: translateY(0px);
   }
   50% {
-    transform: translateY(-10px);
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes floatSlow {
+  0%, 100% {
+    transform: translateY(0px) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-14px) rotate(2deg);
   }
 }
 
 @keyframes glow {
   0%, 100% {
-    box-shadow: 0 0 5px rgba(102, 126, 234, 0.5);
+    box-shadow: 0 0 8px rgba(255, 117, 151, 0.4);
   }
   50% {
-    box-shadow: 0 0 20px rgba(102, 126, 234, 0.8);
+    box-shadow: 0 0 24px rgba(56, 189, 248, 0.55);
   }
 }
 
 /* ========== 基础样式 ========== */
 @layer base {
   * {
-    @apply border-gray-200;
+    border-color: rgba(255, 143, 171, 0.2);
   }
   
   body {
     @apply antialiased;
-    @apply text-gray-900;
-    @apply bg-gray-50;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-      'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-      sans-serif;
+    color: #374151;
+    background-color: #fdf7f9;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+      'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   }
   
   h1, h2, h3, h4, h5, h6 {
-    @apply font-semibold;
+    @apply font-bold;
+    color: #1f2937;
   }
   
-  /* 滚动条样式 */
+  /* 二次元精致粉蓝滚动条 */
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
   }
   
   ::-webkit-scrollbar-track {
-    @apply bg-gray-100;
+    background: transparent;
   }
   
   ::-webkit-scrollbar-thumb {
-    @apply bg-gray-300 rounded-full;
+    background: rgba(255, 143, 171, 0.4);
+    border-radius: 9999px;
     transition: background-color var(--duration-normal);
   }
   
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-gray-400;
+    background: rgba(255, 117, 151, 0.7);
   }
 }
 
-/* ========== 工具类 ========== */
+/* ========== 工具类与组件 ========== */
 @layer components {
-  /* 渐变文字 */
+  /* 二次元双色流光渐变文字 */
   .text-gradient {
     background: var(--gradient-primary);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
   }
+
+  .text-gradient-sakura {
+    background: var(--gradient-sakura);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .text-gradient-sky {
+    background: var(--gradient-sky);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
   
-  /* 玻璃态卡片 */
+  /* 晶莹毛玻璃卡片 */
   .glass-card {
     background: var(--glass-bg);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
     border: 1px solid var(--glass-border);
     box-shadow: var(--glass-shadow);
+    border-radius: 16px;
   }
   
-  /* 渐变按钮 */
+  /* 渐变流光按钮 */
   .btn-gradient {
     background: var(--gradient-primary);
-    @apply text-white font-medium px-4 py-2 rounded-lg;
-    @apply transition-all duration-300;
-    @apply hover:shadow-lg hover:scale-105;
+    @apply text-white font-medium px-4 py-2;
+    border-radius: 12px;
+    border: none;
+    transition: all var(--duration-normal) var(--ease-bounce);
+    box-shadow: 0 4px 14px rgba(255, 117, 151, 0.35);
+  }
+
+  .btn-gradient:hover {
+    box-shadow: 0 8px 20px rgba(56, 189, 248, 0.45);
+    transform: translateY(-2px) scale(1.02);
   }
   
-  /* 悬浮卡片效果 */
+  /* 悬浮柔弹动效 */
   .card-hover {
-    @apply transition-all duration-300;
-    @apply hover:shadow-xl hover:-translate-y-1;
+    transition: all var(--duration-normal) var(--ease-bounce);
+  }
+  .card-hover:hover {
+    box-shadow: 0 12px 28px -4px rgba(255, 117, 151, 0.22), 0 6px 14px -2px rgba(56, 189, 248, 0.18);
+    transform: translateY(-3px);
   }
   
   /* 动画类 */
@@ -213,7 +264,7 @@
   }
   
   .animate-scale-in {
-    animation: scaleIn var(--duration-normal) var(--ease-smooth);
+    animation: scaleIn var(--duration-normal) var(--ease-bounce);
   }
   
   .animate-pulse-slow {
@@ -221,52 +272,170 @@
   }
   
   .animate-float {
-    animation: float 3s ease-in-out infinite;
+    animation: float 4s ease-in-out infinite;
+  }
+
+  .animate-float-slow {
+    animation: floatSlow 7s ease-in-out infinite;
   }
   
   .animate-glow {
-    animation: glow 2s ease-in-out infinite;
+    animation: glow 2.5s ease-in-out infinite;
   }
 }
 
-/* ========== 工具类扩展 ========== */
-@layer utilities {
-  /* 渐变背景 */
-  .bg-gradient-primary {
-    background: var(--gradient-primary);
-  }
-  
-  .bg-gradient-success {
-    background: var(--gradient-success);
-  }
-  
-  .bg-gradient-warning {
-    background: var(--gradient-warning);
-  }
-  
-  .bg-gradient-danger {
-    background: var(--gradient-danger);
-  }
-  
-  .bg-gradient-info {
-    background: var(--gradient-info);
-  }
-  
-  /* 文字阴影 */
-  .text-shadow {
-    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  }
-  
-  .text-shadow-lg {
-    text-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-  }
-  
-  /* 平滑过渡 */
-  .transition-smooth {
-    transition: all var(--duration-normal) var(--ease-smooth);
-  }
-  
-  .transition-bounce {
-    transition: all var(--duration-normal) var(--ease-bounce);
-  }
+/* ========== Element Plus Web端二次元美化定制 ========== */
+.el-card {
+  border-radius: 16px !important;
+  border: 1px solid rgba(255, 143, 171, 0.22) !important;
+  background: rgba(255, 255, 255, 0.88) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  box-shadow: 0 4px 16px rgba(255, 117, 151, 0.08) !important;
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+
+.el-card.is-hover-shadow:hover {
+  box-shadow: 0 12px 28px rgba(255, 117, 151, 0.18), 0 4px 12px rgba(56, 189, 248, 0.14) !important;
+  transform: translateY(-2px);
+}
+
+.el-button {
+  border-radius: 12px;
+  font-weight: 500;
+  transition: all 0.25s ease;
+}
+
+.el-button--primary {
+  background: var(--gradient-primary);
+  border: none;
+  box-shadow: 0 4px 12px rgba(255, 117, 151, 0.32);
+}
+
+.el-button--primary:hover {
+  box-shadow: 0 8px 20px rgba(255, 117, 151, 0.45);
+  transform: translateY(-1px);
+}
+
+.el-input__wrapper {
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px rgba(255, 143, 171, 0.28) inset;
+  background-color: rgba(255, 255, 255, 0.85);
+  transition: all 0.25s ease;
+}
+
+.el-input__wrapper:hover {
+  box-shadow: 0 0 0 1px #ff7597 inset;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 2px rgba(255, 117, 151, 0.4) inset;
+}
+
+.el-tag {
+  border-radius: 8px;
+  border: none;
+  font-weight: 500;
+}
+
+.el-dialog {
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 20px 48px rgba(255, 117, 151, 0.25);
+  border: 1px solid rgba(255, 143, 171, 0.3);
+}
+
+.el-table {
+  border-radius: 14px;
+  overflow: hidden;
+  background-color: transparent;
+}
+
+.el-progress-bar__outer {
+  border-radius: 10px;
+  background-color: rgba(255, 143, 171, 0.15);
+}
+
+.el-progress-bar__inner {
+  border-radius: 10px;
+  background: var(--gradient-primary);
+}
+
+/* 自适应浅色毛玻璃视频播放器弹窗 */
+.el-overlay:has(.glass-video-dialog),
+.el-overlay:has(.glass-audio-dialog) {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  background-color: rgba(15, 23, 42, 0.55);
+}
+.glass-video-dialog {
+  max-width: min(1080px, 90vw) !important;
+  width: 90% !important;
+  max-height: 88vh !important;
+  margin: 0 auto !important;
+  border-radius: 20px !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.85) !important;
+  box-shadow: 0 25px 60px -15px rgba(255, 117, 151, 0.2), 0 0 30px rgba(56, 189, 248, 0.14) !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.glass-video-dialog.is-web-fullscreen {
+  max-width: 96vw !important;
+  width: 96vw !important;
+  max-height: 95vh !important;
+}
+
+.glass-video-dialog .el-dialog__header {
+  padding: 12px 20px !important;
+  margin-right: 0 !important;
+  border-bottom: 1px solid rgba(255, 143, 171, 0.18) !important;
+  background: linear-gradient(135deg, rgba(255, 245, 247, 0.9) 0%, rgba(240, 249, 255, 0.9) 100%) !important;
+}
+
+.glass-video-dialog .el-dialog__body {
+  padding: 12px 18px !important;
+  flex: 1 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: hidden !important;
+  background: rgba(248, 250, 252, 0.5) !important;
+}
+
+.glass-video-dialog .el-dialog__footer {
+  padding: 12px 20px !important;
+  border-top: 1px solid rgba(255, 143, 171, 0.18) !important;
+  background: rgba(255, 255, 255, 0.88) !important;
+}
+
+/* 自适应浅色毛玻璃音频播放器弹窗 */
+.glass-audio-dialog {
+  max-width: 480px !important;
+  width: 90% !important;
+  border-radius: 20px !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.85) !important;
+  box-shadow: 0 25px 60px -15px rgba(255, 117, 151, 0.22), 0 0 30px rgba(56, 189, 248, 0.12) !important;
+  overflow: hidden !important;
+}
+
+.glass-audio-dialog .el-dialog__header {
+  padding: 14px 20px !important;
+  margin-right: 0 !important;
+  border-bottom: 1px solid rgba(255, 143, 171, 0.18) !important;
+  background: linear-gradient(135deg, rgba(255, 245, 247, 0.9) 0%, rgba(240, 249, 255, 0.9) 100%) !important;
+}
+
+.glass-audio-dialog .el-dialog__footer {
+  padding: 12px 20px !important;
+  border-top: 1px solid rgba(255, 143, 171, 0.18) !important;
+  background: rgba(255, 255, 255, 0.88) !important;
 }

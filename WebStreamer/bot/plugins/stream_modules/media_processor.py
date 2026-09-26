@@ -118,6 +118,11 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                 if log_media:
                     try:
                         file_unique_id = save_tg_media(log_msg, log_media)
+                        try:
+                            from thumbnail_worker import get_thumbnail_worker
+                            get_thumbnail_worker().enqueue(log_msg.id)
+                        except Exception:
+                            pass
                     except Exception as db_e:
                         logger.error(f"记录频道媒体到数据库失败: {db_e}", exc_info=True)
 
@@ -263,6 +268,11 @@ async def process_single_media(m: Message, queue_reply_msg=None):
         if log_media:
             try:
                 saved_file_unique_id = save_tg_media(log_msg, log_media)
+                try:
+                    from thumbnail_worker import get_thumbnail_worker
+                    get_thumbnail_worker().enqueue(log_msg.id)
+                except Exception:
+                    pass
             except Exception as db_e:
                 logger.error(f"记录频道媒体到数据库失败: {db_e}", exc_info=True)
         file_hash = get_hash(log_msg, Var.HASH_LENGTH)
