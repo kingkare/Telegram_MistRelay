@@ -358,9 +358,9 @@ def select_stream_bot(
                 if state.get("home_dc") == target_dc:
                     dc_penalty = 0.0
                 elif target_dc in state.get("warm_dcs", ()):
-                    dc_penalty = 0.8
+                    dc_penalty = 0.2
                 else:
-                    dc_penalty = 2.0
+                    dc_penalty = 2.5
 
             return (
                 active_load + failure_penalty + cooldown_penalty + dc_penalty,

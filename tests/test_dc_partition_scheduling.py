@@ -105,14 +105,14 @@ class TestDCPartitionScheduling(unittest.TestCase):
         bot_mod.work_loads[0] = 3
         bot_mod.work_loads[2] = 3
 
-        # 请求 DC5 文件：此时 bot 3 具备 warm_dcs={5} 且负载为 0，惩罚 0.8 < 3.0，优先溢出到 bot 3
+        # 请求 DC5 文件：此时 bot 3 具备 warm_dcs={5} 且负载为 0，惩罚 0.2 < 3.0，优先溢出到 bot 3
         selected = bot_mod.select_stream_bot(target_dc=5)
         self.assertEqual(selected, 3)
 
         # 令 bot 3 也处于高负载 (3 个并发)
         bot_mod.work_loads[3] = 3
 
-        # 请求 DC5 文件：bot 1 虽然是冷节点 (惩罚 2.0)，但负载为 0，2.0 < 3.0，平滑溢出到 bot 1
+        # 请求 DC5 文件：bot 1 虽然是冷节点 (惩罚 0.5)，但负载为 0，0.5 < 3.0，平滑溢出到 bot 1
         selected_cold = bot_mod.select_stream_bot(target_dc=5)
         self.assertEqual(selected_cold, 1)
 

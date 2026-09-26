@@ -33,15 +33,22 @@ streamer_registry: Dict[Client, "ByteStreamer"] = {}
 # 每个 Bot 在每个媒体 DC 上建立的独立 Session 数量（每个 Session 拥有独立的 Auth().create() 密钥）
 MEDIA_SESSIONS_PER_BOT = 1
 
-# 每个 Bot 在单流条带化拉取时并发预取的 1MB 分片深度（保持为 2，消除单 TCP 会话上多请求排队阻塞）
+# 每个 Bot 在流播拉取时并发预取的 1MB 分片深度
 PER_BOT_PREFETCH_DEPTH = 2
 
+# 全局条带化轮转游标，使并发发起的各个流在集群中循环选择不同的 Worker 条带
+_stripe_global_cursor: int = 0
 
-def get_next_available_client(current_index: int, exclude_indices: Optional[set] = None) -> Optional[int]:
+
+def get_next_available_client(
+    current_index: int,
+    exclude_indices: Optional[set] = None,
+    target_dc: Optional[int] = None,
+) -> Optional[int]:
     if exclude_indices is None:
         exclude_indices = set()
     exclude_indices.add(current_index)
-    return select_stream_bot(exclude_indices=exclude_indices, prefer_channel=True)
+    return select_stream_bot(exclude_indices=exclude_indices, prefer_channel=True, target_dc=target_dc)
 
 
 def get_available_bot_indices(
@@ -71,9 +78,10 @@ def get_available_bot_indices(
                 dc_tier = 1
             else:
                 dc_tier = 2
-            load = work_loads.get(idx, 0)
             is_primary = 0 if idx == primary_index else 1
-            return (dc_tier, is_primary, load, idx)
+            load = work_loads.get(idx, 0)
+            rotated_pos = (candidates.index(idx) - candidates.index(primary_index)) % len(candidates) if primary_index in candidates else idx
+            return (dc_tier, is_primary, load, rotated_pos, idx)
 
         candidates.sort(key=dc_affinity_key)
     elif primary_index in candidates:
@@ -245,8 +253,10 @@ class ByteStreamer:
             pool[slot_idx] = media_session
             client.media_sessions[dc_id] = media_session
             try:
-                own_idx = self._find_own_index()
-                mark_bot_warm_dc(own_idx, dc_id)
+                for k, v in multi_clients.items():
+                    if v == client:
+                        mark_bot_warm_dc(k, dc_id)
+                        break
             except Exception:
                 pass
             return media_session
@@ -305,7 +315,7 @@ class ByteStreamer:
         chunk_size: int,
         max_retries: int = 3,
         slot_idx: Optional[int] = None,
-        timeout: float = 6.0,
+        timeout: float = 15.0,
     ):
         if slot_idx is None:
             self._rr_counter += 1
@@ -314,8 +324,8 @@ class ByteStreamer:
         for retry_attempt in range(max_retries):
             cur_slot = (slot_idx + retry_attempt) % MEDIA_SESSIONS_PER_BOT
             try:
+                media_session = await self.generate_media_session(client, file_id, slot_idx=cur_slot)
                 async with self._inflight_sem:
-                    media_session = await self.generate_media_session(client, file_id, slot_idx=cur_slot)
                     r = await asyncio.wait_for(
                         media_session.invoke(
                             raw.functions.upload.GetFile(
@@ -329,7 +339,7 @@ class ByteStreamer:
 
             except (asyncio.TimeoutError, TimeoutError) as e:
                 if retry_attempt < max_retries - 1:
-                    await asyncio.sleep(0.2 * (retry_attempt + 1))
+                    await asyncio.sleep(0.3 * (retry_attempt + 1))
                 else:
                     mark_bot_failure(client_index, e)
                     return False, None, client, None
@@ -337,13 +347,10 @@ class ByteStreamer:
             except (OSError, ConnectionError, AuthBytesInvalid, TypeError, AttributeError, Exception) as e:
                 error_msg = str(e)
                 is_encryption_error = (
-                    (isinstance(e, TypeError) and (
-                        "Value after * must be an iterable" in error_msg or
-                        "NoneType" in error_msg or
-                        "encrypt" in error_msg.lower()
-                    )) or
                     isinstance(e, AuthBytesInvalid) or
-                    "AUTH_KEY_UNREGISTERED" in error_msg
+                    "AUTH_KEY_UNREGISTERED" in error_msg or
+                    ("encrypt" in error_msg.lower() and isinstance(e, (TypeError, ValueError))) or
+                    "Value after * must be an iterable" in error_msg
                 )
 
                 if retry_attempt < max_retries - 1:
@@ -408,25 +415,40 @@ class ByteStreamer:
 
         all_bots = get_available_bot_indices(current_index, set(), target_dc=target_dc) if (part_count > 1 and message_id is not None) else [current_index]
         total_active_streams = max(1, sum(work_loads.values()))
-        # 自适应混合条带化调度：
-        # 1) 当下游连接数较少 (total_active_streams < len(all_bots)) 时，单条流无法占满所有 Bot，
-        #    服务端内部直接启用跨全部 Bot 的条带化并发拉取 (Server-Side Multi-Bot Striping)，单流即可跑满所有 Bot！
-        # 2) 当下游已经发起多连接并发 (total_active_streams >= len(all_bots)) 时，每个 Bot 都已分配到独立 HTTP 流，
-        #    此时每条 HTTP 流绑定自身专属 Bot 并在单 Bot 内预取流水线 (Pipelining)，消除跨 Bot 队头阻塞 (HoL Blocking)！
-        if total_active_streams < len(all_bots) and part_count > 1 and message_id is not None:
-            # 单流条带化拉取：限制单流最大跨 4 个健康 Bot 并发条带，避免同时跨 10~20 个节点带来的木桶效应，
-            # 既能跑满 60~120MB/s（远超 4K 原盘码率），又保留充足空闲节点用于毫秒级对冲抢跑（Hedged Requests）！
-            max_single_stream_bots = min(4, len(all_bots))
-            stripe_bots = all_bots[:max_single_stream_bots]
-            per_bot_depth = 2
-            prefetch_window = max(3, len(stripe_bots) * per_bot_depth)
+
+        # 自适应混合调度策略：
+        # 1) 单流播放/测速模式 (total_active_streams <= 1 且 part_count > 1，例如 Web 端 HTML5 播放器单连接):
+        #    利用同 DC 的空闲 Worker 组成多 Bot 条带池 (Multi-Bot Striping)，单连接跑满 100~300Mbps！
+        #    关键保证：优先仅选用目标 DC 的原生同区节点（零跨洋延迟、无需重做 Auth().create()）；
+        #    每个 Bot 在条带中仅承担 1 个分片在途请求，彻底消除单 TCP 会话上的排队队头阻塞。
+        # 2) 多连接并发模式 (total_active_streams > 1，例如第三方播放器 PotPlayer/VLC 开启多线程 Range 并发，或多个用户同时播放):
+        #    每条 HTTP 连接独占自身专属的分配 Bot (stripe_bots = [current_index])，
+        #    在单 Bot 内开启平滑双缓冲预取 (prefetch_window = 2)，零锁争抢，多连接完美并行拉满用户宽带！
+        from WebStreamer.bot import bot_runtime
+
+        native_dc_bots = [b for b in all_bots if bot_runtime.get(b, {}).get("home_dc") == target_dc]
+        warm_dc_bots = [
+            b for b in all_bots
+            if b not in native_dc_bots and (target_dc is not None and target_dc in bot_runtime.get(b, {}).get("warm_dcs", ()))
+        ]
+
+        acquired_stripe_slots = set()
+        if total_active_streams <= 1 and part_count > 1 and message_id is not None and len(all_bots) > 1:
+            candidate_bots = native_dc_bots + warm_dc_bots
+            stripe_bots = (candidate_bots or all_bots)[:4]
+            # 每个条带 Bot 分配 1 个在途预取分片，既实现无缝多 Bot 并发，又杜绝单会话拥塞
+            prefetch_window = len(stripe_bots)
+            for b in stripe_bots:
+                if b != current_index:
+                    acquire_bot_slot(b)
+                    acquired_stripe_slots.add(b)
         else:
             stripe_bots = [current_index]
-            prefetch_window = 3 if total_active_streams <= len(all_bots) * 2 else 2
-            if part_count <= 1:
-                prefetch_window = 1
+            prefetch_window = 2 if part_count > 1 else 1
 
-        bot_ctx_cache: Dict[int, Tuple[Client, "ByteStreamer", FileId, object]] = {}
+        bot_ctx_cache: Dict[int, Tuple[Client, "ByteStreamer", FileId, object]] = {
+            current_index: (self.client, self, file_id, default_location)
+        }
         bot_ctx_locks: Dict[int, asyncio.Lock] = {b: asyncio.Lock() for b in multi_clients.keys()}
 
         async def _get_ctx(bot_idx: int):
@@ -449,7 +471,7 @@ class ByteStreamer:
             try:
                 b_client, b_streamer, b_file_id, b_location = await _get_ctx(assigned_bot)
                 success, r, _, _ = await b_streamer._try_get_file_chunk(
-                    b_client, assigned_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=2, slot_idx=slot_idx, timeout=5.0
+                    b_client, assigned_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=2, slot_idx=slot_idx, timeout=15.0
                 )
                 if success and isinstance(r, raw.types.upload.File):
                     return True, r, assigned_bot, part_offset
@@ -458,14 +480,14 @@ class ByteStreamer:
 
             part_failed = {assigned_bot}
 
-            for fallback_attempt in range(3):
-                next_bot = get_next_available_client(assigned_bot, part_failed)
+            for fallback_attempt in range(2):
+                next_bot = get_next_available_client(assigned_bot, part_failed, target_dc=target_dc)
                 if next_bot is None:
                     break
                 try:
                     b_client, b_streamer, b_file_id, b_location = await _get_ctx(next_bot)
                     success, r, _, _ = await b_streamer._try_get_file_chunk(
-                        b_client, next_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=1, timeout=4.0
+                        b_client, next_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=1, timeout=12.0
                     )
                     if success and isinstance(r, raw.types.upload.File):
                         return True, r, next_bot, part_offset
@@ -475,35 +497,10 @@ class ByteStreamer:
 
             return False, None, assigned_bot, part_offset
 
-        async def _fetch_part_hedged(part_idx: int, exclude_bot: int):
-            part_offset = offset + (part_idx - 1) * chunk_size
-            candidate = get_next_available_client(exclude_bot, exclude_indices={exclude_bot})
-            if candidate is None:
-                candidate = current_index
-            try:
-                b_client, b_streamer, b_file_id, b_location = await _get_ctx(candidate)
-                success, r, _, _ = await b_streamer._try_get_file_chunk(
-                    b_client, candidate, b_file_id, b_location, part_offset, chunk_size, max_retries=1, timeout=4.0
-                )
-                if success and isinstance(r, raw.types.upload.File):
-                    logger.info(f"⚡ [流播对冲抢跑成功] 分片 {part_idx} 原Bot {exclude_bot} 延迟，由备用Bot {candidate} 极速补位交付")
-                    return True, r, candidate, part_offset
-            except Exception as e:
-                logger.warning(f"对冲任务在 Bot {candidate} 执行异常: {e}")
-            return False, None, candidate, part_offset
-
-        def get_window_size(p: int) -> int:
-            # 渐进式慢启动预取：起播或元数据探测仅拉取 2 个分片，随后平滑爬坡至满窗口
-            if p <= 2:
-                return min(2, prefetch_window)
-            elif p <= 4:
-                return min(4, prefetch_window)
-            return prefetch_window
-
         prefetch_tasks: Dict[int, asyncio.Task] = {}
 
         try:
-            initial_window = min(part_count, get_window_size(1))
+            initial_window = min(part_count, prefetch_window)
             for p in range(1, initial_window + 1):
                 prefetch_tasks[p] = asyncio.create_task(_fetch_part(p))
 
@@ -515,42 +512,20 @@ class ByteStreamer:
                 active_bots = stripe_bots or [current_index]
                 assigned_bot = active_bots[(current_part - 1) % len(active_bots)]
 
-                if not task.done():
-                    # 1.2s 对冲抢跑防御：避免单个慢节点引发队头阻塞导致浏览器 HTML5 播放缓冲见底转圈
-                    done_set, _ = await asyncio.wait({task}, timeout=1.2)
-                    if not done_set:
-                        logger.info(f"分片 {current_part} (Bot {assigned_bot}) 耗时超 1.2s，启动备用 Bot 对冲抢跑...")
-                        hedge_task = asyncio.create_task(_fetch_part_hedged(current_part, assigned_bot))
-                        done_set, pending_set = await asyncio.wait(
-                            {task, hedge_task}, return_when=asyncio.FIRST_COMPLETED
-                        )
-                        for p in pending_set:
-                            p.cancel()
-                        winning_task = next(iter(done_set))
-                        try:
-                            success, r, used_bot, part_offset = winning_task.result()
-                        except Exception:
-                            success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
-                    else:
-                        try:
-                            success, r, used_bot, part_offset = task.result()
-                        except Exception:
-                            success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
-                else:
-                    try:
-                        success, r, used_bot, part_offset = task.result()
-                    except Exception:
-                        success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
+                try:
+                    success, r, used_bot, part_offset = await asyncio.wait_for(task, timeout=25.0)
+                except Exception as e:
+                    logger.warning(f"分片 {current_part} (Bot {assigned_bot}) 预取等待超时或异常 ({e})，执行兜底重试...")
+                    success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
 
                 if not success or not isinstance(r, raw.types.upload.File):
-                    logger.warning(f"分片 {current_part} 首轮获取未命中，执行兜底获取...")
+                    logger.warning(f"分片 {current_part} 首轮获取未命中，执行备用重试...")
                     success, r, used_bot, part_offset = await _fetch_part(current_part)
                     if not success or not isinstance(r, raw.types.upload.File):
                         logger.error(f"所有客户端都无法获取文件块，停止文件流传输 (offset: {part_offset})")
                         break
 
-                cur_target_window = get_window_size(current_part)
-                for next_p in range(current_part + 1, min(part_count, current_part + cur_target_window) + 1):
+                for next_p in range(current_part + 1, min(part_count, current_part + prefetch_window) + 1):
                     if next_p not in prefetch_tasks:
                         prefetch_tasks[next_p] = asyncio.create_task(_fetch_part(next_p))
 
@@ -585,6 +560,8 @@ class ByteStreamer:
             if prefetch_tasks:
                 await asyncio.gather(*prefetch_tasks.values(), return_exceptions=True)
             release_current_slot()
+            for b in acquired_stripe_slots:
+                release_bot_slot(b)
 
     async def clean_cache(self) -> None:
         while True:

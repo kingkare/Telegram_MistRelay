@@ -302,14 +302,72 @@ async def initialize_clients():
         successful_clients = len(multi_clients)
         logger.info(f"多机器人负载均衡初始化完成，共 {successful_clients} 个客户端可用")
         
-        # 启动客户端健康检查任务（仅多客户端模式）
+        # 启动客户端健康检查与跨 DC 会话静默预热任务（仅多客户端模式）
         if Var.MULTI_CLIENT:
-            global _health_check_task
+            global _health_check_task, _prewarm_task
             _health_check_task = asyncio.create_task(client_health_check())
+            _prewarm_task = asyncio.create_task(background_dc_prewarm())
     else:
         # 单客户端模式：只使用默认的StreamBot
         logger.info("使用单客户端模式（默认客户端）")
 
+
+
+async def background_dc_prewarm():
+    """
+    在后台静默并发预热跨 DC 媒体会话。
+    避免用户在播放或多线程并发下载时，因从机器人临时创建 DC 会话 (Auth.create + ExportAuthorization)
+    导致首包阻塞或队头延迟，实现集群所有 Worker 均以零延迟直接就绪。
+    """
+    try:
+        await asyncio.sleep(3.0)
+        from collections import Counter
+        from types import SimpleNamespace
+        import db
+        import WebStreamer.bot as bot_mod
+        from WebStreamer.utils.custom_dl import ByteStreamer
+        from pyrogram.file_id import FileId
+
+        records = db.list_all_tg_media_records()[:100]
+        dc_counts = Counter()
+        for r in records:
+            fid_str = r.get("file_id")
+            if fid_str:
+                try:
+                    dc_counts[FileId.decode(fid_str).dc_id] += 1
+                except Exception:
+                    pass
+
+        # 优先预热主媒体分区（如 DC5）
+        target_dcs = [dc for dc, cnt in dc_counts.most_common() if cnt >= 5] or [5]
+        logger.info(f"🚀 开始执行多机器人后台跨 DC 媒体会话并发预热: 目标主分区 DC={target_dcs}...")
+
+        sem = asyncio.Semaphore(4)
+
+        async def _warm_one(idx: int, cli, dc_id: int):
+            async with sem:
+                st = bot_mod.bot_runtime.get(idx, {})
+                if st.get("home_dc") == dc_id or dc_id in st.get("warm_dcs", set()):
+                    return
+                if not getattr(cli, "is_connected", False):
+                    return
+                try:
+                    streamer = ByteStreamer.for_client(cli)
+                    await streamer.generate_media_session(cli, SimpleNamespace(dc_id=dc_id))
+                    logger.info(f"✨ 客户端 {idx} (@{getattr(cli, 'username', idx)}) DC{dc_id} 跨区媒体会话预热完成")
+                except Exception as e:
+                    logger.debug(f"客户端 {idx} 预热 DC{dc_id} 跳过: {e}")
+
+        for dc_id in target_dcs:
+            tasks = [_warm_one(idx, cli, dc_id) for idx, cli in list(multi_clients.items())]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        logger.info("🎉 多机器人后台跨 DC 媒体会话预热全部就绪！")
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning(f"后台跨 DC 会话预热任务异常: {e}")
 
 async def client_health_check():
     """
