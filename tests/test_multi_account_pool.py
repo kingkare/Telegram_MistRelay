@@ -893,6 +893,63 @@ class TestMultiAccountPoolAndRelay(unittest.IsolatedAsyncioTestCase):
             self.assertIn("7151", p1)
             self.assertIn("7152", p2)
 
+    async def test_fetch_api_detects_too_many_tries_and_fails_fast(self):
+        """验证当 my.telegram.org 返回 Sorry, too many tries 时立即识别为频控并快速报错，杜绝挂等 777000"""
+        import aiohttp
+        s = self._make_fake_session(9098)
+        acc = db.upsert_protocol_account(phone="+16813089098", session_data=s)
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.is_connected = False
+            async def start(self):
+                self.is_connected = True
+            async def stop(self):
+                self.is_connected = False
+            async def get_me(self):
+                m = MagicMock()
+                m.id = 9098
+                m.phone_number = "16813089098"
+                return m
+            async def get_chat_history(self, chat_id, limit=5):
+                if False:
+                    yield None
+
+        class FakeTooManySession:
+            def __init__(self, *args, **kwargs):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, exc_type, exc, tb):
+                pass
+            def post(self, url, data=None, headers=None, proxy=None, **kwargs):
+                class Resp:
+                    async def text(self):
+                        return "Sorry, too many tries. Please try again later."
+                    async def __aenter__(self):
+                        return self
+                    async def __aexit__(self, exc_type, exc, tb):
+                        pass
+                return Resp()
+            def get(self, url, headers=None, proxy=None, **kwargs):
+                class Resp:
+                    async def text(self):
+                        return "198.51.100.10:7150\n"
+                    async def __aenter__(self):
+                        return self
+                    async def __aexit__(self, exc_type, exc, tb):
+                        pass
+                return Resp()
+
+        with patch("botfather_creator.Client", FakeClient),              patch.object(aiohttp, "ClientSession", FakeTooManySession, create=True),              patch("asyncio.sleep", AsyncMock()):
+            with self.assertRaises(RuntimeError) as cm:
+                await botfather_creator.fetch_api_credentials_from_my_telegram(
+                    acc["id"],
+                    proxy_api_url="https://proxy.example.com/api?region=US&num=1",
+                )
+            self.assertIn("频控限制", str(cm.exception))
+            self.assertIn("Sorry, too many tries", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

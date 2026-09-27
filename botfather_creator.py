@@ -411,6 +411,25 @@ def parse_proxy_lines(raw_text: str) -> List[str]:
     return results
 
 
+_EXHAUSTED_CREATE_PROXIES: Dict[str, float] = {}
+
+def mark_proxy_create_exhausted(proxy_url: str):
+    """记录某个代理节点在 my.telegram.org/apps/create 触发了单 IP 创建频控限制 (ERROR)"""
+    if proxy_url:
+        _EXHAUSTED_CREATE_PROXIES[proxy_url] = time.time()
+
+def is_proxy_create_exhausted(proxy_url: str, ttl_seconds: float = 900.0) -> bool:
+    """检查代理节点是否在 15 分钟内曾被 Telegram 官网标记为创建频控"""
+    if not proxy_url:
+        return False
+    ts = _EXHAUSTED_CREATE_PROXIES.get(proxy_url)
+    if not ts:
+        return False
+    if time.time() - ts > ttl_seconds:
+        _EXHAUSTED_CREATE_PROXIES.pop(proxy_url, None)
+        return False
+    return True
+
 async def fetch_residential_proxy_for_region(
     region: str,
     proxy_api_url: Optional[str] = None,
@@ -418,14 +437,14 @@ async def fetch_residential_proxy_for_region(
 ) -> str:
     """
     向家宽代理接口动态请求匹配目标账号地区的 10 分钟粘性住宅家宽代理。
-    支持在重试 (attempt_index > 0) 时批量拉取并轮换不同端口/出口 IP，规避单 IP 频控。
+    支持自动请求多节点并过滤已触发 ERROR 频控的节点，实现智能轮换。
     返回 http://ip:port 标准代理 URL。
     """
     clean_region = (region or "US").strip().upper()
     api_url = build_regional_proxy_api_url(clean_region, proxy_api_url=proxy_api_url)
     request_url = api_url
-    if attempt_index > 0 and "num=1" in request_url:
-        request_url = re.sub(r"([?&]num=)1(?=&|$)", r"\g<1>3", request_url)
+    if "num=1" in request_url:
+        request_url = re.sub(r"([?&]num=)1(?=&|$)", r"\g<1>5", request_url)
 
     logger.info(f"正在从家宽代理接口拉取 {clean_region} 地区住宅代理 (URL: {request_url})...")
 
@@ -450,8 +469,12 @@ async def fetch_residential_proxy_for_region(
         clean_hint = text.strip()[:160]
         raise ValueError(f"未能从家宽代理接口获取地区 {clean_region} 的有效代理节点 (接口响应: {clean_hint})")
 
-    selected = cand_list[attempt_index % len(cand_list)]
-    logger.info(f"成功获取 {clean_region} 地区住宅家宽代理: {mask_proxy_url(selected)}")
+    # 优先选取未在 15 分钟内因创建应用触发 ERROR 的新鲜代理
+    fresh_candidates = [p for p in cand_list if not is_proxy_create_exhausted(p)]
+    pool = fresh_candidates if fresh_candidates else cand_list
+    selected = pool[attempt_index % len(pool)]
+
+    logger.info(f"成功获取 {clean_region} 地区住宅家宽代理 (候选池 {len(pool)} 个可用): {mask_proxy_url(selected)}")
     return selected
 
 
@@ -2539,6 +2562,15 @@ async def fetch_api_credentials_from_my_telegram(
                 connector = aiohttp.TCPConnector(ssl=False) if hasattr(aiohttp, "TCPConnector") else None
                 jar = aiohttp.CookieJar(unsafe=True) if hasattr(aiohttp, "CookieJar") else None
 
+                # 在发送请求前，记录当前 777000 会话中已有的消息 ID，防止读取到过期的旧验证码
+                initial_msg_ids = set()
+                try:
+                    async for old_m in user_client.get_chat_history(777000, limit=5):
+                        if getattr(old_m, "id", None) is not None:
+                            initial_msg_ids.add(old_m.id)
+                except Exception as pre_hist_err:
+                    logger.debug(f"预记录 777000 历史消息异常: {pre_hist_err}")
+
                 async with aiohttp.ClientSession(timeout=timeout_cfg, connector=connector, cookie_jar=jar) as http_sess:
                     # 1. 请求下发 Web 登录码
                     logger.info(f"正在向 my.telegram.org 请求为 {real_phone} 下发 Web 登录码 (代理: {masked_proxy})...")
@@ -2551,26 +2583,35 @@ async def fetch_api_credentials_from_my_telegram(
                     ) as resp:
                         resp_text = await resp.text()
                         random_hash = None
+                        clean_resp = (resp_text or "").strip()
                         try:
-                            data = json.loads(resp_text)
-                            random_hash = data.get("random_hash")
+                            data = json.loads(clean_resp)
+                            if isinstance(data, dict):
+                                random_hash = data.get("random_hash")
                         except Exception:
-                            if len(resp_text.strip()) > 8 and "error" not in resp_text.lower():
-                                random_hash = resp_text.strip()
+                            # 仅当响应为无空格、长度在 10~64 位之间的纯十六进制/base64-like hash 时才视为合法 random_hash
+                            if re.fullmatch(r"[A-Za-z0-9_\-]{10,64}", clean_resp):
+                                random_hash = clean_resp
 
                         if not random_hash:
-                            if "too many" in resp_text.lower() or "flood" in resp_text.lower():
-                                raise ValueError(f"my.telegram.org 触发限流保护: {resp_text}")
-                            raise ValueError(f"my.telegram.org 请求下发验证码失败: {resp_text}")
+                            low_resp = clean_resp.lower()
+                            if "too many" in low_resp or "sorry" in low_resp or "flood" in low_resp or "try again later" in low_resp:
+                                raise RuntimeError(f"Telegram 官网下发登录码触发频控限制:「{clean_resp}」。该号码短时间内请求登录码过多，已被 Telegram 临时冷却，请等待约 15~30 分钟后再试")
+                            if "banned" in low_resp or "deactivated" in low_resp:
+                                raise RuntimeError(f"Telegram 官网拒绝为该号码提供开发者服务:「{clean_resp}」")
+                            raise ValueError(f"my.telegram.org 请求下发验证码失败:「{clean_resp}」")
 
                     logger.info(f"my.telegram.org 已向 {real_phone} 下发登录验证码 (random_hash={random_hash[:8]}...)，正在从 777000 官方通知中截获...")
 
-                    # 2. 从 777000 服务号中监听并提取 Web login code (跳过已消耗过的 code)
+                    # 2. 从 777000 服务号中监听并提取 Web login code (跳过已消耗过的 code 与旧历史消息)
                     web_code = None
                     for _ in range(20):
                         await asyncio.sleep(1.5)
                         try:
                             async for msg in user_client.get_chat_history(777000, limit=5):
+                                # 若是发送请求前已存在的消息，跳过
+                                if getattr(msg, "id", None) is not None and msg.id in initial_msg_ids:
+                                    continue
                                 txt = msg.text or ""
                                 m = re.search(r"(?:Web\s*login\s*code|Web\s*登录代码|Web\s*code)[^\w\d]*\s*([A-Za-z0-9_\-]{8,24})", txt, re.IGNORECASE)
                                 cand = None
@@ -2591,7 +2632,7 @@ async def fetch_api_credentials_from_my_telegram(
                             break
 
                     if not web_code:
-                        raise TimeoutError("未能从 Telegram 官方服务通知(777000)中截获到 Web 登录验证码，请检查该号是否收到验证码")
+                        raise TimeoutError(f"已成功向 Telegram 官网请求登录码 (hash={random_hash[:8]}...)，但等待 30 秒仍未在 777000 收到新验证码通知。请确认该账号未在其他客户端屏蔽 777000 通知，或稍后重试")
 
                     used_codes.add(web_code)
                     logger.info(f"成功截获 Web 登录验证码: {web_code}，正在登录 my.telegram.org...")
@@ -2650,7 +2691,7 @@ async def fetch_api_credentials_from_my_telegram(
                             create_text = await create_resp.text()
                             if create_text.strip().upper() == "ERROR":
                                 logger.warning(f"my.telegram.org/apps/create 响应 ERROR (代理: {masked_proxy})")
-                                raise ValueError("my.telegram.org 创建 App 触发单 IP 频控限制 (响应 ERROR)，将轮换家宽代理重试")
+                                mark_proxy_create_exhausted(proxy_url)
 
                         async with _call_http(
                             http_sess.get,
@@ -2661,6 +2702,66 @@ async def fetch_api_credentials_from_my_telegram(
                             apps_html2 = await resp2.text()
                         ext_id, ext_hash = _extract_creds(apps_html2)
 
+                        # 若创建被拒，尝试复用当前已登录会话 (stel_token)，通过其他新鲜代理快速重试创建，避免重新走登录流程触发 send_password 频控
+                        if not (ext_id and ext_hash):
+                            for sub_retry_idx in range(1, 3):
+                                try:
+                                    sub_proxy = await fetch_residential_proxy_for_region(
+                                        region,
+                                        proxy_api_url=proxy_api_url,
+                                        attempt_index=sub_retry_idx,
+                                    )
+                                    if sub_proxy == proxy_url:
+                                        continue
+                                    masked_sub = mask_proxy_url(sub_proxy)
+                                    logger.info(f"正在复用已登录会话，通过新代理 {masked_sub} 重试提交创建表单 (免除重新发验证码)...")
+                                    async with _call_http(
+                                        http_sess.get,
+                                        "https://my.telegram.org/apps",
+                                        headers={"User-Agent": ua, "Referer": "https://my.telegram.org/"},
+                                        proxy=sub_proxy,
+                                    ) as get_sub_resp:
+                                        sub_html = await get_sub_resp.text()
+                                    ext_id, ext_hash = _extract_creds(sub_html)
+                                    if ext_id and ext_hash:
+                                        break
+                                    sub_hash_m = (
+                                        re.search(r"name=[\x22\x27]hash[\x22\x27][^>]*value=[\x22\x27]([^\x22\x27]+)[\x22\x27]", sub_html)
+                                        or re.search(r"value=[\x22\x27]([^\x22\x27]+)[\x22\x27][^>]*name=[\x22\x27]hash[\x22\x27]", sub_html)
+                                    )
+                                    if sub_hash_m:
+                                        sub_suffix = secrets.token_hex(3)
+                                        sub_payload = {
+                                            "hash": sub_hash_m.group(1),
+                                            "app_title": f"DesktopStudio{sub_suffix.upper()}",
+                                            "app_shortname": f"studio{sub_suffix}",
+                                            "app_url": "",
+                                            "app_platform": "desktop",
+                                            "app_desc": f"Desktop Client {sub_suffix}",
+                                        }
+                                        async with _call_http(
+                                            http_sess.post,
+                                            "https://my.telegram.org/apps/create",
+                                            data=sub_payload,
+                                            headers={"User-Agent": ua, "Origin": "https://my.telegram.org", "Referer": "https://my.telegram.org/apps"},
+                                            proxy=sub_proxy,
+                                        ) as post_sub_resp:
+                                            post_sub_txt = await post_sub_resp.text()
+                                            if post_sub_txt.strip().upper() == "ERROR":
+                                                mark_proxy_create_exhausted(sub_proxy)
+                                        async with _call_http(
+                                            http_sess.get,
+                                            "https://my.telegram.org/apps",
+                                            headers={"User-Agent": ua, "Referer": "https://my.telegram.org/apps"},
+                                            proxy=sub_proxy,
+                                        ) as check_sub_resp:
+                                            check_sub_html = await check_sub_resp.text()
+                                        ext_id, ext_hash = _extract_creds(check_sub_html)
+                                        if ext_id and ext_hash:
+                                            break
+                                except Exception as sub_err:
+                                    logger.debug(f"复用登录会话换代理提交表单异常: {sub_err}")
+
                     if not (ext_id and ext_hash):
                         raise RuntimeError(f"未能从 my.telegram.org/apps 成功解析出 api_id 与 api_hash (代理: {masked_proxy})")
 
@@ -2669,12 +2770,17 @@ async def fetch_api_credentials_from_my_telegram(
                     break  # 成功，跳出重试循环
             except Exception as attempt_err:
                 last_err = attempt_err
+                err_str = str(attempt_err)
                 logger.warning(f"[API提取] 账号 {real_phone} 第 {attempt}/{max_attempts} 次尝试失败: {attempt_err}")
+                
+                # 如果是 Telegram 官方频控冷却 (如 Sorry, too many tries)，立即终止重试并向用户清晰汇报，避免连续重试加重冷却
+                if "频控限制" in err_str or "too many" in err_str.lower() or "sorry" in err_str.lower():
+                    raise last_err
+
                 if attempt < max_attempts:
                     await asyncio.sleep(2.0)
                     continue
                 else:
-                    err_str = str(last_err)
                     if "ERROR" in err_str or "频控" in err_str:
                         raise RuntimeError(f"Telegram 官网限制当前 IP/地区短时间内创建多个 App（连续 {max_attempts} 次触发 ERROR）。建议稍等 2~3 分钟后再试，或在协议号详情中配置其他可用代理")
                     raise last_err
