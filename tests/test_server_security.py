@@ -32,7 +32,14 @@ def load_server_module():
         pass
 
     class RouteTableDef(list):
-        pass
+        def get(self, *_args, **_kwargs):
+            return lambda func: func
+        def post(self, *_args, **_kwargs):
+            return lambda func: func
+        def put(self, *_args, **_kwargs):
+            return lambda func: func
+        def delete(self, *_args, **_kwargs):
+            return lambda func: func
 
     web.StreamResponse = StreamResponse
     web.Response = Response
@@ -43,7 +50,12 @@ def load_server_module():
     web.Application = object
     web.RouteTableDef = RouteTableDef
     web.middleware = lambda function: function
-    web.json_response = lambda body, status=200: Response(status=status, body=body)
+    def _mock_json_resp(body, status=200):
+        import json
+        text_val = json.dumps(body, ensure_ascii=False) if isinstance(body, (dict, list)) else (str(body) if body is not None else None)
+        return Response(status=status, body=body, text=text_val)
+
+    web.json_response = _mock_json_resp
     aiohttp_module.web = web
     http_exceptions = types.ModuleType("aiohttp.http_exceptions")
     http_exceptions.BadStatusLine = HTTPException

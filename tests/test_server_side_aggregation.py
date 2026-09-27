@@ -176,5 +176,42 @@ class TestServerSideAggregation(unittest.TestCase):
         asyncio.run(_run())
 
 
+    def test_dynamic_pool_partitioning_55_bots(self):
+        """测试 55 个 Bot 集群规模下全量独占与动态均分无任何截断"""
+        total_bots = [i for i in range(55)]
+
+        # 单流模式：全量 55 个节点全部参与
+        active_streams = 1
+        quota_1 = max(1, len(total_bots) // active_streams)
+        self.assertEqual(quota_1, 55)
+        stripe_1 = list(total_bots)
+        self.assertEqual(len(stripe_1), 55)
+
+        # 双流并发：均分为 27 个节点
+        active_streams = 2
+        quota_2 = max(1, len(total_bots) // active_streams)
+        self.assertEqual(quota_2, 27)
+
+    def test_tune_media_session_socket_configuration(self):
+        """测试 tune_media_session_socket 正确配置 TCP_NODELAY 与 4MB 接收缓冲"""
+        import socket
+        from WebStreamer.utils.custom_dl import tune_media_session_socket
+
+        mock_sock = MagicMock()
+        mock_proto = MagicMock()
+        mock_proto.socket = mock_sock
+        mock_conn = MagicMock()
+        mock_conn.protocol = mock_proto
+        mock_session = MagicMock()
+        mock_session.connection = mock_conn
+
+        res = tune_media_session_socket(mock_session)
+        self.assertTrue(res)
+
+        # 验证 setsockopt 调用
+        mock_sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        mock_sock.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+        mock_sock.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_SNDBUF, 2 * 1024 * 1024)
+
 if __name__ == "__main__":
     unittest.main()

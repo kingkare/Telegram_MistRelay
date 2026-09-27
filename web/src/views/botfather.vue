@@ -135,6 +135,44 @@
         <div class="pool-actions">
           <el-button
             size="small"
+            class="header-btn"
+            :icon="Cpu"
+            :loading="keepaliveAllLoading"
+            @click="handleKeepaliveAll"
+            title="对所有协议号执行错峰 MTProto 轻量保活"
+          >
+            一键全量保活
+          </el-button>
+          <el-button
+            size="small"
+            class="header-btn"
+            :icon="Connection"
+            :loading="batchFetchingApi"
+            @click="openBatchFetchApiModal"
+            title="为所有未配置 API 的协议号按地区匹配家宽代理批量提取凭证"
+          >
+            批量提取 API
+          </el-button>
+          <el-button
+            size="small"
+            class="header-btn"
+            :icon="Download"
+            @click="openBatchExportTelethonModal"
+            title="生成并批量导出全部 Telethon StringSession 凭证"
+          >
+            导出 Telethon
+          </el-button>
+          <el-button
+            size="small"
+            class="header-btn"
+            :icon="Setting"
+            @click="openKeepaliveConfigModal"
+            title="配置协议号后台定时自动保活"
+          >
+            保活配置
+          </el-button>
+          <el-button
+            size="small"
             class="header-btn open-batch-import-btn primary-glow-btn"
             :icon="Plus"
             @click="openBatchImportModal"
@@ -177,63 +215,142 @@
               <el-icon><Iphone /></el-icon>
               <span>{{ acc.phone }}</span>
             </button>
-            <span class="acc-status-tag" :class="`acc-status-${acc.status}`">
-              {{ formatAccountStatus(acc.status) }}
+            <div class="acc-top-badges">
+              <span v-if="acc.dc_id" class="acc-dc-badge" :class="'dc-' + acc.dc_id" :title="`数据中心: ${acc.dc_name || ('DC' + acc.dc_id)}`">
+                DC{{ acc.dc_id }}
+              </span>
+              <span v-if="acc.keepalive_ping_ms" class="acc-ping-badge" :class="acc.keepalive_ping_ms < 250 ? 'ping-fast' : 'ping-slow'" :title="`最近一次保活握手延迟: ${acc.keepalive_ping_ms}ms`">
+                {{ acc.keepalive_ping_ms }}ms
+              </span>
+              <span class="acc-status-tag" :class="`acc-status-${acc.status}`">
+                {{ formatAccountStatus(acc.status) }}
+              </span>
+            </div>
+          </div>
+
+          <!-- 用户档案信息与最近保活 -->
+          <div class="acc-meta-strip">
+            <span v-if="acc.first_name || acc.username" class="acc-user-display" :title="`Telegram 用户: ${acc.first_name || ''} (@${acc.username || ''})`">
+              <span v-if="acc.first_name" class="font-medium text-slate-700">{{ acc.first_name }}</span>
+              <span v-if="acc.username" class="text-sky-600 ml-1">@{{ acc.username }}</span>
+            </span>
+            <span v-else-if="acc.tg_user_id" class="acc-user-display text-xs text-slate-500 font-mono">
+              UID: {{ acc.tg_user_id }}
+            </span>
+            <span v-else class="acc-user-display text-xs text-slate-400">
+              未同步档案
+            </span>
+            <span v-if="acc.last_keepalive_at" class="acc-keepalive-time" :title="`最近保活时间: ${acc.last_keepalive_at}`">
+              保活: {{ formatRelativeTime(acc.last_keepalive_at) }}
+            </span>
+            <span v-else class="acc-keepalive-time text-slate-400">
+              未保活
             </span>
           </div>
 
           <!-- 配额进度条 -->
-          <div class="acc-quota-row">
-            <span class="acc-quota-label">持有机数: {{ acc.bot_count }}/20</span>
-            <span class="acc-quota-rem" :class="{ 'text-amber-500': acc.remaining_quota === 0 }">
-              {{ acc.remaining_quota > 0 ? `余 ${acc.remaining_quota}` : '满额' }}
-            </span>
-          </div>
-          <div class="acc-progress-bar-bg">
-            <div
-              class="acc-progress-bar-fill"
-              :style="{ width: `${Math.min(100, (acc.bot_count / 20) * 100)}%` }"
-              :class="{ 'fill-limit': acc.bot_count >= 20 }"
-            ></div>
+          <div class="acc-quota-block">
+            <div class="acc-quota-row">
+              <span class="acc-quota-label">持有机数: <strong>{{ acc.bot_count }}</strong>/20</span>
+              <span class="acc-quota-rem" :class="{ 'text-amber-500': acc.remaining_quota === 0 }">
+                {{ acc.remaining_quota > 0 ? `余 ${acc.remaining_quota}` : '满额' }}
+              </span>
+            </div>
+            <div class="acc-progress-bar-bg">
+              <div
+                class="acc-progress-bar-fill"
+                :style="{ width: `${Math.min(100, (acc.bot_count / 20) * 100)}%` }"
+                :class="{ 'fill-limit': acc.bot_count >= 20 }"
+              ></div>
+            </div>
           </div>
 
-          <div class="account-card-bottom">
-            <span class="acc-type-text">
-              {{ acc.session_type === 'telethon_string' ? 'Telethon' : acc.session_type === 'session_file' ? '.session' : 'Pyrogram' }}
-              {{ acc.remark ? `· ${acc.remark}` : '' }}
-            </span>
-            <div class="acc-btn-group">
-              <el-button
-                size="small"
-                text
-                class="single-mint-quick-btn"
-                :icon="MagicStick"
-                @click="handleQuickSingleMint(acc)"
-                title="切换为此号单号精准独立铸造"
+          <!-- 属性标签行 (Session类型 + API状态 + 备注) -->
+          <div class="acc-tags-row">
+            <div class="acc-tags-left">
+              <span
+                v-if="acc.region"
+                class="acc-region-chip"
+                :title="`账号手机号归属地区: ${acc.region} (自动匹配该地区家宽住宅代理)`"
               >
-                单号铸造
-              </el-button>
-              <el-button
-                size="small"
-                text
-                class="check-account-btn"
-                :loading="checkAccountLoading === acc.id"
-                @click="handleCheckAccount(acc)"
-                title="在线检测账号健康度并刷新 Bot 数量"
+                🌐 {{ acc.region }}
+              </span>
+              <span class="acc-type-chip">
+                {{ acc.session_type === 'telethon_string' ? 'Telethon' : acc.session_type === 'session_file' ? '.session' : 'Pyrogram' }}
+              </span>
+              <span
+                v-if="acc.api_id && acc.has_api_hash"
+                class="acc-api-chip ready"
+                @click="handleOpenAccountDetail(acc)"
+                title="开发者 API 凭证 (api_id/api_hash) 已就绪，点击查看详情"
               >
-                检测
-              </el-button>
-              <el-button
-                size="small"
-                text
-                type="danger"
-                class="delete-account-btn"
-                :icon="Delete"
-                @click="handleDeleteAccount(acc)"
-                title="从资产池安全移除"
+                <el-icon><Check /></el-icon>
+                <span>API 就绪</span>
+              </span>
+              <span
+                v-else
+                class="acc-api-chip pending"
+                @click="handleOpenAccountDetail(acc)"
+                title="未配置专属开发者 API 凭证，点击前往 my.telegram.org 自动提取"
               >
-              </el-button>
+                <el-icon><Connection /></el-icon>
+                <span>API 待提取</span>
+              </span>
             </div>
+            <div v-if="acc.remark" class="acc-remark-text" :title="acc.remark">
+              {{ acc.remark }}
+            </div>
+          </div>
+
+          <!-- 底部操作按钮栏 (全宽等比分配，零溢出) -->
+          <div class="acc-card-actions">
+            <el-button
+              size="small"
+              class="acc-btn-action detail-account-btn"
+              :icon="View"
+              @click="handleOpenAccountDetail(acc)"
+              title="查看底层参数与凭证中心"
+            >
+              详情
+            </el-button>
+            <el-button
+              size="small"
+              class="acc-btn-action keepalive-account-btn"
+              :icon="Cpu"
+              :loading="singleKeepaliveLoading === acc.id"
+              @click="handleSingleKeepalive(acc)"
+              title="发起轻量 MTProto 保活握手"
+            >
+              保活
+            </el-button>
+            <el-button
+              size="small"
+              class="acc-btn-action single-mint-quick-btn"
+              :icon="MagicStick"
+              @click="handleQuickSingleMint(acc)"
+              title="切换为此号单号精准独立铸造"
+            >
+              单号
+            </el-button>
+            <el-button
+              size="small"
+              class="acc-btn-action check-account-btn"
+              :icon="RefreshRight"
+              :loading="checkAccountLoading === acc.id"
+              @click="handleCheckAccount(acc)"
+              title="在线检测账号健康度并刷新 Bot 数量"
+            >
+              检测
+            </el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              class="acc-btn-action delete-account-btn"
+              :icon="Delete"
+              @click="handleDeleteAccount(acc)"
+              title="从资产池安全移除"
+            />
           </div>
         </div>
       </div>
@@ -652,19 +769,19 @@
             />
           </el-form-item>
 
-          <el-form-item label="或批量上传 .session 文件 (支持多选)">
+          <el-form-item label="或批量上传 .session / .json 档案文件 (支持多选与配对)">
             <div class="batch-upload-dropzone" @click="triggerBatchFileInput">
               <input
                 ref="batchFileInputRef"
                 type="file"
-                accept=".session"
+                accept=".session,.json"
                 multiple
                 class="hidden-file-input"
                 @change="handleBatchFilesSelect"
               />
               <el-icon :size="28" class="upload-icon"><UploadFilled /></el-icon>
               <div class="upload-text">
-                {{ batchImportFiles.length > 0 ? `已选择 ${batchImportFiles.length} 个 .session 文件` : '点击选择或拖拽多个 .session 文件' }}
+                {{ batchImportFiles.length > 0 ? `已选择 ${batchImportFiles.length} 个文件 (.session / .json)` : '点击选择或拖拽多个 .session / .json 档案文件' }}
               </div>
             </div>
             <div v-if="batchImportFiles.length > 0" class="file-list-preview">
@@ -739,6 +856,501 @@
       </template>
     </el-dialog>
 
+
+    <!-- 协议号详细参数与 Session 凭证中心模态框 -->
+    <el-dialog
+      v-model="accountDetailDialogVisible"
+      title="协议号详细参数与 Session 凭证中心"
+      width="720px"
+      append-to-body
+      class="glass-dialog detail-dialog"
+    >
+      <div v-loading="detailLoading" class="dialog-body">
+        <div v-if="accountDetail" class="detail-content space-y-4">
+          <!-- 账号顶部横幅 -->
+          <div class="detail-header-card">
+            <div class="flex items-center justify-between flex-wrap gap-2">
+              <div class="flex items-center gap-2">
+                <span class="detail-phone font-mono font-bold text-lg text-slate-800">{{ accountDetail.account.phone }}</span>
+                <span v-if="accountDetail.metadata.first_name || accountDetail.metadata.username" class="detail-user-pill">
+                  {{ accountDetail.metadata.first_name }}
+                  <span v-if="accountDetail.metadata.username" class="text-sky-600">(@{{ accountDetail.metadata.username }})</span>
+                </span>
+                <span class="acc-status-tag" :class="`acc-status-${accountDetail.account.status}`">
+                  {{ formatAccountStatus(accountDetail.account.status) }}
+                </span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span v-if="accountDetail.metadata.dc_id" class="acc-dc-badge" :class="'dc-' + accountDetail.metadata.dc_id">
+                  {{ accountDetail.metadata.dc_name }}
+                </span>
+                <el-button
+                  size="small"
+                  :icon="RefreshRight"
+                  :loading="detailOnlineRefreshing"
+                  @click="handleRefreshAccountDetailOnline"
+                >
+                  在线刷新档案与Bot
+                </el-button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 核心 MTProto 参数指标网格 -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div class="detail-metric-card">
+              <div class="metric-label text-slate-500">Telegram UID</div>
+              <div class="metric-value font-mono font-bold text-slate-800">{{ accountDetail.metadata.tg_user_id || '未获取' }}</div>
+            </div>
+            <div class="detail-metric-card">
+              <div class="metric-label text-slate-500">数据中心 / 节点</div>
+              <div class="metric-value font-mono font-bold text-sky-600">{{ accountDetail.metadata.dc_ip || 'N/A' }}:{{ accountDetail.metadata.dc_port }}</div>
+            </div>
+            <div class="detail-metric-card">
+              <div class="metric-label text-slate-500">密钥指纹 (SHA256)</div>
+              <div class="metric-value font-mono font-bold text-emerald-600" :title="accountDetail.metadata.auth_key_fingerprint">{{ accountDetail.metadata.auth_key_fingerprint ? accountDetail.metadata.auth_key_fingerprint.slice(0, 10) + '...' : '256-bit' }}</div>
+            </div>
+            <div class="detail-metric-card">
+              <div class="metric-label text-slate-500">保活延迟 / 时间</div>
+              <div class="metric-value font-mono font-bold" :class="accountDetail.metadata.keepalive_ping_ms ? 'text-emerald-600' : 'text-slate-400'">
+                {{ accountDetail.metadata.keepalive_ping_ms ? accountDetail.metadata.keepalive_ping_ms + 'ms' : '未检测' }}
+              </div>
+            </div>
+          </div>
+
+          <!-- 附加信息（接码链接、备注、错误） -->
+          <div v-if="accountDetail.metadata.code_url || accountDetail.account.remark || accountDetail.metadata.last_error" class="detail-extra-box text-xs space-y-1 p-3 rounded-lg bg-slate-50 border border-slate-200">
+            <div v-if="accountDetail.metadata.code_url" class="flex items-center justify-between">
+              <span class="text-slate-500">接码链接:</span>
+              <span class="font-mono text-sky-700 truncate max-w-md ml-2">{{ accountDetail.metadata.code_url }}</span>
+              <el-button size="small" text :icon="CopyDocument" @click="copyToClipboard(accountDetail.metadata.code_url, '接码链接')">复制</el-button>
+            </div>
+            <div v-if="accountDetail.account.remark" class="flex items-center gap-2">
+              <span class="text-slate-500">账号备注:</span>
+              <span class="text-slate-700">{{ accountDetail.account.remark }}</span>
+            </div>
+            <div v-if="accountDetail.metadata.last_error" class="flex items-center gap-2 text-rose-600">
+              <span>最近异常:</span>
+              <span>{{ accountDetail.metadata.last_error }}</span>
+            </div>
+          </div>
+
+          <!-- Telegram 开发者 API 凭证 (api_id / api_hash) 专区 -->
+          <div class="api-credentials-section p-3 rounded-lg border border-slate-200 bg-slate-50/80">
+            <div class="flex items-center justify-between flex-wrap gap-2 mb-2">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-semibold text-slate-800 text-sm">Telegram 开发者 API 凭证</span>
+                <span v-if="accountDetail.metadata.api_id && accountDetail.metadata.api_hash" class="text-xs text-emerald-600 font-medium bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                  已就绪
+                </span>
+                <span v-else class="text-xs text-amber-600 font-medium bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                  未配置专属凭证
+                </span>
+                <span class="text-xs text-sky-700 bg-sky-50 px-2 py-0.5 rounded border border-sky-200 font-medium">
+                  🌐 归属地区: {{ accountDetail.metadata.region || accountDetail.account.region || 'US' }}
+                </span>
+              </div>
+              <div class="flex items-center gap-2">
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  :icon="Connection"
+                  :loading="fetchingApiCredentials"
+                  @click="handleFetchApiFromMyTelegram"
+                  title="通过协议号会话与同地区家宽住宅代理连接 my.telegram.org 自动提取或创建应用"
+                >
+                  {{ fetchingApiCredentials ? '正在通过家宽代理提取...' : '从 my.telegram.org 自动提取' }}
+                </el-button>
+                <el-button
+                  size="small"
+                  :icon="Edit"
+                  @click="openEditCredentialsModal"
+                >
+                  编辑凭证
+                </el-button>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div class="bg-white p-2.5 rounded border border-slate-200">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-slate-500 font-medium">App api_id:</span>
+                  <el-button
+                    v-if="accountDetail.metadata.api_id"
+                    size="small"
+                    text
+                    :icon="CopyDocument"
+                    @click="copyToClipboard(String(accountDetail.metadata.api_id), 'api_id')"
+                  >
+                    复制
+                  </el-button>
+                </div>
+                <div class="font-mono text-sm font-bold" :class="accountDetail.metadata.api_id ? 'text-slate-800' : 'text-slate-400 italic'">
+                  {{ accountDetail.metadata.api_id || '未配置' }}
+                </div>
+              </div>
+
+              <div class="bg-white p-2.5 rounded border border-slate-200">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="text-slate-500 font-medium">App api_hash:</span>
+                  <div class="flex items-center gap-1">
+                    <el-button
+                      v-if="accountDetail.metadata.api_hash"
+                      size="small"
+                      text
+                      @click="showApiHash = !showApiHash"
+                    >
+                      {{ showApiHash ? '隐藏' : '显示' }}
+                    </el-button>
+                    <el-button
+                      v-if="accountDetail.metadata.api_hash"
+                      size="small"
+                      text
+                      :icon="CopyDocument"
+                      @click="copyToClipboard(accountDetail.metadata.api_hash, 'api_hash')"
+                    >
+                      复制
+                    </el-button>
+                  </div>
+                </div>
+                <div class="font-mono text-sm font-bold truncate" :class="accountDetail.metadata.api_hash ? 'text-slate-800' : 'text-slate-400 italic'">
+                  {{ accountDetail.metadata.api_hash ? (showApiHash ? accountDetail.metadata.api_hash : maskApiHash(accountDetail.metadata.api_hash)) : '未配置' }}
+                </div>
+              </div>
+            </div>
+
+            <div v-if="accountDetail.metadata.api_id && accountDetail.metadata.api_hash" class="mt-2 flex justify-end">
+              <el-button
+                size="small"
+                text
+                class="text-sky-600"
+                :icon="CopyDocument"
+                @click="copyToClipboard(`${accountDetail.metadata.api_id}:${accountDetail.metadata.api_hash}`, 'api_id:api_hash 组合')"
+              >
+                一键复制 api_id:api_hash 组合
+              </el-button>
+            </div>
+
+            <!-- 家宽代理策略与提示 -->
+            <div class="mt-2.5 pt-2 border-t border-slate-200/80 text-xs">
+              <div class="flex items-center justify-between flex-wrap gap-2">
+                <div class="flex items-center gap-1.5 text-slate-600">
+                  <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span>
+                    家宽住宅代理: 系统将动态按 <strong>{{ accountDetail.metadata.region || accountDetail.account.region || 'US' }}</strong> 地区获取 10分钟粘性住宅 IP 穿透风控
+                  </span>
+                </div>
+                <el-button
+                  size="small"
+                  text
+                  class="text-sky-600 p-0 h-auto font-normal"
+                  @click="showCustomProxyInput = !showCustomProxyInput"
+                >
+                  {{ showCustomProxyInput ? '收起代理配置' : '自定义家宽代理' }}
+                </el-button>
+              </div>
+
+              <div v-if="showCustomProxyInput" class="mt-2 p-2.5 rounded bg-white border border-slate-200">
+                <div class="text-slate-600 mb-1 font-medium flex items-center justify-between">
+                  <span>家宽住宅代理提取 URL (支持 <code>{region}</code> 或 <code>region=US</code> 占位符):</span>
+                  <el-button size="small" text class="text-xs p-0 text-slate-400 hover:text-slate-600" @click="resetCustomProxyUrl">
+                    恢复默认
+                  </el-button>
+                </div>
+                <el-input
+                  v-model="customProxyApiUrl"
+                  size="small"
+                  placeholder="https://proxy-api.example.com/api?region=US&num=1&time=10&format=1&type=txt"
+                  clearable
+                />
+                <div class="text-[11px] text-slate-400 mt-1">
+                  提取时系统将自动将 URL 中的 region 替换为该协议号对应的国家代码 (如 region={{ accountDetail.metadata.region || accountDetail.account.region || 'US' }})。
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Telethon 1.x StringSession 生成与导出 -->
+          <div class="session-section">
+            <div class="session-section-header">
+              <div class="flex items-center gap-2">
+                <span class="font-semibold text-slate-800 text-sm">Telethon 1.x StringSession</span>
+                <span class="text-xs text-sky-600 font-mono bg-sky-50 px-2 py-0.5 rounded border border-sky-200">以 "1" 开头 · 标准格式</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <el-button size="small" text @click="showTelethonSession = !showTelethonSession">
+                  {{ showTelethonSession ? '隐藏密文' : '显示明文' }}
+                </el-button>
+                <el-button size="small" type="primary" :icon="CopyDocument" @click="copyToClipboard(accountDetail.sessions.telethon_session_string, 'Telethon Session')">
+                  一键复制 Telethon Session
+                </el-button>
+              </div>
+            </div>
+            <el-input
+              :model-value="showTelethonSession ? accountDetail.sessions.telethon_session_string : maskSessionString(accountDetail.sessions.telethon_session_string)"
+              type="textarea"
+              :rows="3"
+              readonly
+              class="font-mono text-xs session-textarea"
+            />
+          </div>
+
+          <!-- Pyrogram 2.x Session String 导出 -->
+          <div class="session-section">
+            <div class="session-section-header">
+              <div class="flex items-center gap-2">
+                <span class="font-semibold text-slate-800 text-sm">Pyrogram 2.x Session String</span>
+                <span class="text-xs text-purple-600 font-mono bg-purple-50 px-2 py-0.5 rounded border border-purple-200">Pyrogram 兼容格式</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <el-button size="small" text @click="showPyrogramSession = !showPyrogramSession">
+                  {{ showPyrogramSession ? '隐藏密文' : '显示明文' }}
+                </el-button>
+                <el-button size="small" type="primary" :icon="CopyDocument" @click="copyToClipboard(accountDetail.sessions.pyrogram_session_string, 'Pyrogram Session')">
+                  一键复制 Pyrogram Session
+                </el-button>
+              </div>
+            </div>
+            <el-input
+              :model-value="showPyrogramSession ? accountDetail.sessions.pyrogram_session_string : maskSessionString(accountDetail.sessions.pyrogram_session_string)"
+              type="textarea"
+              :rows="3"
+              readonly
+              class="font-mono text-xs session-textarea"
+            />
+          </div>
+
+          <!-- 名下已创建的 Bot 列表 -->
+          <div v-if="accountDetail.bots && accountDetail.bots.length > 0" class="bots-list-section">
+            <div class="font-semibold text-slate-800 text-xs mb-2">名下 @BotFather 机器人 (共 {{ accountDetail.bots.length }} 个):</div>
+            <div class="flex flex-wrap gap-2">
+              <span v-for="b in accountDetail.bots" :key="b.username" class="bot-chip">
+                @{{ b.username }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="accountDetailDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 手动编辑 API 凭证模态框 -->
+    <el-dialog
+      v-model="editCredentialsDialogVisible"
+      title="配置/编辑 Telegram API 开发者凭证"
+      width="480px"
+      append-to-body
+      class="glass-dialog"
+    >
+      <el-form label-position="top">
+        <el-form-item label="App api_id (纯数字)">
+          <el-input
+            v-model="editCredentialsForm.api_id"
+            placeholder="例如: 21234567"
+            clearable
+          />
+        </el-form-item>
+        <el-form-item label="App api_hash (32位十六进制字符串)">
+          <el-input
+            v-model="editCredentialsForm.api_hash"
+            placeholder="例如: b18441a1ff607e10a989891a5462e627"
+            clearable
+          />
+        </el-form-item>
+        <el-form-item label="备注说明 (可选)">
+          <el-input
+            v-model="editCredentialsForm.remark"
+            placeholder="账号备注说明"
+            clearable
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editCredentialsDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          class="primary-glow-btn"
+          :loading="savingCredentials"
+          @click="handleSaveCredentials"
+        >
+          保存凭证
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 批量导出 Telethon Session 模态框 -->
+    <el-dialog
+      v-model="batchExportDialogVisible"
+      title="批量导出 Telethon 1.x StringSession 凭证"
+      width="680px"
+      append-to-body
+      class="glass-dialog"
+    >
+      <div v-loading="batchExportLoading" class="dialog-body">
+        <p class="dialog-tip">
+          已将纳管协议号统一转换为 Telethon 标准 StringSession 格式（以 <code>1</code> 开头，每行一个），可用于第三方 Telethon 脚本、客户端或跨环境迁移。
+        </p>
+        <div class="flex items-center justify-between mb-3 bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+          <span class="text-xs text-slate-700 font-medium">导出凭证格式:</span>
+          <el-radio-group v-model="batchExportFormat" size="small" @change="updateBatchExportText">
+            <el-radio-button label="session">纯 Session (手机号 | Session)</el-radio-button>
+            <el-radio-button label="full">完整凭证 (手机号 | api_id | api_hash | Session)</el-radio-button>
+          </el-radio-group>
+        </div>
+        <el-input
+          v-model="batchExportText"
+          type="textarea"
+          :rows="12"
+          readonly
+          class="font-mono text-xs"
+        />
+      </div>
+      <template #footer>
+        <el-button @click="batchExportDialogVisible = false">关闭</el-button>
+        <el-button :icon="Download" @click="downloadExportTextFile">保存为 .txt 文件</el-button>
+        <el-button type="primary" :icon="CopyDocument" @click="copyToClipboard(batchExportText, '全部 Telethon Session')">一键复制全部</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 自动保活配置模态框 -->
+    <el-dialog
+      v-model="keepaliveConfigDialogVisible"
+      title="Telegram 协议号后台定时自动保活设置"
+      width="520px"
+      append-to-body
+      class="glass-dialog"
+    >
+      <div v-loading="keepaliveConfigLoading" class="dialog-body space-y-4">
+        <p class="dialog-tip">
+          协议号长期静默未与 Telegram 服务器通信可能导致会话被注销或账号休眠。启用后后台 Worker 将定时执行轻量 MTProto 握手保持活跃，并在遇到断线时自动根据接码链接续登。
+        </p>
+        <el-form label-position="left" label-width="140px">
+          <el-form-item label="定时自动保活开关">
+            <el-switch v-model="keepaliveConfigForm.enabled" active-text="开启守护" inactive-text="关闭" />
+          </el-form-item>
+          <el-form-item label="保活巡检周期">
+            <el-select v-model="keepaliveConfigForm.interval_hours" style="width: 100%">
+              <el-option :value="6" label="每 6 小时巡检一次 (推荐)" />
+              <el-option :value="12" label="每 12 小时巡检一次 (默认)" />
+              <el-option :value="24" label="每 24 小时巡检一次" />
+              <el-option :value="48" label="每 48 小时巡检一次" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="保存时立即触发">
+            <el-checkbox v-model="keepaliveConfigForm.trigger_now">保存后立即触发一次全量保活</el-checkbox>
+          </el-form-item>
+        </el-form>
+
+        <div v-if="keepaliveConfigForm.last_summary" class="text-xs p-3 rounded bg-slate-50 border border-slate-200">
+          <div class="font-semibold text-slate-700 mb-1">最近一次巡检汇总:</div>
+          <div class="text-slate-600">时间: {{ keepaliveConfigForm.last_summary.run_at }}</div>
+          <div class="text-slate-600">
+            成功: <span class="text-emerald-600 font-bold">{{ keepaliveConfigForm.last_summary.success_count }}</span> ·
+            失败: <span class="text-rose-600 font-bold">{{ keepaliveConfigForm.last_summary.failed_count }}</span> ·
+            平均延迟: <span class="text-sky-600 font-bold">{{ keepaliveConfigForm.last_summary.avg_ping_ms }}ms</span>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="keepaliveConfigDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="savingKeepaliveConfig" @click="handleSaveKeepaliveConfig">保存设置</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 批量提取 Telegram 开发者 API 模态框 -->
+    <el-dialog
+      v-model="batchFetchApiDialogVisible"
+      title="批量提取 Telegram 开发者 API 凭证 (地区匹配家宽代理)"
+      width="680px"
+      append-to-body
+      class="glass-dialog"
+    >
+      <div class="dialog-body space-y-4">
+        <p class="dialog-tip">
+          <code>my.telegram.org</code> 对机房 IP 与异地 IP 存在严格风控限制。系统将根据每个协议号的国际电话区号自动识别所属国家地区（如 <code>+1</code> ➔ <code>US</code>、<code>+95</code> ➔ <code>MM</code>、<code>+44</code> ➔ <code>GB</code>），并向家宽代理接口动态获取对应地区的 10 分钟粘性住宅 IP，全程穿透官网风控。
+        </p>
+
+        <el-form label-position="top">
+          <el-form-item label="家宽住宅代理提取 API 链接:">
+            <el-input
+              v-model="batchFetchApiProxyUrl"
+              placeholder="https://proxy-api.example.com/api?region=US&num=1&time=10&format=1&type=txt"
+              clearable
+            >
+              <template #append>
+                <el-button @click="resetBatchFetchApiProxyUrl">
+                  恢复默认
+                </el-button>
+              </template>
+            </el-input>
+            <div class="text-xs text-slate-400 mt-1">
+              无论配置固定 <code>region=US</code> 还是含 <code>{region}</code> 占位符，系统提取时均会自动替换为每个账号真实的地区代码。
+            </div>
+          </el-form-item>
+
+          <el-form-item label="提取执行范围:">
+            <el-radio-group v-model="batchFetchApiScope">
+              <el-radio label="missing">
+                仅提取尚未配置专属 API 的协议号 (推荐，共 {{ missingApiAccountCount }} 个)
+              </el-radio>
+              <el-radio label="all">
+                提取全部有效协议号 (重新提取并覆盖，共 {{ activeAccountCount }} 个)
+              </el-radio>
+            </el-radio-group>
+          </el-form-item>
+        </el-form>
+
+        <div v-if="batchFetchApiResults && batchFetchApiResults.length > 0" class="border border-slate-200 rounded-lg p-3 bg-slate-50/80 max-h-60 overflow-y-auto">
+          <div class="text-xs font-semibold text-slate-700 mb-2 flex items-center justify-between">
+            <span>提取执行结果明细:</span>
+            <span>
+              成功: <strong class="text-emerald-600">{{ batchFetchApiSummary.succeeded }}</strong> ·
+              失败: <strong class="text-rose-600">{{ batchFetchApiSummary.failed }}</strong>
+            </span>
+          </div>
+          <div class="space-y-1.5 text-xs">
+            <div
+              v-for="r in batchFetchApiResults"
+              :key="r.account_id"
+              class="flex items-center justify-between p-2 rounded bg-white border border-slate-200"
+            >
+              <div class="flex items-center gap-2">
+                <span class="font-mono font-medium">{{ r.phone }}</span>
+                <span v-if="r.region" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
+                  {{ r.region }}
+                </span>
+                <span v-if="r.proxy_used" class="text-[11px] text-slate-400 font-mono">
+                  [{{ r.proxy_used }}]
+                </span>
+              </div>
+              <div>
+                <span v-if="r.success" class="text-emerald-600 font-medium">
+                  ✅ 成功 (api_id: {{ r.api_id }})
+                </span>
+                <span v-else class="text-rose-600" :title="r.error">
+                  ❌ {{ r.error || '提取失败' }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="batchFetchApiDialogVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :icon="Connection"
+          :loading="batchFetchingApi"
+          @click="handleStartBatchFetchApi"
+        >
+          {{ batchFetchingApi ? '正在按地区调度家宽代理批量提取...' : '开始批量提取' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
@@ -760,6 +1372,13 @@ import {
   Delete,
   Warning,
   Loading,
+  View,
+  Cpu,
+  Download,
+  Setting,
+  CopyDocument,
+  Edit,
+  Check,
 } from "@element-plus/icons-vue"
 import {
   getStatus,
@@ -773,8 +1392,18 @@ import {
   getImportAccountTaskStatus,
   deleteProtocolAccount,
   checkProtocolAccount,
+  getProtocolAccountDetail,
+  keepaliveSingleProtocolAccount,
+  keepaliveAllProtocolAccounts,
+  getKeepaliveConfig,
+  updateKeepaliveConfig,
+  getApiProxyConfig,
+  fetchProtocolAccountApi,
+  batchFetchProtocolAccountApi,
+  updateProtocolAccountCredentials,
   type BotFatherTaskStatus,
   type ProtocolAccount,
+  type ProtocolAccountDetail,
   type BatchImportAccountsResult,
 } from "@/api"
 import type { BotDetail, ChannelInfo } from "@/types/api"
@@ -1256,7 +1885,7 @@ async function fetchTaskStatus() {
 async function fetchAllData() {
   loading.value = true
   try {
-    await Promise.all([fetchClusterStatus(), fetchTaskStatus(), fetchAccounts()])
+    await Promise.all([fetchClusterStatus(), fetchTaskStatus(), fetchAccounts(), loadProxyConfig()])
   } finally {
     loading.value = false
   }
@@ -1414,6 +2043,410 @@ function stopPolling() {
     clearInterval(importPollTimer)
     importPollTimer = null
   }
+}
+
+
+// ================= 协议号详情、Session 生成与保活状态 =================
+const accountDetailDialogVisible = ref(false)
+const detailLoading = ref(false)
+const detailOnlineRefreshing = ref(false)
+const accountDetail = ref<ProtocolAccountDetail | null>(null)
+const showTelethonSession = ref(false)
+const showPyrogramSession = ref(false)
+const showApiHash = ref(false)
+const fetchingApiCredentials = ref(false)
+const editCredentialsDialogVisible = ref(false)
+const savingCredentials = ref(false)
+const editCredentialsForm = ref({
+  api_id: '',
+  api_hash: '',
+  remark: '',
+})
+const batchExportFormat = ref<'session' | 'full'>('session')
+const batchExportCachedDetails = ref<Record<number, any>>({})
+
+function maskApiHash(hash: string): string {
+  if (!hash) return ''
+  if (hash.length >= 8) return `${hash.slice(0, 4)}****${hash.slice(-4)}`
+  return '***'
+}
+
+const defaultProxyApiUrl = ref("")
+const customProxyApiUrl = ref("")
+const showCustomProxyInput = ref(false)
+const batchFetchApiDialogVisible = ref(false)
+const batchFetchingApi = ref(false)
+const batchFetchApiProxyUrl = ref("")
+const batchFetchApiScope = ref<'missing' | 'all'>('missing')
+const batchFetchApiResults = ref<any[] | null>(null)
+
+const missingApiAccountCount = computed(() =>
+  protocolAccounts.value.filter(a => !(a.api_id && a.has_api_hash) && a.status !== 'invalid').length
+)
+const activeAccountCount = computed(() =>
+  protocolAccounts.value.filter(a => a.status !== 'invalid').length
+)
+const batchFetchApiSummary = computed(() => {
+  if (!batchFetchApiResults.value) return { succeeded: 0, failed: 0 }
+  return {
+    succeeded: batchFetchApiResults.value.filter(r => r.success).length,
+    failed: batchFetchApiResults.value.filter(r => !r.success).length,
+  }
+})
+
+async function loadProxyConfig() {
+  try {
+    const res = await getApiProxyConfig()
+    if (res.success && res.data) {
+      defaultProxyApiUrl.value = res.data.proxy_api_url || res.data.default_url || ""
+      if (!customProxyApiUrl.value && defaultProxyApiUrl.value) {
+        customProxyApiUrl.value = defaultProxyApiUrl.value
+      }
+      if (!batchFetchApiProxyUrl.value && defaultProxyApiUrl.value) {
+        batchFetchApiProxyUrl.value = defaultProxyApiUrl.value
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+function resetCustomProxyUrl() {
+  customProxyApiUrl.value = defaultProxyApiUrl.value
+}
+
+function resetBatchFetchApiProxyUrl() {
+  batchFetchApiProxyUrl.value = defaultProxyApiUrl.value || customProxyApiUrl.value
+}
+
+function openBatchFetchApiModal() {
+  batchFetchApiDialogVisible.value = true
+  batchFetchApiResults.value = null
+  batchFetchApiProxyUrl.value = customProxyApiUrl.value || defaultProxyApiUrl.value || ""
+}
+
+async function handleStartBatchFetchApi() {
+  batchFetchingApi.value = true
+  try {
+    ElMessage.info("开始按协议号地区匹配家宽代理批量提取 API 凭证...")
+    const res = await batchFetchProtocolAccountApi({
+      only_missing: batchFetchApiScope.value === 'missing',
+      proxy_api_url: batchFetchApiProxyUrl.value.trim() || undefined,
+    })
+    if (res.success && res.data) {
+      batchFetchApiResults.value = res.data.results
+      ElMessage.success(`批量提取完成！成功: ${res.data.succeeded} 个，失败: ${res.data.failed} 个`)
+      await fetchAccounts()
+    } else {
+      ElMessage.error(res.error || "批量提取执行失败")
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || err?.message || "批量提取异常")
+  } finally {
+    batchFetchingApi.value = false
+  }
+}
+
+async function handleFetchApiFromMyTelegram() {
+  if (!accountDetail.value) return
+  const accId = accountDetail.value.account.id
+  const targetRegion = accountDetail.value.metadata.region || accountDetail.value.account.region || 'US'
+  fetchingApiCredentials.value = true
+  try {
+    ElMessage.info(`正在通过 ${targetRegion} 地区匹配家宽住宅代理连接 my.telegram.org 并拦截 777000 官方验证码...`)
+    const res = await fetchProtocolAccountApi(accId, customProxyApiUrl.value.trim() || undefined)
+    if (res.success && res.data) {
+      accountDetail.value = res.data.detail
+      const usedProxy = res.data.proxy_used ? ` (代理: ${res.data.proxy_used})` : ''
+      ElMessage.success(`成功通过 ${res.data.region || targetRegion} 家宽代理提取 API 凭证！api_id: ${res.data.api_id}${usedProxy}`)
+      await fetchAccounts()
+    } else {
+      ElMessage.error(res.error || "从官网提取凭证失败")
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || err?.message || "提取 API 凭证异常")
+  } finally {
+    fetchingApiCredentials.value = false
+  }
+}
+
+function openEditCredentialsModal() {
+  if (!accountDetail.value) return
+  editCredentialsForm.value = {
+    api_id: accountDetail.value.metadata.api_id ? String(accountDetail.value.metadata.api_id) : '',
+    api_hash: accountDetail.value.metadata.api_hash || '',
+    remark: accountDetail.value.account.remark || '',
+  }
+  editCredentialsDialogVisible.value = true
+}
+
+async function handleSaveCredentials() {
+  if (!accountDetail.value) return
+  const accId = accountDetail.value.account.id
+  savingCredentials.value = true
+  try {
+    const rawId = editCredentialsForm.value.api_id.trim()
+    const apiIdVal = rawId ? parseInt(rawId, 10) : null
+    const res = await updateProtocolAccountCredentials(accId, {
+      api_id: apiIdVal,
+      api_hash: editCredentialsForm.value.api_hash.trim() || null,
+      remark: editCredentialsForm.value.remark.trim() || undefined,
+    })
+    if (res.success && res.data) {
+      accountDetail.value = res.data
+      editCredentialsDialogVisible.value = false
+      ElMessage.success("开发者 API 凭证保存成功！")
+      await fetchAccounts()
+    } else {
+      ElMessage.error(res.error || "保存凭证失败")
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || err?.message || "保存凭证异常")
+  } finally {
+    savingCredentials.value = false
+  }
+}
+
+const singleKeepaliveLoading = ref<number | null>(null)
+const keepaliveAllLoading = ref(false)
+
+const batchExportDialogVisible = ref(false)
+const batchExportLoading = ref(false)
+const batchExportText = ref("")
+
+const keepaliveConfigDialogVisible = ref(false)
+const keepaliveConfigLoading = ref(false)
+const savingKeepaliveConfig = ref(false)
+const keepaliveConfigForm = ref({
+  enabled: true,
+  interval_hours: 12,
+  trigger_now: false,
+  last_summary: null as any,
+})
+
+async function handleOpenAccountDetail(acc: ProtocolAccount) {
+  accountDetailDialogVisible.value = true
+  detailLoading.value = true
+  showTelethonSession.value = false
+  showPyrogramSession.value = false
+  try {
+    const res = await getProtocolAccountDetail(acc.id, false)
+    if (res.success && res.data) {
+      accountDetail.value = res.data
+      if (res.data.metadata.proxy_api_url) {
+        customProxyApiUrl.value = res.data.metadata.proxy_api_url
+      }
+    } else {
+      ElMessage.error(res.error || "获取协议号详情失败")
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || err?.message || "获取协议号详情异常")
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+async function handleRefreshAccountDetailOnline() {
+  if (!accountDetail.value) return
+  detailOnlineRefreshing.value = true
+  try {
+    const res = await getProtocolAccountDetail(accountDetail.value.account.id, true)
+    if (res.success && res.data) {
+      accountDetail.value = res.data
+      ElMessage.success("账号在线档案与名下 Bot 列表刷新成功！")
+      await fetchAccounts()
+    } else {
+      ElMessage.error(res.error || "在线刷新失败")
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || err?.message || "在线刷新异常")
+  } finally {
+    detailOnlineRefreshing.value = false
+  }
+}
+
+async function handleSingleKeepalive(acc: ProtocolAccount) {
+  singleKeepaliveLoading.value = acc.id
+  try {
+    const res = await keepaliveSingleProtocolAccount(acc.id, false)
+    if (res.success && res.data?.success) {
+      ElMessage.success(`协议号 ${acc.phone} 保活成功！延迟: ${res.data.ping_ms}ms`)
+      await fetchAccounts()
+      if (accountDetailDialogVisible.value && accountDetail.value?.account.id === acc.id) {
+        await handleOpenAccountDetail(acc)
+      }
+    } else {
+      ElMessage.error(res.data?.error || res.error || "保活握手未成功")
+      await fetchAccounts()
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || err?.message || "保活请求异常")
+  } finally {
+    singleKeepaliveLoading.value = null
+  }
+}
+
+async function handleKeepaliveAll() {
+  keepaliveAllLoading.value = true
+  try {
+    ElMessage.info("已启动协议号资产池全量保活巡检，正在错峰向 Telegram 握手...")
+    const res = await keepaliveAllProtocolAccounts(undefined, false)
+    if (res.success && res.data) {
+      const d = res.data
+      ElMessage.success(
+        `全量保活完成！成功: ${d.success_count} 个，失败: ${d.failed_count} 个，平均延迟: ${d.avg_ping_ms}ms`
+      )
+      await fetchAccounts()
+    } else {
+      ElMessage.error(res.error || "全量保活执行失败")
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || err?.message || "全量保活请求异常")
+  } finally {
+    keepaliveAllLoading.value = false
+  }
+}
+
+function updateBatchExportText() {
+  const lines: string[] = []
+  for (const acc of protocolAccounts.value) {
+    const detail = batchExportCachedDetails.value[acc.id]
+    if (detail?.sessions?.telethon_session_string) {
+      if (batchExportFormat.value === 'full') {
+        const aId = detail.metadata.api_id || ''
+        const aHash = detail.metadata.api_hash || ''
+        lines.push(`${acc.phone} | ${aId} | ${aHash} | ${detail.sessions.telethon_session_string}`)
+      } else {
+        lines.push(`${acc.phone} | ${detail.sessions.telethon_session_string}`)
+      }
+    }
+  }
+  batchExportText.value = lines.join("\n")
+}
+
+async function openBatchExportTelethonModal() {
+  batchExportDialogVisible.value = true
+  batchExportLoading.value = true
+  batchExportText.value = ""
+  try {
+    for (const acc of protocolAccounts.value) {
+      if (!batchExportCachedDetails.value[acc.id]) {
+        try {
+          const detail = await getProtocolAccountDetail(acc.id, false)
+          if (detail.success && detail.data) {
+            batchExportCachedDetails.value[acc.id] = detail.data
+          }
+        } catch (e) {
+          // ignore single account detail fail
+        }
+      }
+    }
+    updateBatchExportText()
+  } finally {
+    batchExportLoading.value = false
+  }
+}
+
+function downloadExportTextFile() {
+  if (!batchExportText.value) return
+  const blob = new Blob([batchExportText.value], { type: "text/plain;charset=utf-8" })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = url
+  link.download = `mistrelay_telethon_sessions_${new Date().toISOString().slice(0, 10)}.txt`
+  link.click()
+  URL.revokeObjectURL(url)
+  ElMessage.success("已导出为 .txt 文件")
+}
+
+async function openKeepaliveConfigModal() {
+  keepaliveConfigDialogVisible.value = true
+  keepaliveConfigLoading.value = true
+  try {
+    const res = await getKeepaliveConfig()
+    if (res.success && res.data) {
+      keepaliveConfigForm.value.enabled = res.data.enabled
+      keepaliveConfigForm.value.interval_hours = res.data.interval_hours || 12
+      keepaliveConfigForm.value.trigger_now = false
+      keepaliveConfigForm.value.last_summary = res.data.last_summary
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.message || "读取保活配置失败")
+  } finally {
+    keepaliveConfigLoading.value = false
+  }
+}
+
+async function handleSaveKeepaliveConfig() {
+  savingKeepaliveConfig.value = true
+  try {
+    const res = await updateKeepaliveConfig({
+      enabled: keepaliveConfigForm.value.enabled,
+      interval_hours: keepaliveConfigForm.value.interval_hours,
+      trigger_now: keepaliveConfigForm.value.trigger_now,
+    })
+    if (res.success) {
+      ElMessage.success("保活配置已成功保存！")
+      keepaliveConfigDialogVisible.value = false
+    } else {
+      ElMessage.error(res.error || "保存保活配置失败")
+    }
+  } catch (err: any) {
+    ElMessage.error(err?.message || "保存保活配置异常")
+  } finally {
+    savingKeepaliveConfig.value = false
+  }
+}
+
+function maskSessionString(str?: string): string {
+  if (!str) return ""
+  if (str.length <= 24) return "***"
+  return `${str.slice(0, 8)}...${str.slice(-8)} (长度 ${str.length} 字符)`
+}
+
+function formatRelativeTime(isoStr?: string | null): string {
+  if (!isoStr) return "从未"
+  try {
+    const target = new Date(isoStr).getTime()
+    const now = Date.now()
+    const diff = Math.max(0, Math.floor((now - target) / 1000))
+    if (diff < 60) return `${diff}秒前`
+    if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`
+    if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`
+    return `${Math.floor(diff / 86400)}天前`
+  } catch {
+    return isoStr
+  }
+}
+
+function copyToClipboard(text: string, label: string) {
+  if (!text) {
+    ElMessage.warning("内容为空，无法复制")
+    return
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      ElMessage.success(`${label}已复制到剪贴板！`)
+    }).catch(() => {
+      fallbackCopy(text, label)
+    })
+  } else {
+    fallbackCopy(text, label)
+  }
+}
+
+function fallbackCopy(text: string, label: string) {
+  const ta = document.createElement("textarea")
+  ta.value = text
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand("copy")
+    ElMessage.success(`${label}已复制到剪贴板！`)
+  } catch {
+    ElMessage.error("复制失败，请手动选取文本复制")
+  }
+  document.body.removeChild(ta)
 }
 
 onMounted(async () => {
@@ -3103,20 +4136,24 @@ onUnmounted(() => {
 
 .account-pool-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  gap: 16px;
   margin-top: 14px;
 }
 
 .account-item-card {
-  padding: 12px 14px;
+  padding: 14px 16px;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(226, 232, 240, 0.9);
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(226, 232, 240, 0.95);
   transition: all 0.25s ease;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03);
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .account-item-card:hover {
@@ -3127,7 +4164,7 @@ onUnmounted(() => {
 
 .account-item-card.active-selected {
   border-color: rgba(255, 117, 151, 0.55);
-  background: linear-gradient(145deg, rgba(255, 245, 247, 0.75), rgba(240, 249, 255, 0.8));
+  background: linear-gradient(145deg, rgba(255, 245, 247, 0.85), rgba(240, 249, 255, 0.9));
 }
 
 .account-card-top {
@@ -3135,13 +4172,84 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: 28px;
+  flex-wrap: nowrap;
+}
+
+.account-card-top .cached-phone-pill {
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border-radius: 6px;
+}
+
+.acc-top-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.acc-dc-badge,
+.acc-ping-badge,
+.acc-status-tag {
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  flex-shrink: 0 !important;
+}
+
+.acc-dc-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1.2;
+  background: rgba(14, 165, 233, 0.12);
+  color: #0284c7;
+  border: 1px solid rgba(14, 165, 233, 0.25);
+  display: inline-flex;
+  align-items: center;
+}
+
+.acc-dc-badge.dc-1 { background: rgba(59, 130, 246, 0.12); color: #2563eb; border-color: rgba(59, 130, 246, 0.25); }
+.acc-dc-badge.dc-2, .acc-dc-badge.dc-4 { background: rgba(16, 185, 129, 0.12); color: #059669; border-color: rgba(16, 185, 129, 0.25); }
+.acc-dc-badge.dc-3 { background: rgba(168, 85, 247, 0.12); color: #9333ea; border-color: rgba(168, 85, 247, 0.25); }
+.acc-dc-badge.dc-5 { background: rgba(245, 158, 11, 0.12); color: #d97706; border-color: rgba(245, 158, 11, 0.25); }
+
+.acc-ping-badge {
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1.2;
+  display: inline-flex;
+  align-items: center;
+}
+
+.acc-ping-badge.ping-fast {
+  background: rgba(34, 197, 94, 0.12);
+  color: #16a34a;
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
+.acc-ping-badge.ping-slow {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.25);
 }
 
 .acc-status-tag {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  line-height: 1.2;
+  display: inline-flex;
+  align-items: center;
 }
 
 .acc-status-active {
@@ -3169,16 +4277,53 @@ onUnmounted(() => {
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
+.acc-meta-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  background: rgba(241, 245, 249, 0.7);
+  color: #64748b;
+  min-height: 26px;
+}
+
+.acc-user-display {
+  display: inline-flex;
+  align-items: center;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.acc-keepalive-time {
+  font-size: 10.5px;
+  color: #64748b;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.acc-quota-block {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
 .acc-quota-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 11.5px;
   color: #475569;
 }
 
 .acc-quota-rem {
   font-weight: 600;
+  font-size: 11px;
   color: #0284c7;
 }
 
@@ -3186,7 +4331,7 @@ onUnmounted(() => {
   width: 100%;
   height: 6px;
   border-radius: 999px;
-  background: rgba(226, 232, 240, 0.8);
+  background: rgba(226, 232, 240, 0.85);
   overflow: hidden;
 }
 
@@ -3201,42 +4346,172 @@ onUnmounted(() => {
   background: linear-gradient(90deg, #f59e0b, #ef4444);
 }
 
-.account-card-bottom {
+.acc-tags-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-top: 4px;
-  border-top: 1px dashed rgba(226, 232, 240, 0.8);
+  gap: 8px;
+  min-height: 22px;
 }
 
-.acc-type-text {
-  font-size: 11px;
+.acc-tags-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.acc-type-chip {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1.5px 6px;
+  border-radius: 4px;
+  background: rgba(241, 245, 249, 0.95);
   color: #64748b;
+  border: 1px solid rgba(203, 213, 225, 0.8);
+  white-space: nowrap;
+}
+
+.acc-region-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1.5px 7px;
+  border-radius: 9999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: rgba(14, 165, 233, 0.1);
+  color: #0284c7;
+  border: 1px solid rgba(14, 165, 233, 0.25);
+  white-space: nowrap;
+}
+
+.acc-api-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1.5px 7px;
+  border-radius: 9999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.acc-api-chip.ready {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.acc-api-chip.ready:hover {
+  background: rgba(16, 185, 129, 0.2);
+}
+
+.acc-api-chip.pending {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.acc-api-chip.pending:hover {
+  background: rgba(245, 158, 11, 0.22);
+  transform: scale(1.02);
+}
+
+.acc-remark-text {
+  font-size: 11px;
+  color: #94a3b8;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 120px;
 }
 
-.acc-btn-group {
+.acc-card-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 5px;
+  width: 100%;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(226, 232, 240, 0.9);
+  box-sizing: border-box;
 }
 
-.single-mint-quick-btn {
-  color: #db2777 !important;
-  font-weight: 600;
-  padding: 0 4px;
+.acc-card-actions :deep(.el-button),
+.acc-card-actions .el-button {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  height: 26px !important;
+  font-size: 11px !important;
+  border-radius: 6px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 2px !important;
+  padding: 0 4px !important;
+  box-sizing: border-box !important;
+  border: 1px solid rgba(226, 232, 240, 0.85) !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  color: #475569 !important;
+  transition: all 0.2s ease !important;
 }
 
-.check-account-btn {
+.acc-card-actions :deep(.acc-btn-action) {
+  flex: 1 1 0% !important;
+  min-width: 0 !important;
+}
+
+.acc-card-actions :deep(.delete-account-btn) {
+  flex: 0 0 28px !important;
+  width: 28px !important;
+  padding: 0 !important;
+  color: #ef4444 !important;
+  border-color: rgba(239, 68, 68, 0.25) !important;
+}
+
+.acc-card-actions :deep(.delete-account-btn:hover) {
+  background: rgba(254, 242, 242, 0.95) !important;
+  border-color: rgba(239, 68, 68, 0.45) !important;
+  color: #dc2626 !important;
+}
+
+.acc-card-actions :deep(.detail-account-btn) {
   color: #0284c7 !important;
-  padding: 0 4px;
+  border-color: rgba(56, 189, 248, 0.3) !important;
+}
+.acc-card-actions :deep(.detail-account-btn:hover) {
+  background: rgba(240, 249, 255, 0.95) !important;
+  border-color: rgba(56, 189, 248, 0.55) !important;
 }
 
-.delete-account-btn {
-  padding: 0 4px;
+.acc-card-actions :deep(.keepalive-account-btn) {
+  color: #059669 !important;
+  border-color: rgba(16, 185, 129, 0.3) !important;
+}
+.acc-card-actions :deep(.keepalive-account-btn:hover) {
+  background: rgba(236, 253, 245, 0.95) !important;
+  border-color: rgba(16, 185, 129, 0.5) !important;
+}
+
+.acc-card-actions :deep(.single-mint-quick-btn) {
+  color: #db2777 !important;
+  border-color: rgba(255, 117, 151, 0.3) !important;
+  font-weight: 600;
+}
+.acc-card-actions :deep(.single-mint-quick-btn:hover) {
+  background: rgba(255, 241, 242, 0.95) !important;
+  border-color: rgba(255, 117, 151, 0.5) !important;
+}
+
+.acc-card-actions :deep(.check-account-btn) {
+  color: #7c3aed !important;
+  border-color: rgba(168, 85, 247, 0.3) !important;
+}
+.acc-card-actions :deep(.check-account-btn:hover) {
+  background: rgba(245, 243, 255, 0.95) !important;
+  border-color: rgba(168, 85, 247, 0.5) !important;
 }
 
 .account-pool-empty {
@@ -3635,6 +4910,57 @@ onUnmounted(() => {
 
 .task-mini-log .log-msg {
   word-break: break-all;
+}
+
+.detail-header-card {
+  padding: 14px 16px;
+  background: linear-gradient(135deg, rgba(240, 249, 255, 0.8), rgba(254, 242, 242, 0.8));
+  border-radius: 12px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.detail-user-pill {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(203, 213, 225, 0.8);
+}
+
+.detail-metric-card {
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.85);
+  border: 1px solid rgba(226, 232, 240, 0.85);
+}
+
+.session-section {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.9);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.session-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.session-textarea {
+  font-family: monospace;
+}
+
+.bot-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(14, 165, 233, 0.1);
+  color: #0284c7;
+  font-family: monospace;
 }
 
 </style>

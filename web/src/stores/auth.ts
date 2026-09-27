@@ -48,9 +48,7 @@ export const useAuthStore = defineStore('auth', {
       this.token = token
       this.refreshToken = getRefreshToken()
       try {
-        const { data } = await api.get('/auth/me', {
-          headers: { Authorization: `Bearer ${token}` },
-        })
+        const { data } = await api.get('/auth/me')
         if (data.success) {
           this.user = data.user
         } else {

@@ -46,6 +46,7 @@ from session_adapter import (
     pack_pyrogram_session,
     extract_dc_and_auth_key_from_telethon_string,
     extract_from_pyrogram_string,
+    inspect_session_metadata,
 )
 from WebStreamer.vars import Var
 
@@ -120,6 +121,8 @@ def _save_cached_session(
     status: Optional[str] = None,
     remark: Optional[str] = None,
     session_type: str = "pyrogram_string",
+    api_id: Optional[int] = None,
+    api_hash: Optional[str] = None,
 ) -> Optional[Dict]:
     norm_phone = phone.strip()
     if re.fullmatch(r"\d{8,15}", norm_phone):
@@ -149,14 +152,184 @@ def _save_cached_session(
             bot_count=bot_count,
             status=status,
             remark=remark,
+            api_id=api_id,
+            api_hash=api_hash,
         )
     except Exception as e:
         logger.debug(f"持久化协议号到数据库异常: {e}")
         return None
 
 
+DEFAULT_TELEGRAM_API_PROXY_URL = os.getenv("TELEGRAM_API_PROXY_URL", "").strip()
+
+PREFIX_REGION_MAP = {
+    # 4-digit prefixes (Canada area codes & NANP territories)
+    '1204': 'CA', '1226': 'CA', '1236': 'CA', '1249': 'CA', '1250': 'CA', '1263': 'CA', '1289': 'CA',
+    '1306': 'CA', '1343': 'CA', '1354': 'CA', '1365': 'CA', '1367': 'CA', '1368': 'CA', '1382': 'CA',
+    '1403': 'CA', '1416': 'CA', '1418': 'CA', '1428': 'CA', '1431': 'CA', '1437': 'CA', '1438': 'CA',
+    '1450': 'CA', '1468': 'CA', '1474': 'CA', '1506': 'CA', '1514': 'CA', '1519': 'CA', '1548': 'CA',
+    '1579': 'CA', '1581': 'CA', '1584': 'CA', '1587': 'CA', '1604': 'CA', '1613': 'CA', '1639': 'CA',
+    '1647': 'CA', '1672': 'CA', '1683': 'CA', '1705': 'CA', '1709': 'CA', '1742': 'CA', '1753': 'CA',
+    '1778': 'CA', '1780': 'CA', '1782': 'CA', '1807': 'CA', '1819': 'CA', '1825': 'CA', '1867': 'CA',
+    '1873': 'CA', '1879': 'CA', '1902': 'CA', '1905': 'CA',
+    '1242': 'BS', '1246': 'BB', '1264': 'AI', '1268': 'AG', '1441': 'BM', '1473': 'GD', '1649': 'TC',
+    '1664': 'MS', '1670': 'MP', '1671': 'GU', '1684': 'AS', '1721': 'SX', '1758': 'LC', '1767': 'DM',
+    '1784': 'VC', '1787': 'PR', '1939': 'PR', '1809': 'DO', '1829': 'DO', '1849': 'DO', '1868': 'TT',
+    '1869': 'KN', '1876': 'JM', '1658': 'JM', '1345': 'KY', '1284': 'VG', '1340': 'VI',
+    # 3-digit prefixes
+    '852': 'HK', '853': 'MO', '855': 'KH', '856': 'LA', '880': 'BD', '886': 'TW',
+    '960': 'MV', '961': 'LB', '962': 'JO', '963': 'SY', '964': 'IQ', '965': 'KW', '966': 'SA', '967': 'YE', '968': 'OM',
+    '970': 'PS', '971': 'AE', '972': 'IL', '973': 'BH', '974': 'QA', '975': 'BT', '976': 'MN', '977': 'NP',
+    '992': 'TJ', '993': 'TM', '994': 'AZ', '995': 'GE', '996': 'KG', '998': 'UZ',
+    '351': 'PT', '352': 'LU', '353': 'IE', '354': 'IS', '355': 'AL', '356': 'MT', '357': 'CY', '358': 'FI', '359': 'BG',
+    '370': 'LT', '371': 'LV', '372': 'EE', '373': 'MD', '374': 'AM', '375': 'BY', '376': 'AD', '377': 'MC', '378': 'SM',
+    '380': 'UA', '381': 'RS', '382': 'ME', '383': 'XK', '385': 'HR', '386': 'SI', '387': 'BA', '389': 'MK',
+    '420': 'CZ', '421': 'SK', '423': 'LI',
+    '211': 'SS', '212': 'MA', '213': 'DZ', '216': 'TN', '218': 'LY', '220': 'GM', '221': 'SN', '222': 'MR', '223': 'ML',
+    '224': 'GN', '225': 'CI', '226': 'BF', '227': 'NE', '228': 'TG', '229': 'BJ', '230': 'MU', '231': 'LR', '232': 'SL',
+    '233': 'GH', '234': 'NG', '235': 'TD', '236': 'CF', '237': 'CM', '238': 'CV', '239': 'ST', '240': 'GQ', '241': 'GA',
+    '242': 'CG', '243': 'CD', '244': 'AO', '245': 'GW', '248': 'SC', '249': 'SD', '250': 'RW', '251': 'ET', '252': 'SO',
+    '253': 'DJ', '254': 'KE', '255': 'TZ', '256': 'UG', '257': 'BI', '258': 'MZ', '260': 'ZM', '261': 'MG', '263': 'ZW',
+    '264': 'NA', '265': 'MW', '266': 'LS', '267': 'BW', '268': 'SZ', '269': 'KM',
+    '501': 'BZ', '502': 'GT', '503': 'SV', '504': 'HN', '505': 'NI', '506': 'CR', '507': 'PA', '509': 'HT',
+    '590': 'GP', '591': 'BO', '592': 'GY', '593': 'EC', '594': 'GF', '595': 'PY', '596': 'MQ', '597': 'SR', '598': 'UY', '599': 'CW',
+    '670': 'TL', '672': 'NF', '673': 'BN', '674': 'NR', '675': 'PG', '676': 'TO', '677': 'SB', '678': 'VU', '679': 'FJ',
+    '680': 'PW', '681': 'WF', '682': 'CK', '683': 'NU', '685': 'WS', '686': 'KI', '687': 'NC', '688': 'TV', '689': 'PF',
+    '690': 'TK', '691': 'FM', '692': 'MH',
+    '76': 'KZ', '77': 'KZ',
+    # 2-digit prefixes
+    '20': 'EG', '27': 'ZA', '30': 'GR', '31': 'NL', '32': 'BE', '33': 'FR', '34': 'ES', '36': 'HU', '39': 'IT',
+    '40': 'RO', '41': 'CH', '43': 'AT', '44': 'GB', '45': 'DK', '46': 'SE', '47': 'NO', '48': 'PL', '49': 'DE',
+    '51': 'PE', '52': 'MX', '53': 'CU', '54': 'AR', '55': 'BR', '56': 'CL', '57': 'CO', '58': 'VE',
+    '60': 'MY', '61': 'AU', '62': 'ID', '63': 'PH', '64': 'NZ', '65': 'SG', '66': 'TH',
+    '81': 'JP', '82': 'KR', '84': 'VN', '86': 'CN',
+    '90': 'TR', '91': 'IN', '92': 'PK', '93': 'AF', '94': 'LK', '95': 'MM', '98': 'IR',
+    # 1-digit prefixes
+    '1': 'US', '7': 'RU',
+}
+
+def detect_region_from_phone(phone: str) -> str:
+    """根据国际电话号码最长前缀识别所属国家/地区 ISO 两位代码 (如 US, MM, GB)"""
+    digits = re.sub(r"\D+", "", str(phone or ""))
+    if not digits:
+        return "US"
+    for length in (4, 3, 2, 1):
+        if len(digits) >= length:
+            prefix = digits[:length]
+            if prefix in PREFIX_REGION_MAP:
+                return PREFIX_REGION_MAP[prefix]
+    return "US"
+
+def get_api_proxy_config() -> str:
+    """获取当前配置的 Telegram API 家宽代理接口地址"""
+    return db.get_config("TELEGRAM_API_PROXY_URL", "") or DEFAULT_TELEGRAM_API_PROXY_URL
+
+def set_api_proxy_config(proxy_api_url: str) -> str:
+    """持久化保存 Telegram API 家宽代理接口地址"""
+    val = (proxy_api_url or "").strip() or DEFAULT_TELEGRAM_API_PROXY_URL
+    db.set_config("TELEGRAM_API_PROXY_URL", val)
+    return val
+
+def build_regional_proxy_api_url(region: str, proxy_api_url: Optional[str] = None) -> str:
+    """
+    根据目标国家/地区代码生成家宽代理提取 API 链接：
+    - 无论配置的 URL 是模板（含 {region} 占位符）还是已写死 region=US，
+      均自动替换为目标账号真实的 region（如 region=MM、region=US、region=GB 等）。
+    """
+    clean_region = (region or "US").strip().upper()
+    base_url = (proxy_api_url or "").strip() or get_api_proxy_config()
+    if not base_url:
+        raise ValueError("未配置家宽代理提取接口 URL，请在 Web 端协议号资产池设置或配置环境变量 TELEGRAM_API_PROXY_URL")
+
+    if "{region}" in base_url:
+        return base_url.replace("{region}", clean_region)
+    if re.search(r"([?&]region=)[^&]*", base_url, flags=re.IGNORECASE):
+        return re.sub(r"([?&]region=)[^&]*", rf"\g<1>{clean_region}", base_url, flags=re.IGNORECASE)
+
+    sep = "&" if "?" in base_url else "?"
+    return f"{base_url}{sep}region={clean_region}"
+
+def parse_proxy_line(raw_text: str) -> Optional[str]:
+    """从代理 API 响应文本中解析并归一化代理地址为标准 URL 格式 (http://ip:port 或 http://user:pass@ip:port)"""
+    if not raw_text:
+        return None
+    raw_clean = raw_text.strip()
+    if (raw_clean.startswith("{") and raw_clean.endswith("}")) or (raw_clean.startswith("[") and raw_clean.endswith("]")):
+        try:
+            data = json.loads(raw_clean)
+            if isinstance(data, dict):
+                code = data.get("code")
+                if code is not None and code not in (0, 200, "0", "200"):
+                    msg = data.get("msg") or data.get("error") or data.get("message") or raw_clean
+                    raise ValueError(f"代理接口返回错误: {msg}")
+                for k in ("proxy", "proxies", "data", "list", "ips"):
+                    val = data.get(k)
+                    if isinstance(val, str):
+                        cand = parse_proxy_line(val)
+                        if cand:
+                            return cand
+                    elif isinstance(val, list) and val:
+                        cand = parse_proxy_line(str(val[0]))
+                        if cand:
+                            return cand
+        except json.JSONDecodeError:
+            pass
+
+    for line in raw_clean.splitlines():
+        line = line.strip()
+        if not line or line.startswith("<"):
+            continue
+        if re.match(r"^(https?|socks5h?)://[^\s]+$", line, re.IGNORECASE):
+            return line
+        m_4 = re.match(r"^((?:\d{1,3}\.){3}\d{1,3}|[a-zA-Z0-9.-]+):(\d{2,5}):([^:\s]+):([^:\s]+)$", line)
+        if m_4:
+            return f"http://{m_4.group(3)}:{m_4.group(4)}@{m_4.group(1)}:{m_4.group(2)}"
+        m_auth = re.match(r"^([^:\s]+:[^@\s]+@(?:(?:\d{1,3}\.){3}\d{1,3}|[a-zA-Z0-9.-]+):\d{2,5})$", line)
+        if m_auth:
+            return f"http://{m_auth.group(1)}"
+        m_2 = re.match(r"^((?:\d{1,3}\.){3}\d{1,3}|[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}):(\d{2,5})$", line)
+        if m_2:
+            return f"http://{m_2.group(1)}:{m_2.group(2)}"
+    return None
+
+def mask_proxy_url(proxy_url: Optional[str]) -> str:
+    """脱敏代理 URL 中的认证信息"""
+    if not proxy_url:
+        return "直连"
+    return re.sub(r"://([^:@]+):[^@]+@", r"://:***@", proxy_url)
+
+async def fetch_residential_proxy_for_region(region: str, proxy_api_url: Optional[str] = None) -> str:
+    """
+    向家宽代理接口动态请求匹配目标账号地区的 10 分钟粘性住宅家宽代理。
+    返回 http://ip:port 标准代理 URL。
+    """
+    clean_region = (region or "US").strip().upper()
+    api_url = build_regional_proxy_api_url(clean_region, proxy_api_url=proxy_api_url)
+    logger.info(f"正在从家宽代理接口拉取 {clean_region} 地区住宅代理 (URL: {api_url})...")
+
+    import aiohttp
+    timeout_cfg = aiohttp.ClientTimeout(total=15) if hasattr(aiohttp, "ClientTimeout") else None
+    connector = aiohttp.TCPConnector(ssl=False) if hasattr(aiohttp, "TCPConnector") else None
+
+    async with aiohttp.ClientSession(timeout=timeout_cfg, connector=connector) as sess:
+        try:
+            async with sess.get(api_url, headers={"User-Agent": "curl/7.88.1"}) as resp:
+                text = await resp.text()
+        except Exception as net_err:
+            raise RuntimeError(f"请求家宽代理接口网络异常: {net_err}")
+
+    parsed = parse_proxy_line(text)
+    if not parsed:
+        clean_hint = text.strip()[:160]
+        raise ValueError(f"未能从家宽代理接口获取地区 {clean_region} 的有效代理节点 (接口响应: {clean_hint})")
+
+    logger.info(f"成功获取 {clean_region} 地区住宅家宽代理: {mask_proxy_url(parsed)}")
+    return parsed
+
+
+
 def sanitize_account_record(row: Dict) -> Dict:
-    """脱敏协议号记录，隐藏底层 auth_key 密文，保留管理所需的元数据"""
+    """脱敏协议号记录，隐藏底层 auth_key 密文，保留管理所需的元数据与解码参数"""
     code_url = row.get("code_url") or ""
     masked_url = ""
     if code_url:
@@ -168,8 +341,36 @@ def sanitize_account_record(row: Dict) -> Dict:
     if bot_count >= 20 and status == "active":
         status = "limit_reached"
 
+    # 尝试从内存解码会话元数据（DC、用户ID、密钥指纹等）
+    meta = {}
+    sess_data = row.get("session_data")
+    if sess_data:
+        try:
+            meta = inspect_session_metadata(sess_data)
+        except Exception:
+            meta = {}
+
+    dc_id = row.get("dc_id") if row.get("dc_id") is not None else meta.get("dc_id")
+    dc_name = meta.get("dc_name") or (f"DC{dc_id}" if dc_id else "")
+    dc_ip = meta.get("dc_ip") or ""
+    tg_user_id = row.get("tg_user_id") if row.get("tg_user_id") is not None else meta.get("user_id")
+
+    db_api_id = row.get("api_id")
+    meta_api_id = meta.get("api_id")
+    api_id = db_api_id if db_api_id else (meta_api_id if meta_api_id and meta_api_id not in (0, 2040) else None)
+
+    api_hash = row.get("api_hash") or ""
+    has_api_hash = bool(api_hash)
+    masked_api_hash = ""
+    if api_hash:
+        masked_api_hash = f"{api_hash[:4]}****{api_hash[-4:]}" if len(api_hash) >= 8 else "***"
+
+    phone_val = str(row.get("phone") or "")
+    region = row.get("region") or detect_region_from_phone(phone_val)
+
     return {
         "id": row.get("id"),
+        "region": region,
         "phone": row.get("phone"),
         "session_type": row.get("session_type") or "pyrogram_string",
         "has_code_url": bool(code_url),
@@ -178,6 +379,19 @@ def sanitize_account_record(row: Dict) -> Dict:
         "max_bots": 20,
         "remaining_quota": max(0, 20 - bot_count),
         "status": status,
+        "dc_id": dc_id,
+        "dc_name": dc_name,
+        "dc_ip": dc_ip,
+        "tg_user_id": tg_user_id,
+        "username": row.get("username") or "",
+        "first_name": row.get("first_name") or "",
+        "api_id": api_id,
+        "has_api_hash": has_api_hash,
+        "masked_api_hash": masked_api_hash,
+        "auth_key_fingerprint": meta.get("auth_key_fingerprint") or "",
+        "last_keepalive_at": row.get("last_keepalive_at") or "",
+        "keepalive_ping_ms": row.get("keepalive_ping_ms"),
+        "last_error": row.get("last_error") or "",
         "last_used_at": row.get("last_used_at"),
         "remark": row.get("remark") or "",
         "created_at": row.get("created_at"),
@@ -491,6 +705,8 @@ async def create_single_bot(
 async def login_via_phone_and_code_url(
     phone_and_url_str: str,
     on_progress: Optional[Callable[[str, Optional[str], int], None]] = None,
+    api_id: Optional[int] = None,
+    api_hash: Optional[str] = None,
 ) -> str:
     """
     通过 '手机号|接码链接' 格式全自动完成接码与 2FA 登录并返回 Pyrogram Session String。
@@ -545,7 +761,7 @@ async def login_via_phone_and_code_url(
                 if me:
                     logger.info(f"成功复用已缓存会话: {me.first_name} (@{me.username or '无用户名'}, ID: {me.id})")
                     report_progress(f"成功复用已缓存会话: {me.first_name}")
-                    _save_cached_session(phone, cached_sess, code_url=code_url, status="active")
+                    _save_cached_session(phone, cached_sess, code_url=code_url, status="active", api_id=api_id, api_hash=api_hash)
                     return cached_sess
             except Exception as e:
                 logger.warning(f"缓存会话已失效 ({e})，将重新发起接码登录")
@@ -562,10 +778,12 @@ async def login_via_phone_and_code_url(
     logger.info(f"正在为手机号 {phone} 启动 Telethon 自动接码登录，接码地址: {code_url}")
     report_progress(f"正在为手机号 {phone} 建立 Telegram 连接并请求下发验证码...")
 
+    effective_api_id = api_id or Var.API_ID or 2040
+    effective_api_hash = api_hash or Var.API_HASH or "b18441a1ff607e10a989891a5462e627"
     t_client = TelegramClient(
         StringSession(),
-        Var.API_ID or 2040,
-        Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+        effective_api_id,
+        effective_api_hash,
         device_model="Desktop",
         system_version="Windows 10",
         app_version="4.16.8 x64",
@@ -723,7 +941,7 @@ async def login_via_phone_and_code_url(
         pyro_session = pack_pyrogram_session(
             dc_id=dc_id,
             auth_key=auth_key,
-            api_id=Var.API_ID or 2040,
+            api_id=effective_api_id,
             user_id=me.id if me else 1,
         )
         _save_cached_session(
@@ -732,6 +950,8 @@ async def login_via_phone_and_code_url(
             code_url=code_url,
             status="active",
             session_type="telethon_string",
+            api_id=api_id,
+            api_hash=api_hash,
         )
         logger.info(f"协议号登录并转换完成: {me.first_name} (@{me.username or '无用户名'}, ID: {me.id})")
         report_progress(f"协议号 {phone} 登录并转换完成 ({me.first_name})")
@@ -743,18 +963,182 @@ async def login_via_phone_and_code_url(
             pass
 
 
+def parse_account_line(raw_str: str) -> Dict[str, Any]:
+    """
+    多格式协议号文本行解析器：
+    支持提取 phone, code_url, api_id, api_hash, session_str, remark
+    兼容格式：
+    - 手机号|接码链接(|备注)
+    - 手机号|api_id|api_hash|接码链接或Session(|备注)
+    - 手机号|接码链接|api_id|api_hash
+    - api_id:api_hash:session_string 或 api_id|api_hash|session_string
+    - 纯 Session String 或纯手机号
+    """
+    s = str(raw_str or "").strip()
+    res: Dict[str, Any] = {
+        "phone": None,
+        "code_url": None,
+        "api_id": None,
+        "api_hash": None,
+        "session_str": None,
+        "remark": None,
+    }
+    if not s:
+        return res
+
+    # 冒号分隔格式: api_id:api_hash:session 或 phone:api_id:api_hash:session
+    if ":" in s and "|" not in s and not s.startswith("http"):
+        parts = [p.strip() for p in s.split(":")]
+        if len(parts) >= 3:
+            if parts[0].isdigit() and re.fullmatch(r"[a-fA-F0-9]{32}", parts[1]):
+                res["api_id"] = int(parts[0])
+                res["api_hash"] = parts[1].lower()
+                res["session_str"] = ":".join(parts[2:])
+                return res
+            elif re.fullmatch(r"\+?\d{8,15}", parts[0]) and parts[1].isdigit() and re.fullmatch(r"[a-fA-F0-9]{32}", parts[2]):
+                res["phone"] = parts[0] if parts[0].startswith("+") else "+" + parts[0]
+                res["api_id"] = int(parts[1])
+                res["api_hash"] = parts[2].lower()
+                if len(parts) > 3:
+                    res["session_str"] = ":".join(parts[3:])
+                return res
+
+    # 管道符分隔格式
+    if "|" in s:
+        parts = [p.strip() for p in s.split("|") if p.strip()]
+        remaining = []
+        numeric_tokens = []
+
+        for part in parts:
+            if re.match(r"^https?://", part):
+                url_m = re.search(r"https?://[^\s()\"\x27<>|]+", part)
+                res["code_url"] = url_m.group(0).rstrip(")>]\x27\x22") if url_m else part
+            elif re.fullmatch(r"[a-fA-F0-9]{32}", part):
+                res["api_hash"] = part.lower()
+            elif (part.startswith("1") and len(part) > 150) or (len(part) > 150 and not part.startswith("http")):
+                res["session_str"] = part
+            elif re.fullmatch(r"\+\d{7,15}", part):
+                if not res["phone"]:
+                    res["phone"] = part
+                else:
+                    numeric_tokens.append(part)
+            elif re.fullmatch(r"\d{4,15}", part):
+                numeric_tokens.append(part)
+            else:
+                remaining.append(part)
+
+        for tok in numeric_tokens:
+            clean_digits = tok.lstrip("+")
+            if not res["phone"]:
+                if (
+                    len(numeric_tokens) == 1
+                    and res["api_hash"]
+                    and res["session_str"]
+                    and not res["code_url"]
+                    and not tok.startswith("+")
+                    and len(clean_digits) <= 10
+                ):
+                    res["api_id"] = int(clean_digits)
+                else:
+                    res["phone"] = "+" + clean_digits
+            elif not res["api_id"] and 4 <= len(clean_digits) <= 10:
+                res["api_id"] = int(clean_digits)
+            else:
+                remaining.append(tok)
+
+        if remaining:
+            res["remark"] = " ".join(remaining)
+        return res
+
+    if re.fullmatch(r"\+?\d{8,15}", s):
+        res["phone"] = s if s.startswith("+") else "+" + s
+    else:
+        res["session_str"] = s
+    return res
+
+
 async def _resolve_account_entry(
     source: str | bytes | bytearray,
     filename: Optional[str] = None,
     remark: Optional[str] = None,
     on_progress: Optional[Callable[[str, Optional[str], int], None]] = None,
+    extra_api_id: Optional[int] = None,
+    extra_api_hash: Optional[str] = None,
 ) -> Dict:
     """
-    解析任意单条协议号来源（手机号|链接、已缓存手机号、Session String、.session 字节），
+    解析任意单条协议号来源（手机号|链接、带 api_id|api_hash 组合行、已缓存手机号、Session String、.session/.json 字节），
     写入或更新协议号资产池并返回数据库记录。
     """
     if isinstance(source, (bytes, bytearray)):
-        pyro_session = parse_session_to_pyrogram_string(source, default_api_id=Var.API_ID or 2040)
+        if filename and filename.lower().endswith(".json"):
+            try:
+                jdata = json.loads(source.decode("utf-8", errors="ignore"))
+            except Exception as je:
+                raise ValueError(f"无法解析 JSON 档案文件 {filename}: {je}")
+
+            phone = str(jdata.get("phone") or jdata.get("phone_number") or "").strip()
+            if phone and not phone.startswith("+") and phone.isdigit():
+                phone = "+" + phone
+            if not phone and filename:
+                m = re.search(r"(\+?\d{8,15})", filename)
+                if m:
+                    phone = m.group(1) if m.group(1).startswith("+") else "+" + m.group(1)
+
+            app_id = jdata.get("app_id") or jdata.get("api_id")
+            app_hash = jdata.get("app_hash") or jdata.get("api_hash")
+            api_id_val = int(app_id) if app_id and str(app_id).isdigit() else extra_api_id
+            api_hash_val = str(app_hash).strip().lower() if app_hash else extra_api_hash
+            first_name = jdata.get("first_name") or ""
+            username = jdata.get("username") or ""
+
+            sess_raw = jdata.get("session_data") or jdata.get("session_string") or jdata.get("session") or ""
+            if sess_raw:
+                pyro_session = parse_session_to_pyrogram_string(sess_raw, default_api_id=api_id_val or Var.API_ID or 2040)
+                rec = _save_cached_session(
+                    phone=phone or f"+sess_{hashlib.sha1(pyro_session.encode(utf-8)).hexdigest()[:10]}",
+                    session_str=pyro_session,
+                    remark=remark or (filename or "JSON 档案导入"),
+                    status="active",
+                    session_type="json_file",
+                    api_id=api_id_val,
+                    api_hash=api_hash_val,
+                )
+                if rec and (first_name or username):
+                    db.update_protocol_account(rec["id"], first_name=first_name, username=username)
+                    rec = db.get_protocol_account_by_id(rec["id"]) or rec
+                return rec or {"phone": phone, "session_data": pyro_session, "api_id": api_id_val, "api_hash": api_hash_val, "status": "active", "bot_count": 0}
+            elif phone:
+                existing = db.get_protocol_account_by_phone(phone)
+                if existing:
+                    updates = {}
+                    if api_id_val:
+                        updates["api_id"] = api_id_val
+                    if api_hash_val:
+                        updates["api_hash"] = api_hash_val
+                    if first_name:
+                        updates["first_name"] = first_name
+                    if username:
+                        updates["username"] = username
+                    if updates:
+                        db.update_protocol_account(existing["id"], **updates)
+                    return db.get_protocol_account_by_id(existing["id"]) or existing
+                else:
+                    cached = _get_cached_session(phone)
+                    if cached:
+                        rec = _save_cached_session(
+                            phone=phone,
+                            session_str=cached,
+                            remark=remark or (filename or "JSON 档案关联"),
+                            status="active",
+                            api_id=api_id_val,
+                            api_hash=api_hash_val,
+                        )
+                        return rec or {"phone": phone, "session_data": cached, "api_id": api_id_val, "api_hash": api_hash_val, "status": "active", "bot_count": 0}
+                    raise ValueError(f"JSON 文件 {filename} 包含 API 凭证但缺少对应 Session 数据，请同时上传同名 .session 文件")
+            else:
+                raise ValueError(f"JSON 文件 {filename} 中未发现有效的手机号或 Session 凭证")
+
+        pyro_session = parse_session_to_pyrogram_string(source, default_api_id=extra_api_id or Var.API_ID or 2040)
         phone = None
         if filename:
             m = re.search(r"(\+?\d{8,15})", filename)
@@ -779,36 +1163,49 @@ async def _resolve_account_entry(
             remark=remark or (filename or "上传 .session 文件"),
             status="active",
             session_type="session_file",
+            api_id=extra_api_id,
+            api_hash=extra_api_hash,
         )
         if on_progress:
             try:
                 on_progress(f"文件 {filename or phone} 解析入库成功", phone, 0)
             except Exception:
                 pass
-        return rec or {"phone": phone, "session_data": pyro_session, "status": "active", "bot_count": 0}
+        return rec or {"phone": phone, "session_data": pyro_session, "api_id": extra_api_id, "api_hash": extra_api_hash, "status": "active", "bot_count": 0}
 
     raw_str = str(source or "").strip()
     if not raw_str:
         raise ValueError("空的协议号输入内容")
 
-    # 1. [手机号|接码链接] 或 [手机号|接码链接|备注]
-    if "|" in raw_str and "http" in raw_str:
-        parts = raw_str.split("|")
-        phone_match = re.search(r"(\+?\d{8,15})", parts[0])
-        phone = phone_match.group(1) if phone_match else parts[0].strip()
-        if not phone.startswith("+"):
-            phone = "+" + phone
-        url_match = re.search(r"https?://[^\s()\"\x27<>|]+", raw_str)
-        code_url = url_match.group(0).rstrip(")>]\x27\x22") if url_match else ""
-        line_remark = remark or (parts[2].strip() if len(parts) >= 3 else None)
+    parsed = parse_account_line(raw_str)
+    api_id = parsed["api_id"] or extra_api_id
+    api_hash = parsed["api_hash"] or extra_api_hash
+    line_remark = remark or parsed["remark"]
 
+    # 1. [手机号|接码链接] 或 [手机号|api_id|api_hash|接码链接]
+    if parsed["code_url"]:
+        phone = parsed["phone"]
+        code_url = parsed["code_url"]
+        if not phone:
+            phone_m = re.search(r"(\+?\d{8,15})", raw_str)
+            phone = phone_m.group(1) if phone_m else "+unknown"
+            if not phone.startswith("+"):
+                phone = "+" + phone
+
+        login_target = f"{phone}|{code_url}"
         if on_progress is not None:
             try:
-                pyro_session = await login_via_phone_and_code_url(raw_str, on_progress=on_progress)
+                pyro_session = await login_via_phone_and_code_url(login_target, on_progress=on_progress, api_id=api_id, api_hash=api_hash)
+            except TypeError:
+                try:
+                    pyro_session = await login_via_phone_and_code_url(raw_str, on_progress=on_progress)
+                except TypeError:
+                    pyro_session = await login_via_phone_and_code_url(raw_str)
+        else:
+            try:
+                pyro_session = await login_via_phone_and_code_url(login_target, api_id=api_id, api_hash=api_hash)
             except TypeError:
                 pyro_session = await login_via_phone_and_code_url(raw_str)
-        else:
-            pyro_session = await login_via_phone_and_code_url(raw_str)
 
         rec = _save_cached_session(
             phone=phone,
@@ -817,33 +1214,37 @@ async def _resolve_account_entry(
             remark=line_remark,
             status="active",
             session_type="telethon_string",
+            api_id=api_id,
+            api_hash=api_hash,
         )
-        return rec or {"phone": phone, "session_data": pyro_session, "code_url": code_url, "status": "active", "bot_count": 0}
+        return rec or {"phone": phone, "session_data": pyro_session, "code_url": code_url, "api_id": api_id, "api_hash": api_hash, "status": "active", "bot_count": 0}
 
     # 2. 纯手机号（从已缓存资产池读取）
-    if re.fullmatch(r"\+?\d{8,15}", raw_str):
-        phone_key = raw_str if raw_str.startswith("+") else f"+{raw_str}"
+    if parsed["phone"] and not parsed["session_str"]:
+        phone_key = parsed["phone"]
         cached = _get_cached_session(phone_key)
         if not cached:
             raise ValueError(f"手机号 {phone_key} 尚无已缓存会话，请提供 [手机号|接码链接] 格式")
-        rec = _save_cached_session(phone=phone_key, session_str=cached, remark=remark)
+        rec = _save_cached_session(phone=phone_key, session_str=cached, remark=line_remark, api_id=api_id, api_hash=api_hash)
         if on_progress:
             try:
                 on_progress(f"成功复用手机号 {phone_key} 已缓存会话", phone_key, 0)
             except Exception:
                 pass
-        return rec or {"phone": phone_key, "session_data": cached, "status": "active", "bot_count": 0}
+        return rec or {"phone": phone_key, "session_data": cached, "api_id": api_id, "api_hash": api_hash, "status": "active", "bot_count": 0}
 
     # 3. Session String (Pyrogram / Telethon)
-    s_type = "telethon_string" if (raw_str.startswith("1") and len(raw_str) > 280) else "pyrogram_string"
-    pyro_session = parse_session_to_pyrogram_string(raw_str, default_api_id=Var.API_ID or 2040)
-    phone = None
-    try:
-        _, _, _, _, uid, _ = extract_from_pyrogram_string(pyro_session)
-        if uid and uid > 1:
-            phone = f"+uid_{uid}"
-    except Exception:
-        pass
+    session_text = parsed["session_str"] or raw_str
+    s_type = "telethon_string" if (session_text.startswith("1") and len(session_text) > 280) else "pyrogram_string"
+    pyro_session = parse_session_to_pyrogram_string(session_text, default_api_id=api_id or Var.API_ID or 2040)
+    phone = parsed["phone"]
+    if not phone:
+        try:
+            _, _, _, _, uid, _ = extract_from_pyrogram_string(pyro_session)
+            if uid and uid > 1:
+                phone = f"+uid_{uid}"
+        except Exception:
+            pass
     if not phone:
         h = hashlib.sha1(pyro_session.encode("utf-8")).hexdigest()[:10]
         phone = f"+sess_{h}"
@@ -851,16 +1252,18 @@ async def _resolve_account_entry(
     rec = _save_cached_session(
         phone=phone,
         session_str=pyro_session,
-        remark=remark,
+        remark=line_remark,
         status="active",
         session_type=s_type,
+        api_id=api_id,
+        api_hash=api_hash,
     )
     if on_progress:
         try:
             on_progress(f"成功解析 Session 字符串并入库 ({phone})", phone, 0)
         except Exception:
             pass
-    return rec or {"phone": phone, "session_data": pyro_session, "status": "active", "bot_count": 0}
+    return rec or {"phone": phone, "session_data": pyro_session, "api_id": api_id, "api_hash": api_hash, "status": "active", "bot_count": 0}
 
 
 async def batch_import_protocol_accounts(
@@ -870,7 +1273,7 @@ async def batch_import_protocol_accounts(
     on_progress: Optional[Callable[[str, Optional[str], int], None]] = None,
 ) -> Dict:
     """
-    批量导入多个协议号到资产池（支持多行 [手机号|接码链接]、多行 Session String、多个 .session 文件）。
+    批量导入多个协议号到资产池（支持多行 [手机号|接码链接]、带 api_id|api_hash 组合行、多行 Session String、多个 .session / .json 文件）。
     采用受控并发（Semaphore=3）处理，避免多账号串行接码导致整体耗时叠加超时。
     """
     imported: List[Dict] = []
@@ -897,7 +1300,12 @@ async def batch_import_protocol_accounts(
                         pass
                 return ("err", err_msg)
 
-    async def _import_file(fname: str, fbytes: bytes):
+    async def _import_file(
+        fname: str,
+        fbytes: bytes,
+        extra_api_id: Optional[int] = None,
+        extra_api_hash: Optional[str] = None,
+    ):
         async with sem:
             try:
                 if on_progress:
@@ -905,7 +1313,14 @@ async def batch_import_protocol_accounts(
                         on_progress(f"开始解析文件 {fname}...", None, 0)
                     except Exception:
                         pass
-                rec = await _resolve_account_entry(fbytes, filename=fname, remark=remark, on_progress=on_progress)
+                rec = await _resolve_account_entry(
+                    fbytes,
+                    filename=fname,
+                    remark=remark,
+                    on_progress=on_progress,
+                    extra_api_id=extra_api_id,
+                    extra_api_hash=extra_api_hash,
+                )
                 return ("ok", sanitize_account_record(rec))
             except Exception as e:
                 err_msg = f"文件 {fname} 导入失败: {e}"
@@ -926,8 +1341,63 @@ async def batch_import_protocol_accounts(
             tasks.append(_import_line(idx, clean_line))
 
     if files:
+        json_files = []
+        session_files = []
+        other_files = []
         for fname, fbytes in files:
-            tasks.append(_import_file(fname, fbytes))
+            low = fname.lower()
+            if low.endswith(".json"):
+                json_files.append((fname, fbytes))
+            elif low.endswith(".session"):
+                session_files.append((fname, fbytes))
+            else:
+                other_files.append((fname, fbytes))
+
+        json_meta_by_stem = {}
+        json_meta_by_phone = {}
+        for jname, jbytes in json_files:
+            try:
+                jdata = json.loads(jbytes.decode("utf-8", errors="ignore"))
+                stem = os.path.splitext(jname)[0].strip()
+                phone = str(jdata.get("phone") or jdata.get("phone_number") or "").strip()
+                if phone and not phone.startswith("+") and phone.isdigit():
+                    phone = "+" + phone
+                app_id = jdata.get("app_id") or jdata.get("api_id")
+                app_hash = jdata.get("app_hash") or jdata.get("api_hash")
+                api_id_val = int(app_id) if app_id and str(app_id).isdigit() else None
+                api_hash_val = str(app_hash).strip().lower() if app_hash else None
+                m_info = {
+                    "api_id": api_id_val,
+                    "api_hash": api_hash_val,
+                    "phone": phone,
+                    "filename": jname,
+                }
+                if stem:
+                    json_meta_by_stem[stem] = m_info
+                    json_meta_by_stem[stem.lstrip("+")] = m_info
+                    json_meta_by_stem["+" + stem.lstrip("+")] = m_info
+                if phone:
+                    json_meta_by_phone[phone] = m_info
+                    json_meta_by_phone[phone.lstrip("+")] = m_info
+            except Exception as je:
+                logger.debug(f"预解析 JSON 档案 {jname} 异常: {je}")
+
+        paired_json_names = set()
+        for fname, fbytes in (session_files + other_files):
+            stem = os.path.splitext(fname)[0].strip()
+            extra = json_meta_by_stem.get(stem) or json_meta_by_phone.get(stem)
+            if extra:
+                paired_json_names.add(extra.get("filename"))
+            tasks.append(_import_file(
+                fname,
+                fbytes,
+                extra_api_id=extra.get("api_id") if extra else None,
+                extra_api_hash=extra.get("api_hash") if extra else None,
+            ))
+
+        for jname, jbytes in json_files:
+            if jname not in paired_json_names:
+                tasks.append(_import_file(jname, jbytes))
 
     if tasks:
         results = await asyncio.gather(*tasks)
@@ -1097,11 +1567,23 @@ async def check_protocol_account(account_id: int) -> Dict:
         bot_count = len(existing_bots)
         new_status = "limit_reached" if bot_count >= 20 else "active"
 
+        dc_id = getattr(getattr(user_client, "storage", None), "dc_id", None)
+        if callable(dc_id):
+            try:
+                dc_id = await dc_id()
+            except Exception:
+                dc_id = None
+
         db.update_protocol_account(
             account_id,
             phone=real_phone if real_phone == phone else phone,
             bot_count=bot_count,
             status=new_status,
+            first_name=getattr(me, "first_name", "") or "",
+            username=getattr(me, "username", "") or "",
+            tg_user_id=getattr(me, "id", None),
+            dc_id=dc_id if dc_id else None,
+            last_keepalive_at=db._now_iso(),
             last_used_at=db._now_iso(),
         )
         updated = db.get_protocol_account_by_id(account_id)
@@ -1722,3 +2204,705 @@ class BackgroundMintManager:
 
 
 mint_manager = BackgroundMintManager()
+
+
+
+async def get_protocol_account_detail(account_id: int, refresh_online: bool = False) -> Dict[str, Any]:
+    """获取单个协议号的详细参数、双端 Session 凭证及名下 Bot 资产"""
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    sess_data = acc.get("session_data", "")
+    try:
+        meta = inspect_session_metadata(sess_data, default_api_id=Var.API_ID or 2040)
+    except Exception as e:
+        logger.warning(f"解析协议号 {acc['phone']} 会话元数据失败: {e}")
+        meta = {
+            "dc_id": acc.get("dc_id") or 1,
+            "dc_name": f"DC{acc.get('dc_id') or 1}",
+            "dc_region": "未知",
+            "dc_ip": "",
+            "dc_port": 443,
+            "user_id": acc.get("tg_user_id") or 0,
+            "api_id": Var.API_ID or 2040,
+            "test_mode": False,
+            "is_bot": False,
+            "auth_key_len": 256,
+            "auth_key_fingerprint": "",
+            "telethon_session_string": "",
+            "pyrogram_session_string": sess_data,
+        }
+
+    online_user = None
+    online_bots = None
+    if refresh_online:
+        check_res = await check_protocol_account(account_id)
+        acc = db.get_protocol_account_by_id(int(account_id)) or acc
+        online_user = check_res.get("user_info")
+        online_bots = check_res.get("bots")
+
+    sanitized = sanitize_account_record(acc)
+    return {
+        "account": sanitized,
+        "metadata": {
+            "dc_id": acc.get("dc_id") or meta.get("dc_id"),
+            "dc_name": meta.get("dc_name"),
+            "dc_region": meta.get("dc_region"),
+            "dc_ip": meta.get("dc_ip"),
+            "dc_port": meta.get("dc_port"),
+            "tg_user_id": acc.get("tg_user_id") or meta.get("user_id"),
+            "username": acc.get("username") or "",
+            "first_name": acc.get("first_name") or "",
+            "api_id": acc.get("api_id") or meta.get("api_id"),
+            "api_hash": acc.get("api_hash") or "",
+            "has_api_hash": bool(acc.get("api_hash")),
+            "test_mode": meta.get("test_mode"),
+            "is_bot": meta.get("is_bot"),
+            "auth_key_len": meta.get("auth_key_len"),
+            "auth_key_fingerprint": meta.get("auth_key_fingerprint"),
+            "code_url": acc.get("code_url") or "",
+            "last_keepalive_at": acc.get("last_keepalive_at") or "",
+            "keepalive_ping_ms": acc.get("keepalive_ping_ms"),
+            "last_error": acc.get("last_error") or "",
+            "region": acc.get("region") or detect_region_from_phone(acc.get("phone") or ""),
+            "proxy_api_url": get_api_proxy_config(),
+        },
+        "sessions": {
+            "telethon_session_string": meta.get("telethon_session_string") or "",
+            "pyrogram_session_string": meta.get("pyrogram_session_string") or sess_data,
+        },
+        "user_info": online_user,
+        "bots": online_bots,
+    }
+
+
+async def fetch_api_credentials_from_my_telegram(
+    account_id: int,
+    proxy_api_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    通过 Telegram 协议号会话全自动登录 https://my.telegram.org 抓取或自动创建 App api_id 与 api_hash。
+    全链路注入与协议号归属国家/地区一致的 10 分钟粘性住宅家宽代理，有效穿透 my.telegram.org 机房与跨区风控：
+    1. 启动协议号 MTProto 客户端，获取账号真实绑定手机号；
+    2. 根据 E.164 手机区号解析账号归属地区 (如 +1 ➔ US, +95 ➔ MM)，从家宽代理 API 获取对应地区的住宅 IP；
+    3. 全程通过该家宽代理向 https://my.telegram.org/auth/send_password 发送请求下发 Web 登录码；
+    4. 轮询读取 peer 777000 (Telegram 官方服务号) 的通知消息，正则匹配拦截 Web 登录代码；
+    5. 全程通过该家宽代理向 https://my.telegram.org/auth/login 提交登录，获取会话 Cookie (stel_token)；
+    6. 访问 https://my.telegram.org/apps：
+       - 若已存在 App：抓取 App api_id 与 App api_hash；
+       - 若尚未创建 App：提交 /apps/create 表单自动创建桌面客户端应用，再抓取凭证；
+    7. 若代理节点异常或创建被拒，支持自动换拉新节点重试 (最多 3 次)；
+    8. 保存至 tg_protocol_accounts，并更新会话内嵌 api_id。
+    """
+    if proxy_api_url and proxy_api_url.strip():
+        set_api_proxy_config(proxy_api_url.strip())
+
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    phone = acc["phone"]
+    pyro_session = _normalize_session_str(acc["session_data"])
+
+    if Client is None:
+        raise RuntimeError("Pyrogram Client 环境未就绪")
+
+    user_client = Client(
+        name=f"my_tg_{account_id}_{secrets.token_hex(3)}",
+        api_id=acc.get("api_id") or Var.API_ID or 2040,
+        api_hash=acc.get("api_hash") or Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+        session_string=pyro_session,
+        in_memory=True,
+        no_updates=True,
+    )
+
+    try:
+        await user_client.start()
+        me = await user_client.get_me()
+        real_phone = f"+{me.phone_number}" if getattr(me, "phone_number", None) else phone
+        if not real_phone.startswith("+") and real_phone.isdigit():
+            real_phone = "+" + real_phone
+
+        region = acc.get("region") or detect_region_from_phone(real_phone)
+        logger.info(f"开始为协议号 {real_phone} (识别归属地区: {region}) 提取 Telegram API 凭证...")
+
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        base_headers = {
+            "User-Agent": ua,
+            "Origin": "https://my.telegram.org",
+            "Referer": "https://my.telegram.org/auth",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        import aiohttp
+        timeout_cfg = aiohttp.ClientTimeout(total=25) if hasattr(aiohttp, "ClientTimeout") else None
+        connector = aiohttp.TCPConnector(ssl=False) if hasattr(aiohttp, "TCPConnector") else None
+        jar = aiohttp.CookieJar(unsafe=True) if hasattr(aiohttp, "CookieJar") else None
+
+        def _call_http(method_fn, url: str, **kwargs):
+            try:
+                return method_fn(url, **kwargs)
+            except TypeError:
+                kwargs.pop("proxy", None)
+                return method_fn(url, **kwargs)
+
+        def _extract_creds(html_content: str) -> Tuple[Optional[int], Optional[str]]:
+            id_match = (
+                re.search(r"App\s*api_id:[^<]*<[^>]+>\s*<strong[^>]*>(\d+)</strong>", html_content, re.IGNORECASE)
+                or re.search(r"id=[\x22\x27]app_id[\x22\x27][^>]*value=[\x22\x27](\d+)[\x22\x27]", html_content, re.IGNORECASE)
+                or re.search(r"value=[\x22\x27](\d+)[\x22\x27][^>]*id=[\x22\x27]app_id[\x22\x27]", html_content, re.IGNORECASE)
+                or re.search(r"<strong>(\d{5,10})</strong>", html_content)
+            )
+            hash_match = (
+                re.search(r"App\s*api_hash:[^<]*<[^>]+>\s*<span[^>]*>([a-fA-F0-9]{32})</span>", html_content, re.IGNORECASE)
+                or re.search(r"id=[\x22\x27]app_hash[\x22\x27][^>]*value=[\x22\x27]([a-fA-F0-9]{32})[\x22\x27]", html_content, re.IGNORECASE)
+                or re.search(r"value=[\x22\x27]([a-fA-F0-9]{32})[\x22\x27][^>]*id=[\x22\x27]app_hash[\x22\x27]", html_content, re.IGNORECASE)
+                or re.search(r"\b([a-fA-F0-9]{32})\b", html_content)
+            )
+            ext_id = int(id_match.group(1)) if id_match else None
+            ext_hash = hash_match.group(1).lower() if hash_match else None
+            return ext_id, ext_hash
+
+        max_attempts = 3
+        last_err: Optional[Exception] = None
+        used_codes = set()
+        masked_proxy = "直连"
+        found_id: Optional[int] = None
+        found_hash: Optional[str] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                proxy_url = await fetch_residential_proxy_for_region(region, proxy_api_url=proxy_api_url)
+                masked_proxy = mask_proxy_url(proxy_url)
+                logger.info(f"[API提取] 账号 {real_phone} (地区: {region}) 第 {attempt}/{max_attempts} 次尝试，已分配同地区家宽代理: {masked_proxy}")
+
+                async with aiohttp.ClientSession(timeout=timeout_cfg, connector=connector, cookie_jar=jar) as http_sess:
+                    # 1. 请求下发 Web 登录码
+                    logger.info(f"正在向 my.telegram.org 请求为 {real_phone} 下发 Web 登录码 (代理: {masked_proxy})...")
+                    async with _call_http(
+                        http_sess.post,
+                        "https://my.telegram.org/auth/send_password",
+                        data={"phone": real_phone},
+                        headers=base_headers,
+                        proxy=proxy_url,
+                    ) as resp:
+                        resp_text = await resp.text()
+                        random_hash = None
+                        try:
+                            data = json.loads(resp_text)
+                            random_hash = data.get("random_hash")
+                        except Exception:
+                            if len(resp_text.strip()) > 8 and "error" not in resp_text.lower():
+                                random_hash = resp_text.strip()
+
+                        if not random_hash:
+                            if "too many" in resp_text.lower() or "flood" in resp_text.lower():
+                                raise ValueError(f"my.telegram.org 触发限流保护: {resp_text}")
+                            raise ValueError(f"my.telegram.org 请求下发验证码失败: {resp_text}")
+
+                    logger.info(f"my.telegram.org 已向 {real_phone} 下发登录验证码 (random_hash={random_hash[:8]}...)，正在从 777000 官方通知中截获...")
+
+                    # 2. 从 777000 服务号中监听并提取 Web login code (跳过已消耗过的 code)
+                    web_code = None
+                    for _ in range(20):
+                        await asyncio.sleep(1.5)
+                        try:
+                            async for msg in user_client.get_chat_history(777000, limit=5):
+                                txt = msg.text or ""
+                                m = re.search(r"(?:Web\s*login\s*code|Web\s*登录代码|Web\s*code)[^\w\d]*\s*([A-Za-z0-9_\-]{8,24})", txt, re.IGNORECASE)
+                                cand = None
+                                if m:
+                                    cand = m.group(1).strip()
+                                elif "my.telegram.org" in txt or "web login" in txt.lower():
+                                    for line in txt.splitlines():
+                                        line = line.strip()
+                                        if re.fullmatch(r"[A-Za-z0-9_\-]{8,24}", line):
+                                            cand = line
+                                            break
+                                if cand and cand not in used_codes:
+                                    web_code = cand
+                                    break
+                        except Exception as read_err:
+                            logger.debug(f"读取 777000 官方消息异常: {read_err}")
+                        if web_code:
+                            break
+
+                    if not web_code:
+                        raise TimeoutError("未能从 Telegram 官方服务通知(777000)中截获到 Web 登录验证码，请检查该号是否收到验证码")
+
+                    used_codes.add(web_code)
+                    logger.info(f"成功截获 Web 登录验证码: {web_code}，正在登录 my.telegram.org...")
+
+                    # 3. 登录 my.telegram.org
+                    async with _call_http(
+                        http_sess.post,
+                        "https://my.telegram.org/auth/login",
+                        data={"phone": real_phone, "random_hash": random_hash, "password": web_code},
+                        headers=base_headers,
+                        proxy=proxy_url,
+                    ) as resp:
+                        login_res = await resp.text()
+                        if "true" not in login_res.lower():
+                            raise ValueError(f"my.telegram.org 校验验证码登录失败: {login_res}")
+
+                    logger.info("my.telegram.org 登录成功，正在访问 /apps 提取 API 凭证...")
+
+                    # 4. 获取 /apps 页面
+                    async with _call_http(
+                        http_sess.get,
+                        "https://my.telegram.org/apps",
+                        headers={"User-Agent": ua, "Referer": "https://my.telegram.org/"},
+                        proxy=proxy_url,
+                    ) as resp:
+                        apps_html = await resp.text()
+
+                    ext_id, ext_hash = _extract_creds(apps_html)
+
+                    # 若未创建 App，自动提交表单创建
+                    if not (ext_id and ext_hash):
+                        logger.info(f"账号 {real_phone} 尚未创建 Telegram App，正在自动提交创建表单 (代理: {masked_proxy})...")
+                        form_hash_m = (
+                            re.search(r"name=[\x22\x27]hash[\x22\x27][^>]*value=[\x22\x27]([^\x22\x27]+)[\x22\x27]", apps_html)
+                            or re.search(r"value=[\x22\x27]([^\x22\x27]+)[\x22\x27][^>]*name=[\x22\x27]hash[\x22\x27]", apps_html)
+                        )
+                        if not form_hash_m:
+                            raise ValueError("my.telegram.org/apps 页面未找到已有 App 也未能提取到创建表单 hash")
+
+                        rand_suffix = secrets.token_hex(3)
+                        create_payload = {
+                            "hash": form_hash_m.group(1),
+                            "app_title": f"DesktopStudio{rand_suffix.upper()}",
+                            "app_shortname": f"studio{rand_suffix}",
+                            "app_url": "",
+                            "app_platform": "desktop",
+                            "app_desc": f"Desktop Client {rand_suffix}",
+                        }
+                        async with _call_http(
+                            http_sess.post,
+                            "https://my.telegram.org/apps/create",
+                            data=create_payload,
+                            headers={"User-Agent": ua, "Origin": "https://my.telegram.org", "Referer": "https://my.telegram.org/apps"},
+                            proxy=proxy_url,
+                        ) as create_resp:
+                            create_text = await create_resp.text()
+                            if create_text.strip().upper() == "ERROR":
+                                logger.warning(f"my.telegram.org/apps/create 响应 ERROR (代理: {masked_proxy})")
+
+                        async with _call_http(
+                            http_sess.get,
+                            "https://my.telegram.org/apps",
+                            headers={"User-Agent": ua, "Referer": "https://my.telegram.org/apps"},
+                            proxy=proxy_url,
+                        ) as resp2:
+                            apps_html2 = await resp2.text()
+                        ext_id, ext_hash = _extract_creds(apps_html2)
+
+                    if not (ext_id and ext_hash):
+                        raise RuntimeError(f"未能从 my.telegram.org/apps 成功解析出 api_id 与 api_hash (代理: {masked_proxy})")
+
+                    found_id = ext_id
+                    found_hash = ext_hash
+                    break  # 成功，跳出重试循环
+            except Exception as attempt_err:
+                last_err = attempt_err
+                logger.warning(f"[API提取] 账号 {real_phone} 第 {attempt}/{max_attempts} 次尝试失败: {attempt_err}")
+                if attempt < max_attempts:
+                    await asyncio.sleep(1.0)
+                    continue
+                else:
+                    raise last_err
+
+        logger.info(f"成功为协议号 {real_phone} (地区: {region}) 提取 Telegram API 凭证: api_id={found_id}, api_hash={found_hash[:6]}**** (代理: {masked_proxy})")
+
+        # 5. 持久化到数据库
+        db.update_protocol_account(account_id, api_id=found_id, api_hash=found_hash)
+
+        # 尝试将会话内嵌的 api_id 更新为真实提取的 api_id
+        try:
+            dc_id, auth_key, _, test_mode, uid, is_bot = extract_from_pyrogram_string(pyro_session)
+            new_pyro = pack_pyrogram_session(
+                dc_id=dc_id,
+                auth_key=auth_key,
+                api_id=found_id,
+                test_mode=test_mode,
+                user_id=uid,
+                is_bot=is_bot,
+            )
+            db.update_protocol_account(account_id, session_data=new_pyro)
+            _save_cached_session(real_phone, new_pyro, api_id=found_id, api_hash=found_hash)
+        except Exception as e_pack:
+            logger.debug(f"更新会话内嵌 api_id 跳过: {e_pack}")
+
+        updated_detail = await get_protocol_account_detail(account_id)
+        return {
+            "api_id": found_id,
+            "api_hash": found_hash,
+            "region": region,
+            "proxy_used": masked_proxy,
+            "detail": updated_detail,
+        }
+
+    finally:
+        try:
+            if getattr(user_client, "is_connected", False):
+                await user_client.stop()
+        except Exception:
+            pass
+
+
+async def batch_fetch_api_credentials(
+    account_ids: Optional[List[int]] = None,
+    proxy_api_url: Optional[str] = None,
+    only_missing: bool = True,
+) -> Dict[str, Any]:
+    """
+    按协议号归属地区匹配家宽代理，批量为协议号自动提取/创建 App api_id 与 api_hash
+    """
+    if proxy_api_url and proxy_api_url.strip():
+        set_api_proxy_config(proxy_api_url.strip())
+
+    all_accs = db.list_protocol_accounts()
+    if account_ids:
+        acc_set = {int(x) for x in account_ids}
+        targets = [a for a in all_accs if a["id"] in acc_set]
+    elif only_missing:
+        targets = [
+            a for a in all_accs
+            if not (a.get("api_id") and a.get("api_hash")) and a.get("status") != "invalid"
+        ]
+    else:
+        targets = [a for a in all_accs if a.get("status") != "invalid"]
+
+    results = []
+    succeeded = 0
+    failed = 0
+
+    for idx, acc in enumerate(targets):
+        acc_id = acc["id"]
+        phone = acc["phone"]
+        reg = detect_region_from_phone(phone)
+        try:
+            res = await fetch_api_credentials_from_my_telegram(acc_id, proxy_api_url=proxy_api_url)
+            succeeded += 1
+            results.append({
+                "account_id": acc_id,
+                "phone": phone,
+                "region": res.get("region") or reg,
+                "proxy_used": res.get("proxy_used") or "",
+                "api_id": res.get("api_id"),
+                "success": True,
+            })
+        except Exception as err:
+            failed += 1
+            results.append({
+                "account_id": acc_id,
+                "phone": phone,
+                "region": reg,
+                "error": str(err),
+                "success": False,
+            })
+        if idx < len(targets) - 1:
+            await asyncio.sleep(1.0)
+
+    updated_accs = [sanitize_account_record(r) for r in db.list_protocol_accounts()]
+    return {
+        "total": len(targets),
+        "succeeded": succeeded,
+        "failed": failed,
+        "results": results,
+        "accounts": updated_accs,
+    }
+
+
+async def update_protocol_account_credentials(
+    account_id: int,
+    api_id: Optional[int] = None,
+    api_hash: Optional[str] = None,
+    remark: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    手动更新指定协议号的 api_id、api_hash 与备注
+    """
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    updates = {}
+    if api_id is not None:
+        updates["api_id"] = int(api_id) if api_id else None
+    if api_hash is not None:
+        clean_hash = str(api_hash).strip()
+        if clean_hash and not re.fullmatch(r"[a-fA-F0-9]{32}", clean_hash):
+            raise ValueError("api_hash 必须为 32 位十六进制字符串 (0-9, a-f)")
+        updates["api_hash"] = clean_hash.lower() if clean_hash else None
+    if remark is not None:
+        updates["remark"] = str(remark).strip()
+
+    if updates:
+        db.update_protocol_account(int(account_id), **updates)
+
+    return await get_protocol_account_detail(int(account_id))
+
+
+async def keepalive_protocol_account(account_id: int, check_bots: bool = False) -> Dict[str, Any]:
+    """
+    对指定协议号资产发起一次轻量 MTProto 保活连接，刷新账号档案与活跃时间，
+    测量 ping 延迟，并在会话失效且有接码链接时自动尝试重登续期。
+    """
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    phone = acc["phone"]
+    pyro_session = _normalize_session_str(acc["session_data"])
+
+    if Client is None:
+        raise RuntimeError("Pyrogram Client 环境未就绪")
+
+    start_ts = time.time()
+    user_client = Client(
+        name=f"keepalive_acc_{account_id}_{secrets.token_hex(3)}",
+        api_id=Var.API_ID or 2040,
+        api_hash=Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+        session_string=pyro_session,
+        in_memory=True,
+        no_updates=True,
+    )
+
+    try:
+        try:
+            await user_client.start()
+        except Exception as conn_err:
+            if acc.get("code_url"):
+                logger.info(f"协议号 {phone} 会话失效 ({conn_err})，尝试通过接码链接重新登录续期...")
+                pyro_session = await login_via_phone_and_code_url(f"{phone}|{acc['code_url']}")
+                user_client = Client(
+                    name=f"re_keepalive_acc_{account_id}_{secrets.token_hex(3)}",
+                    api_id=Var.API_ID or 2040,
+                    api_hash=Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+                    session_string=pyro_session,
+                    in_memory=True,
+                    no_updates=True,
+                )
+                await user_client.start()
+            else:
+                db.update_protocol_account(
+                    account_id,
+                    status="invalid",
+                    last_error=str(conn_err),
+                    last_keepalive_at=db._now_iso(),
+                )
+                return {
+                    "success": False,
+                    "account_id": account_id,
+                    "phone": phone,
+                    "error": str(conn_err),
+                    "status": "invalid",
+                }
+
+        ping_ms = max(1, int((time.time() - start_ts) * 1000))
+        me = await user_client.get_me()
+        real_phone = f"+{me.phone_number}" if getattr(me, "phone_number", None) else phone
+
+        bot_count = acc.get("bot_count", 0)
+        existing_bots = []
+        if check_bots:
+            try:
+                existing_bots = await fetch_existing_bot_tokens(user_client, max_limit=20)
+                bot_count = len(existing_bots)
+            except Exception as b_err:
+                logger.debug(f"保活查询 Bot 数量跳过: {b_err}")
+
+        new_status = "limit_reached" if bot_count >= 20 else "active"
+        dc_id = getattr(getattr(user_client, "storage", None), "dc_id", None)
+        if callable(dc_id):
+            try:
+                dc_id = await dc_id()
+            except Exception:
+                dc_id = None
+
+        db.update_protocol_account(
+            account_id,
+            phone=real_phone if real_phone == phone else phone,
+            bot_count=bot_count,
+            status=new_status,
+            first_name=getattr(me, "first_name", "") or "",
+            username=getattr(me, "username", "") or "",
+            tg_user_id=getattr(me, "id", None),
+            dc_id=dc_id if dc_id else None,
+            last_keepalive_at=db._now_iso(),
+            keepalive_ping_ms=ping_ms,
+            last_error="",
+            last_used_at=db._now_iso(),
+        )
+        updated = db.get_protocol_account_by_id(account_id)
+        return {
+            "success": True,
+            "account_id": account_id,
+            "phone": real_phone,
+            "ping_ms": ping_ms,
+            "status": new_status,
+            "account": sanitize_account_record(updated),
+            "user_info": {
+                "id": getattr(me, "id", None),
+                "first_name": getattr(me, "first_name", ""),
+                "username": getattr(me, "username", ""),
+            },
+            "bots": [{"username": b["username"]} for b in existing_bots] if check_bots else None,
+        }
+    except Exception as e:
+        db.update_protocol_account(
+            account_id,
+            last_error=str(e),
+            last_keepalive_at=db._now_iso(),
+        )
+        return {
+            "success": False,
+            "account_id": account_id,
+            "phone": phone,
+            "error": str(e),
+            "status": "error",
+        }
+    finally:
+        try:
+            if getattr(user_client, "is_connected", False):
+                await user_client.stop()
+        except Exception:
+            pass
+
+
+async def keepalive_all_protocol_accounts(
+    account_ids: Optional[List[int]] = None,
+    check_bots: bool = False,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """
+    全量或批量对协议号资产池执行错峰保活巡检
+    """
+    if account_ids:
+        accounts = [db.get_protocol_account_by_id(aid) for aid in account_ids]
+        accounts = [a for a in accounts if a]
+    else:
+        accounts = db.list_protocol_accounts()
+
+    total = len(accounts)
+    results = []
+    success_count = 0
+    failed_count = 0
+    ping_samples = []
+
+    for idx, acc in enumerate(accounts, 1):
+        aid = acc["id"]
+        phone = acc["phone"]
+        if on_progress:
+            try:
+                on_progress(f"正在保活协议号 [{idx}/{total}] {phone}...")
+            except Exception:
+                pass
+
+        res = await keepalive_protocol_account(aid, check_bots=check_bots)
+        results.append(res)
+        if res.get("success"):
+            success_count += 1
+            if res.get("ping_ms"):
+                ping_samples.append(res["ping_ms"])
+        else:
+            failed_count += 1
+
+        if idx < total:
+            await asyncio.sleep(1.5)
+
+    avg_ping = int(sum(ping_samples) / len(ping_samples)) if ping_samples else 0
+    pool = sync_cached_sessions_to_db()
+
+    summary = {
+        "total": total,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "avg_ping_ms": avg_ping,
+        "results": results,
+        "pool": pool,
+    }
+    return summary
+
+
+class ProtocolKeepaliveWorker:
+    def __init__(self):
+        self._task: Optional[asyncio.Task] = None
+        self._running = False
+        self._last_run_at: Optional[str] = None
+        self._last_summary: Optional[Dict] = None
+
+    def start(self):
+        if self._running or (self._task and not self._task.done()):
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._run_loop())
+        logger.info("协议号定时保活巡检 Worker 已启动")
+
+    async def stop(self):
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        logger.info("协议号定时保活巡检 Worker 已安全停止")
+
+    async def _run_loop(self):
+        # 启动后延迟 15 秒执行初次巡检
+        await asyncio.sleep(15.0)
+        while self._running:
+            try:
+                enabled = bool(db.get_config_value("PROTOCOL_KEEPALIVE_ENABLED", True))
+                interval_hours = max(1, int(db.get_config_value("PROTOCOL_KEEPALIVE_INTERVAL_HOURS", 12)))
+                if enabled:
+                    logger.info("开始执行协议号资产池定时保活巡检...")
+                    self._last_run_at = db._now_iso()
+                    summary = await keepalive_all_protocol_accounts(check_bots=False)
+                    self._last_summary = {
+                        "run_at": self._last_run_at,
+                        "success_count": summary["success_count"],
+                        "failed_count": summary["failed_count"],
+                        "avg_ping_ms": summary["avg_ping_ms"],
+                    }
+                    logger.info(
+                        f"协议号定时保活巡检完成: 成功 {summary['success_count']}, "
+                        f"失败 {summary['failed_count']}, 平均延迟 {summary['avg_ping_ms']}ms"
+                    )
+
+                # 间隔休眠，支持快速响应停止信号
+                sleep_secs = interval_hours * 3600
+                for _ in range(max(1, int(sleep_secs / 10))):
+                    if not self._running:
+                        break
+                    await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"协议号保活巡检循环发生异常: {e}", exc_info=True)
+                await asyncio.sleep(60)
+
+    def get_status(self) -> Dict:
+        enabled = bool(db.get_config_value("PROTOCOL_KEEPALIVE_ENABLED", True))
+        interval_hours = int(db.get_config_value("PROTOCOL_KEEPALIVE_INTERVAL_HOURS", 12))
+        return {
+            "running": self._running,
+            "enabled": enabled,
+            "interval_hours": interval_hours,
+            "last_run_at": self._last_run_at,
+            "last_summary": self._last_summary,
+        }
+
+
+_keepalive_worker: Optional[ProtocolKeepaliveWorker] = None
+
+
+def get_keepalive_worker() -> ProtocolKeepaliveWorker:
+    global _keepalive_worker
+    if _keepalive_worker is None:
+        _keepalive_worker = ProtocolKeepaliveWorker()
+    return _keepalive_worker

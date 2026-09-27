@@ -458,6 +458,192 @@ async function setupBotsPageMocks(page: Page) {
     })
   })
 
+  await page.route(/.*\/api\/telegram\/botfather\/accounts\/\d+\/detail.*/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          account: {
+            ...MOCK_ACCOUNTS.data[0],
+            dc_id: 5,
+            dc_name: 'DC5 亚太 (Singapore)',
+            keepalive_ping_ms: 118,
+            first_name: 'TestUser',
+            username: 'test_user',
+          },
+          metadata: {
+            dc_id: 5,
+            dc_name: 'DC5 亚太 (Singapore)',
+            dc_region: '亚太',
+            dc_ip: '91.108.56.165',
+            dc_port: 443,
+            tg_user_id: 10001,
+            username: 'test_user',
+            first_name: 'TestUser',
+            api_id: 2040,
+            test_mode: false,
+            is_bot: false,
+            auth_key_len: 256,
+            auth_key_fingerprint: 'a1b2c3d4e5f6',
+            code_url: 'https://miha.uk/tgapi/xxx',
+            last_keepalive_at: '2026-09-26 16:00:00',
+            keepalive_ping_ms: 118,
+            last_error: '',
+          },
+          sessions: {
+            telethon_session_string: '1BVtsOK0BAAEFAAAAAAAA...',
+            pyrogram_session_string: 'AQAAAAAA...',
+          },
+          user_info: { id: 10001, first_name: 'TestUser', username: 'test_user' },
+          bots: [{ username: 'qianlong520f001_bot' }],
+        },
+      }),
+    })
+  })
+
+  await page.route(/.*\/api\/telegram\/botfather\/accounts\/\d+\/keepalive$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          success: true,
+          account_id: 1,
+          phone: '+16813086196',
+          ping_ms: 108,
+          status: 'active',
+        },
+      }),
+    })
+  })
+
+  await page.route('**/api/telegram/botfather/accounts/keepalive', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          total: 2,
+          success_count: 2,
+          failed_count: 0,
+          avg_ping_ms: 110,
+          results: [],
+          pool: MOCK_ACCOUNTS.data,
+        },
+      }),
+    })
+  })
+
+  await page.route(/.*\/api\/telegram\/botfather\/accounts\/\d+\/fetch-api$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          api_id: 29998888,
+          api_hash: '1234567890abcdef1234567890abcdef',
+          region: 'US',
+          proxy_used: '198.51.100.10:7150',
+          detail: {
+            account: {
+              id: 1,
+              phone: '+16813086196',
+              region: 'US',
+              session_type: 'pyrogram_string',
+              has_code_url: true,
+              masked_code_url: 'https://miha.uk/***',
+              bot_count: 5,
+              max_bots: 20,
+              remaining_quota: 15,
+              status: 'active',
+              dc_id: 1,
+              dc_name: 'DC1',
+              api_id: 29998888,
+              has_api_hash: true,
+              masked_api_hash: '1234****cdef',
+              last_used_at: '2026-09-26 15:00:00',
+              remark: '主力1号',
+              created_at: '2026-09-26 10:00:00',
+            },
+            metadata: {
+              dc_id: 1,
+              dc_name: 'DC1',
+              dc_region: '北美 / 迈阿密',
+              region: 'US',
+              api_id: 29998888,
+              api_hash: '1234567890abcdef1234567890abcdef',
+              has_api_hash: true,
+            },
+            sessions: {
+              telethon_session_string: '1BVtsOK0BAAEFAAAAAAAA...',
+              pyrogram_session_string: 'AQAAAAAA...',
+            },
+          },
+        },
+      }),
+    })
+  })
+
+  await page.route('**/api/telegram/botfather/proxy-config', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          proxy_api_url: 'https://proxy.example.com/api?region=US&num=1',
+          default_url: 'https://proxy.example.com/api?region=US&num=1',
+        },
+      }),
+    })
+  })
+
+  await page.route('**/api/telegram/botfather/accounts/fetch-api-batch', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          total: 2,
+          succeeded: 2,
+          failed: 0,
+          results: [
+            { account_id: 1, phone: '+16813086196', region: 'US', proxy_used: '198.51.100.10:7150', api_id: 29998888, success: true },
+            { account_id: 2, phone: '+18048484620', region: 'US', proxy_used: '198.51.100.10:7150', api_id: 29998889, success: true },
+          ],
+        },
+      }),
+    })
+  })
+
+  await page.route('**/api/telegram/botfather/keepalive/config', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          running: true,
+          enabled: true,
+          interval_hours: 12,
+          last_run_at: '2026-09-26 16:00:00',
+          last_summary: {
+            run_at: '2026-09-26 16:00:00',
+            success_count: 2,
+            failed_count: 0,
+            avg_ping_ms: 110,
+          },
+        },
+      }),
+    })
+  })
+
   await page.route('**/api/telegram/botfather/tasks/start', async (route) => {
     await route.fulfill({
       status: 200,
@@ -737,5 +923,211 @@ test.describe('Admin Bots Cluster Management View', () => {
       return document.documentElement.scrollWidth > window.innerWidth
     })
     expect(hasBfHorizontalScroll).toBe(false)
+  })
+
+  test('handles 50+ bots cluster gracefully without layout distortion, showing balanced equal widths and popover chips', async ({ page }) => {
+    // 构造包含 55 个节点与高密度亲和分区的极限模拟状态
+    const fiftyFiveBots = Array.from({ length: 55 }, (_, i) => ({
+      index: i,
+      username: `mistrelay_node_${i}_bot`,
+      mode: i === 0 ? 'primary_admin' : 'no_join_resolved',
+      home_dc: i === 0 ? 5 : (i === 10 ? 4 : 1),
+      warm_dcs: [1, 4, 5],
+      can_read: true,
+      can_write: i === 0,
+    }))
+    const mockDcPartitions = {
+      '1': {
+        dc_id: 1,
+        label: 'DC1 (美西 / 迈阿密)',
+        home_bots: Array.from({ length: 49 }, (_, i) => i + 1), // 49 个原生节点
+        warm_bots: Array.from({ length: 55 }, (_, i) => i),     // 55 个热备会话
+        files_count: 4,
+        requests_count: 50,
+      },
+      '2': {
+        dc_id: 2,
+        label: 'DC2 (欧洲 / 阿姆斯特丹)',
+        home_bots: [],
+        warm_bots: [],
+        files_count: 0,
+        requests_count: 0,
+      },
+      '3': {
+        dc_id: 3,
+        label: 'DC3 (美东 / 迈阿密)',
+        home_bots: [],
+        warm_bots: [],
+        files_count: 0,
+        requests_count: 0,
+      },
+      '4': {
+        dc_id: 4,
+        label: 'DC4 (欧洲 / 阿姆斯特丹)',
+        home_bots: [],
+        warm_bots: Array.from({ length: 55 }, (_, i) => i), // 55 个热备会话
+        files_count: 3,
+        requests_count: 30,
+      },
+      '5': {
+        dc_id: 5,
+        label: 'DC5 (亚太 / 新加坡)',
+        home_bots: [0],
+        warm_bots: Array.from({ length: 55 }, (_, i) => i),
+        files_count: 10,
+        requests_count: 100,
+      },
+    }
+
+    await setupBotsPageMocks(page)
+    await page.route('**/api/status', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          ...MOCK_STATUS,
+          bot_details: fiftyFiveBots,
+          dc_partitions: mockDcPartitions,
+        }),
+      })
+    })
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/bots')
+
+    // 验证矩阵卡片与 5 个 DC 分区卡片正常渲染
+    const matrixGrid = page.locator('.dc-matrix-grid')
+    await expect(matrixGrid).toBeVisible()
+    const partItems = matrixGrid.locator('.dc-part-item')
+    await expect(partItems).toHaveCount(5)
+
+    // 验证 DC1 ~ DC5 每一项卡片均在可视范围内，且宽度完全均分（误差 <= 2px）
+    const itemWidths: number[] = []
+    for (let i = 0; i < 5; i++) {
+      const box = await partItems.nth(i).boundingBox()
+      expect(box).not.toBeNull()
+      if (box) {
+        expect(box.width).toBeGreaterThan(150)
+        itemWidths.push(box.width)
+      }
+    }
+    const maxWidth = Math.max(...itemWidths)
+    const minWidth = Math.min(...itemWidths)
+    expect(maxWidth - minWidth).toBeLessThanOrEqual(2)
+
+    // 验证各指标标签正常显示且未折行
+    await expect(partItems.nth(0).locator('.dc-m-lbl').first()).toHaveText('网盘文件')
+    await expect(partItems.nth(0).locator('.dc-m-lbl').nth(1)).toHaveText('原生Bot')
+    await expect(partItems.nth(0).locator('.dc-m-lbl').nth(2)).toHaveText('热备就绪')
+
+    // 验证 DC1 预览胶囊显示前 3 个编号与 +46 更多徽标
+    const dc1Preview = partItems.nth(0).locator('.dc-bot-preview-pill')
+    await expect(dc1Preview).toBeVisible()
+    await expect(dc1Preview).toContainText('原生:')
+    await expect(dc1Preview).toContainText('#1, #2, #3')
+    await expect(dc1Preview.locator('.dc-more-badge')).toHaveText('+46')
+
+    // 验证 DC4（无原生但有 55 个热备）显示前 3 个热备编号与 +52 更多徽标
+    const dc4Preview = partItems.nth(3).locator('.dc-bot-preview-pill')
+    await expect(dc4Preview).toBeVisible()
+    await expect(dc4Preview).toContainText('热备:')
+    await expect(dc4Preview).toContainText('#0, #1, #2')
+    await expect(dc4Preview.locator('.dc-more-badge')).toHaveText('+52')
+
+    // 验证 DC2（完全空闲）显示按需跨区拉取
+    await expect(partItems.nth(1).locator('.dc-part-bots')).toContainText('按需跨区拉取')
+
+    // 悬停 DC1 预览胶囊，验证 Popover 浮层弹出且同时包含原生与热备节点
+    await dc1Preview.hover()
+    const popover = page.locator('.dc-popover-card:visible')
+    await expect(popover).toBeVisible()
+    await expect(popover).toContainText('调度亲和明细')
+    await expect(popover).toContainText('原生节点 (49 个)')
+    await expect(popover).toContainText('热备就绪 (55 个)')
+    await expect(popover.locator('.chip-purple')).toHaveCount(49)
+    await expect(popover.locator('.chip-emerald')).toHaveCount(55)
+
+    // 验证 1440px 视口无横向溢出
+    const hasHorizontalScroll = await page.evaluate(() => {
+      return document.documentElement.scrollWidth > window.innerWidth
+    })
+    expect(hasHorizontalScroll).toBe(false)
+  })
+
+  test('supports protocol account detail modal, telethon session export, and keepalive inspection', async ({ page }) => {
+    await setupBotsPageMocks(page)
+    await page.goto('/botfather')
+
+    // 验证“一键全量保活”按钮
+    const keepaliveAllBtn = page.locator('.header-btn', { hasText: '一键全量保活' })
+    await expect(keepaliveAllBtn).toBeVisible()
+    await keepaliveAllBtn.click()
+
+    // 验证“导出 Telethon”按钮与弹窗
+    const exportBtn = page.locator('.header-btn', { hasText: '导出 Telethon' })
+    await expect(exportBtn).toBeVisible()
+    await exportBtn.click()
+    const exportDialog = page.locator('.el-dialog:visible', { hasText: '批量导出 Telethon' })
+    await expect(exportDialog).toBeVisible()
+    await exportDialog.locator('.el-button', { hasText: '关闭' }).click()
+
+    // 验证协议号卡片上的“详情”按钮打开详情与 Session 凭证中心
+    const firstAccCard = page.locator('.account-item-card').first()
+    const detailBtn = firstAccCard.locator('.detail-account-btn')
+    await expect(detailBtn).toBeVisible()
+    await detailBtn.click()
+
+    const detailDialog = page.locator('.detail-dialog:visible')
+    await expect(detailDialog).toBeVisible()
+    await expect(detailDialog).toContainText('Telethon 1.x StringSession')
+    await expect(detailDialog).toContainText('Pyrogram 2.x Session String')
+    await expect(detailDialog).toContainText('一键复制 Telethon Session')
+    await expect(detailDialog).toContainText('一键复制 Pyrogram Session')
+    await expect(detailDialog).toContainText('数据中心 / 节点')
+    await expect(detailDialog).toContainText('密钥指纹')
+    await expect(detailDialog).toContainText('Telegram 开发者 API 凭证')
+    await expect(detailDialog).toContainText('App api_id')
+    await expect(detailDialog).toContainText('App api_hash')
+    await expect(detailDialog).toContainText('从 my.telegram.org 自动提取')
+
+    // 关闭详情弹窗
+    await detailDialog.locator('.el-button', { hasText: '关闭' }).click()
+
+    // 验证“批量提取 API”按钮与模态框
+    const batchFetchApiBtn = page.locator('.header-btn', { hasText: '批量提取 API' })
+    await expect(batchFetchApiBtn).toBeVisible()
+    await batchFetchApiBtn.click()
+
+    const batchApiDialog = page.locator('.el-dialog:visible', { hasText: '批量提取 Telegram 开发者 API' })
+    await expect(batchApiDialog).toBeVisible()
+    await expect(batchApiDialog).toContainText('家宽住宅代理提取 API 链接')
+    await expect(batchApiDialog.locator('input').first()).toHaveValue(/proxy/)
+    await batchApiDialog.locator('.el-button--primary', { hasText: '开始批量提取' }).click()
+    await expect(batchApiDialog).toContainText('提取执行结果明细')
+    await batchApiDialog.locator('.el-button', { hasText: '关闭' }).click()
+
+    // 验证单个协议号“保活”按钮
+    const singleKeepaliveBtn = firstAccCard.locator('.keepalive-account-btn')
+    await expect(singleKeepaliveBtn).toBeVisible()
+    await singleKeepaliveBtn.click()
+
+    // 验证协议号卡片布局严谨无横向溢出
+    const cardBox = await firstAccCard.boundingBox()
+    expect(cardBox).not.toBeNull()
+    if (cardBox) {
+      expect(cardBox.width).toBeGreaterThanOrEqual(300)
+      const btnGroup = firstAccCard.locator('.acc-card-actions')
+      const btnGroupBox = await btnGroup.boundingBox()
+      expect(btnGroupBox).not.toBeNull()
+      if (btnGroupBox) {
+        expect(btnGroupBox.x + btnGroupBox.width).toBeLessThanOrEqual(cardBox.x + cardBox.width + 1)
+      }
+      const deleteBtn = firstAccCard.locator('.delete-account-btn')
+      const deleteBtnBox = await deleteBtn.boundingBox()
+      expect(deleteBtnBox).not.toBeNull()
+      if (deleteBtnBox) {
+        expect(deleteBtnBox.x + deleteBtnBox.width).toBeLessThanOrEqual(cardBox.x + cardBox.width + 1)
+      }
+    }
   })
 })

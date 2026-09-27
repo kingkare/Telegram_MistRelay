@@ -999,12 +999,23 @@ async def main():
             log.info("已安排后台缩略图自动预热扫描（启动5秒后执行）")
         except Exception as e:
             log.warning(f"安排后台缩略图预热失败: {e}")
+        try:
+            from botfather_creator import get_keepalive_worker
+            get_keepalive_worker().start()
+            log.info("已启动 Telegram 协议号后台自动保活巡检 Worker")
+        except Exception as e:
+            log.warning(f"启动协议号保活 Worker 失败: {e}")
 
 
 async def cleanup():
     try:
         from thumbnail_worker import get_thumbnail_worker
         await get_thumbnail_worker().stop()
+    except Exception:
+        pass
+    try:
+        from botfather_creator import get_keepalive_worker
+        await get_keepalive_worker().stop()
     except Exception:
         pass
     set_service_ready(False)

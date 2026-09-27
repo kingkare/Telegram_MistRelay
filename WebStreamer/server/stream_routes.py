@@ -4014,6 +4014,281 @@ async def telegram_botfather_account_check_handler(request: web.Request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
+@routes.get("/api/telegram/botfather/accounts/{id}/detail")
+async def telegram_botfather_account_detail_handler(request: web.Request):
+    """获取指定协议号的详细底层参数、Telethon/Pyrogram Session String 及账号档案"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        account_id_str = request.match_info.get("id", "")
+        if not account_id_str.isdigit():
+            return web.json_response({"success": False, "error": "无效的协议号 ID"}, status=400)
+
+        refresh_param = request.query.get("refresh", "0").lower()
+        refresh_online = refresh_param in ("1", "true", "yes")
+
+        from botfather_creator import get_protocol_account_detail
+        result = await get_protocol_account_detail(int(account_id_str), refresh_online=refresh_online)
+        return web.json_response({"success": True, "data": result})
+    except KeyError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=404)
+    except ValueError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"获取协议号详情失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/accounts/{id}/fetch-api")
+async def telegram_botfather_account_fetch_api_handler(request: web.Request):
+    """通过 my.telegram.org 自动在线提取或创建该协议号专属的 api_id 与 api_hash (基于归属地匹配家宽代理)"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        account_id_str = request.match_info.get("id", "")
+        if not account_id_str.isdigit():
+            return web.json_response({"success": False, "error": "无效的协议号 ID"}, status=400)
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        proxy_api_url = (body.get("proxy_api_url") or "").strip() or None
+
+        from botfather_creator import fetch_api_credentials_from_my_telegram
+        result = await fetch_api_credentials_from_my_telegram(int(account_id_str), proxy_api_url=proxy_api_url)
+        return web.json_response({"success": True, "data": result})
+    except KeyError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=404)
+    except (ValueError, RuntimeError, TimeoutError) as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"从 my.telegram.org 提取 API 凭证失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/accounts/fetch-api-batch")
+async def telegram_botfather_account_fetch_api_batch_handler(request: web.Request):
+    """批量按协议号归属地匹配家宽代理自动提取/创建 App api_id 与 api_hash"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        account_ids = body.get("account_ids")
+        proxy_api_url = (body.get("proxy_api_url") or "").strip() or None
+        only_missing = bool(body.get("only_missing", True))
+
+        from botfather_creator import batch_fetch_api_credentials
+        result = await batch_fetch_api_credentials(
+            account_ids=account_ids,
+            proxy_api_url=proxy_api_url,
+            only_missing=only_missing,
+        )
+        return web.json_response({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"批量提取 API 凭证失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.get("/api/telegram/botfather/proxy-config")
+async def telegram_botfather_get_proxy_config_handler(request: web.Request):
+    """获取 Telegram 开发者 API 提取所使用的家宽代理配置"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+        from botfather_creator import get_api_proxy_config, DEFAULT_TELEGRAM_API_PROXY_URL
+        return web.json_response({
+            "success": True,
+            "data": {
+                "proxy_api_url": get_api_proxy_config(),
+                "default_url": DEFAULT_TELEGRAM_API_PROXY_URL,
+            }
+        })
+    except Exception as e:
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/proxy-config")
+async def telegram_botfather_set_proxy_config_handler(request: web.Request):
+    """保存 Telegram 开发者 API 提取所使用的家宽代理配置"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+        body = await request.json()
+        proxy_api_url = body.get("proxy_api_url", "")
+        from botfather_creator import set_api_proxy_config
+        saved = set_api_proxy_config(proxy_api_url)
+        return web.json_response({"success": True, "data": {"proxy_api_url": saved}})
+    except Exception as e:
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/accounts/{id}/credentials")
+async def telegram_botfather_account_update_credentials_handler(request: web.Request):
+    """手动更新指定协议号的 api_id、api_hash 与备注"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        account_id_str = request.match_info.get("id", "")
+        if not account_id_str.isdigit():
+            return web.json_response({"success": False, "error": "无效的协议号 ID"}, status=400)
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        raw_api_id = body.get("api_id")
+        api_id_val = None
+        if raw_api_id is not None and str(raw_api_id).strip():
+            if not str(raw_api_id).strip().isdigit():
+                return web.json_response({"success": False, "error": "api_id 必须为纯数字"}, status=400)
+            api_id_val = int(str(raw_api_id).strip())
+
+        raw_api_hash = body.get("api_hash")
+        api_hash_val = str(raw_api_hash).strip().lower() if raw_api_hash is not None else None
+        if api_hash_val and not re.fullmatch(r"[a-fA-F0-9]{32}", api_hash_val):
+            return web.json_response({"success": False, "error": "api_hash 必须为 32 位十六进制字符串"}, status=400)
+
+        remark = body.get("remark")
+
+        from botfather_creator import update_protocol_account_credentials
+        result = await update_protocol_account_credentials(
+            account_id=int(account_id_str),
+            api_id=api_id_val,
+            api_hash=api_hash_val,
+            remark=str(remark).strip() if remark is not None else None,
+        )
+        return web.json_response({"success": True, "data": result})
+    except KeyError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=404)
+    except ValueError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"更新协议号凭证失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/accounts/{id}/keepalive")
+async def telegram_botfather_account_single_keepalive_handler(request: web.Request):
+    """对单个指定协议号发起主动保活握手"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        account_id_str = request.match_info.get("id", "")
+        if not account_id_str.isdigit():
+            return web.json_response({"success": False, "error": "无效的协议号 ID"}, status=400)
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        check_bots = bool(body.get("check_bots", False))
+
+        from botfather_creator import keepalive_protocol_account
+        result = await keepalive_protocol_account(int(account_id_str), check_bots=check_bots)
+        return web.json_response({"success": True, "data": result})
+    except KeyError as e:
+        return web.json_response({"success": False, "error": str(e)}, status=404)
+    except Exception as e:
+        logger.error(f"单号保活失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/accounts/keepalive")
+async def telegram_botfather_accounts_keepalive_handler(request: web.Request):
+    """批量或全量执行协议号资产池主动保活巡检"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        account_ids = body.get("account_ids")
+        if isinstance(account_ids, list):
+            account_ids = [int(i) for i in account_ids if str(i).isdigit()]
+        else:
+            account_ids = None
+        check_bots = bool(body.get("check_bots", False))
+
+        from botfather_creator import keepalive_all_protocol_accounts
+        result = await keepalive_all_protocol_accounts(account_ids=account_ids, check_bots=check_bots)
+        return web.json_response({"success": True, "data": result})
+    except Exception as e:
+        logger.error(f"批量保活协议号失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.get("/api/telegram/botfather/keepalive/config")
+async def telegram_botfather_keepalive_config_get_handler(request: web.Request):
+    """获取协议号后台定时自动保活配置与最近运行状态"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        from botfather_creator import get_keepalive_worker
+        status = get_keepalive_worker().get_status()
+        return web.json_response({"success": True, "data": status})
+    except Exception as e:
+        logger.error(f"读取保活配置失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/botfather/keepalive/config")
+async def telegram_botfather_keepalive_config_set_handler(request: web.Request):
+    """更新协议号后台定时自动保活开关与巡检周期"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        body = await request.json()
+        if "enabled" in body:
+            db.set_config_value("PROTOCOL_KEEPALIVE_ENABLED", bool(body["enabled"]))
+        if "interval_hours" in body:
+            interval = max(1, min(168, int(body["interval_hours"])))
+            db.set_config_value("PROTOCOL_KEEPALIVE_INTERVAL_HOURS", interval)
+
+        from botfather_creator import get_keepalive_worker, keepalive_all_protocol_accounts
+        worker = get_keepalive_worker()
+        if bool(db.get_config_value("PROTOCOL_KEEPALIVE_ENABLED", True)):
+            worker.start()
+
+        if body.get("trigger_now"):
+            asyncio.create_task(keepalive_all_protocol_accounts(check_bots=False))
+
+        return web.json_response({"success": True, "data": worker.get_status()})
+    except Exception as e:
+        logger.error(f"更新保活配置失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
 @routes.get("/api/telegram/botfather/task-status")
 async def telegram_botfather_task_status_handler(request: web.Request):
     """获取后台 @BotFather 自动铸造流水线实时状态"""
@@ -4403,7 +4678,7 @@ async def telegram_bots_benchmark_all_handler(request: web.Request):
             pass
 
         import WebStreamer.bot as bot_mod
-        sem = asyncio.Semaphore(4)
+        sem = asyncio.Semaphore(16)
 
         async def _bench(i, c):
             async with sem:
@@ -4615,7 +4890,7 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
 
         # 先预热并缓存所有参与下载节点的媒体会话与位置上下文，排除首次握手与属性解析噪音
         bot_contexts = {}
-        warm_sem = asyncio.Semaphore(4)
+        warm_sem = asyncio.Semaphore(16)
 
         async def _warm_bot(b_idx):
             async with warm_sem:
@@ -4629,18 +4904,23 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
                 except Exception as e:
                     logger.debug(f"测速节点 #{b_idx} 预热跳过: {e}")
 
-        warm_targets = set(dl_bots[:min(total_dl_chunks, len(dl_bots))])
+        warm_targets = set(dl_bots)
         await asyncio.gather(*[_warm_bot(b) for b in warm_targets], return_exceptions=True)
 
-        # 若处于集群模式且媒体体积足够，进一步拉取 4 个连续分片测量服务端多 Bot 聚合播放码率 (Sustained Streaming Bitrate)
-        if is_cluster_mode and len(dl_bots) > 1 and target_file["file_size"] >= play_chunk_size * 6:
-            stripe_play_bots = dl_bots[:min(8, len(dl_bots))]
+        # 若处于集群模式且媒体体积足够，调动全集群可用条带池并行拉取分片测量服务端多 Bot 聚合播放码率 (Sustained Streaming Bitrate)
+        if is_cluster_mode and len(dl_bots) > 1 and target_file["file_size"] >= play_chunk_size * 4:
+            max_play_parts = max(2, int((target_file["file_size"] - buffer_bytes) // play_chunk_size))
+            stripe_play_bots = dl_bots[:min(max_play_parts, len(dl_bots))]
             async def _fetch_play_part(p_idx, b_idx):
                 try:
-                    b_cli = bot_mod.multi_clients[b_idx]
-                    b_str = get_byte_streamer(b_cli)
-                    b_fid = await b_str.get_file_properties(msg_id, force_refresh=False)
-                    b_loc = await b_str.get_location(b_fid)
+                    ctx = bot_contexts.get(b_idx)
+                    if ctx:
+                        b_cli, b_str, b_fid, b_loc = ctx
+                    else:
+                        b_cli = bot_mod.multi_clients[b_idx]
+                        b_str = get_byte_streamer(b_cli)
+                        b_fid = await b_str.get_file_properties(msg_id, force_refresh=False)
+                        b_loc = await b_str.get_location(b_fid)
                     return await b_str._try_get_file_chunk(
                         b_cli, b_idx, b_fid, b_loc,
                         offset=buffer_bytes + p_idx * play_chunk_size, chunk_size=play_chunk_size,
@@ -4731,7 +5011,7 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
         else:
             max_duration_sec = 35.0
 
-        concurrency = min(len(dl_bots) * 2, 40) if (is_cluster_mode and len(dl_bots) > 1) else (2 if sample_mb > 10 else 1)
+        concurrency = min(len(dl_bots) * 2, 128) if (is_cluster_mode and len(dl_bots) > 1) else (2 if sample_mb > 10 else 1)
         sem = asyncio.Semaphore(concurrency)
         stop_event = asyncio.Event()
 

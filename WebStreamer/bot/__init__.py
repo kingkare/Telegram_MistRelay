@@ -402,3 +402,10 @@ def select_stream_bot(
         if target_dc is not None:
             st["dc_requests"][int(target_dc)] = st["dc_requests"].get(int(target_dc), 0) + 1
         return selected
+
+
+try:
+    from ..utils.fast_uploader import patch_pyrogram_uploader
+    patch_pyrogram_uploader()
+except Exception:
+    pass

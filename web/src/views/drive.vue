@@ -3487,8 +3487,6 @@ onUnmounted(() => {
   border: 1px solid rgba(56, 189, 248, 0.25);
 }
 
-</style>
-
 /* 私密/受限频道采集模态框与组件样式 */
 .harvest-btn {
   background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%) !important;
@@ -3747,4 +3745,4 @@ onUnmounted(() => {
   border: none !important;
   font-weight: 600;
 }
-
+</style>

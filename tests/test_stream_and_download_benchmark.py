@@ -34,10 +34,19 @@ class TestStreamAndDownloadBenchmark(unittest.TestCase):
         self.bot_mod = sys.modules["WebStreamer.bot"]
         self.orig_multi = getattr(self.bot_mod, "multi_clients", {}).copy()
         self.orig_accessible = getattr(self.bot_mod, "channel_accessible_clients", set()).copy()
+        self.orig_custom_dl = sys.modules.get("WebStreamer.utils.custom_dl")
+        if "WebStreamer.utils.custom_dl" not in sys.modules:
+            custom_dl_mod = types.ModuleType("WebStreamer.utils.custom_dl")
+            custom_dl_mod.get_available_bot_indices = lambda *args, **kwargs: list(sorted(self.bot_mod.multi_clients.keys())) or [0]
+            sys.modules["WebStreamer.utils.custom_dl"] = custom_dl_mod
 
     def tearDown(self):
         self.bot_mod.multi_clients.clear(); self.bot_mod.multi_clients.update(self.orig_multi)
         self.bot_mod.channel_accessible_clients = self.orig_accessible
+        if self.orig_custom_dl is not None:
+            sys.modules["WebStreamer.utils.custom_dl"] = self.orig_custom_dl
+        else:
+            sys.modules.pop("WebStreamer.utils.custom_dl", None)
 
     def test_single_bot_benchmark_with_stream_and_playback_metrics(self):
         """测试单节点基准测试正确包含 stream_ttfb_ms 和 playback_bitrate_mbps"""

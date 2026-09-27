@@ -453,9 +453,145 @@ export interface ProtocolAccount {
   max_bots: number
   remaining_quota: number
   status: 'active' | 'limit_reached' | 'cooling_down' | 'restricted' | 'invalid'
+  dc_id?: number | null
+  dc_name?: string
+  dc_ip?: string
+  tg_user_id?: number | null
+  username?: string
+  first_name?: string
+  api_id?: number | null
+  has_api_hash?: boolean
+  masked_api_hash?: string
+  auth_key_fingerprint?: string
+  last_keepalive_at?: string | null
+  keepalive_ping_ms?: number | null
+  region?: string
+  last_error?: string | null
   last_used_at: string | null
   remark: string
   created_at: string
+}
+
+export interface ProtocolAccountDetail {
+  account: ProtocolAccount
+  metadata: {
+    dc_id: number
+    dc_name: string
+    dc_region: string
+    dc_ip: string
+    dc_port: number
+    tg_user_id: number
+    username: string
+    first_name: string
+    api_id: number | null
+    api_hash?: string
+    has_api_hash?: boolean
+    test_mode: boolean
+    is_bot: boolean
+    auth_key_len: number
+    auth_key_fingerprint: string
+    code_url: string
+    last_keepalive_at: string
+    keepalive_ping_ms: number | null
+    last_error: string
+    region?: string
+    proxy_api_url?: string
+  }
+  sessions: {
+    telethon_session_string: string
+    pyrogram_session_string: string
+  }
+  user_info?: {
+    id: number
+    first_name: string
+    username: string
+  } | null
+  bots?: Array<{ username: string }> | null
+}
+
+export interface ProtocolAccountDetailResponse {
+  success: boolean
+  data?: ProtocolAccountDetail
+  error?: string
+}
+
+export interface FetchProtocolAccountApiResponse {
+  success: boolean
+  data?: {
+    api_id: number
+    api_hash: string
+    region?: string
+    proxy_used?: string
+    detail: ProtocolAccountDetail
+  }
+  error?: string
+}
+
+export interface BatchFetchProtocolAccountApiResponse {
+  success: boolean
+  data?: {
+    total: number
+    succeeded: number
+    failed: number
+    results: Array<{
+      account_id: number
+      phone: string
+      region?: string
+      proxy_used?: string
+      api_id?: number
+      error?: string
+      success: boolean
+    }>
+    accounts?: ProtocolAccount[]
+  }
+  error?: string
+}
+
+export interface UpdateProtocolAccountCredentialsRequest {
+  api_id?: number | null
+  api_hash?: string | null
+  remark?: string
+}
+
+export interface ProtocolKeepaliveSummary {
+  total: number
+  success_count: number
+  failed_count: number
+  avg_ping_ms: number
+  results: Array<{
+    success: boolean
+    account_id: number
+    phone: string
+    ping_ms?: number
+    status?: string
+    error?: string
+  }>
+  pool: ProtocolAccount[]
+}
+
+export interface ProtocolKeepaliveResponse {
+  success: boolean
+  data?: ProtocolKeepaliveSummary
+  error?: string
+}
+
+export interface KeepaliveConfig {
+  running: boolean
+  enabled: boolean
+  interval_hours: number
+  last_run_at: string | null
+  last_summary: {
+    run_at: string
+    success_count: number
+    failed_count: number
+    avg_ping_ms: number
+  } | null
+}
+
+export interface KeepaliveConfigResponse {
+  success: boolean
+  data?: KeepaliveConfig
+  error?: string
 }
 
 export interface ProtocolAccountsResponse {

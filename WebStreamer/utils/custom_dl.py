@@ -1,4 +1,5 @@
 import math
+import socket
 import asyncio
 import logging
 from WebStreamer import Var
@@ -29,6 +30,24 @@ export_auth_locks: Dict[Tuple[int, int, int], asyncio.Lock] = {}
 
 # 全局缓存每个 Client 对应的 ByteStreamer 实例，供服务端单流多 Bot 条带化并发拉取复用
 streamer_registry: Dict[Client, "ByteStreamer"] = {}
+
+# 全局跨请求 Bot 上下文与 (FileId, Location) 缓存: (bot_idx, message_id) -> (client, streamer, file_id, location)
+_global_bot_ctx_cache: Dict[Tuple[int, int], Tuple[Client, "ByteStreamer", FileId, object]] = {}
+_global_bot_ctx_locks: Dict[Tuple[int, int], asyncio.Lock] = {}
+
+
+def clear_global_bot_ctx_cache(message_id: Optional[int] = None) -> None:
+    """清理全局从机上下文缓存（可在消息更新、file_reference 过期或内存治理时调用）"""
+    if message_id is None:
+        _global_bot_ctx_cache.clear()
+        _global_bot_ctx_locks.clear()
+    else:
+        for k in list(_global_bot_ctx_cache.keys()):
+            if k[1] == message_id:
+                _global_bot_ctx_cache.pop(k, None)
+        for k in list(_global_bot_ctx_locks.keys()):
+            if k[1] == message_id:
+                _global_bot_ctx_locks.pop(k, None)
 
 # 每个 Bot 在每个媒体 DC 上建立的独立 Session 数量（每个 Session 拥有独立的 Auth().create() 密钥）
 MEDIA_SESSIONS_PER_BOT = 1
@@ -89,6 +108,42 @@ def get_available_bot_indices(
         candidates = candidates[pos:] + candidates[:pos]
 
     return candidates
+
+
+# 跨洋高 RTT (DC1 <-> DC5 180ms) BDP 调优：4MB 接收缓冲可将单连接理论上限从 0.7MB/s 提升至 22MB/s
+MEDIA_SOCKET_RCVBUF_SIZE = 4 * 1024 * 1024
+MEDIA_SOCKET_SNDBUF_SIZE = 2 * 1024 * 1024
+
+
+def tune_media_session_socket(media_session: Optional[Session]) -> bool:
+    """
+    调优 MTProto 媒体连接底层 TCP 套接字：
+    1. 开启 TCP_NODELAY=1 禁用 Nagle 算法，消除 ACK 延迟合并等待；
+    2. 将 SO_RCVBUF 扩大至 4MB、SO_SNDBUF 扩大至 2MB，突破跨洋 180ms RTT 下的 BDP 窗口瓶颈。
+    """
+    if media_session is None:
+        return False
+    try:
+        conn = getattr(media_session, "connection", None)
+        if conn is None:
+            return False
+        proto = getattr(conn, "protocol", None)
+        sock = getattr(proto, "socket", None) or getattr(conn, "socket", None)
+        if sock is None and proto is not None:
+            for attr_name in ("writer", "transport"):
+                holder = getattr(proto, attr_name, None)
+                if holder is not None and hasattr(holder, "get_extra_info"):
+                    sock = holder.get_extra_info("socket")
+                    if sock is not None:
+                        break
+        if sock is not None and hasattr(sock, "setsockopt"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, MEDIA_SOCKET_RCVBUF_SIZE)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, MEDIA_SOCKET_SNDBUF_SIZE)
+            return True
+    except Exception as e:
+        logger.debug(f"调优 MTProto 媒体套接字选项跳过: {e}")
+    return False
 
 
 def _is_session_usable(media_session: Optional[Session]) -> bool:
@@ -172,8 +227,12 @@ class ByteStreamer:
             # 若 target_slot 尚未建立，但 slot 0 已就绪，则后台异步建 target_slot，本次先用已就绪连接或直接建立
             slot_idx = target_slot
 
-        if not force_recreate and _is_session_usable(pool.get(slot_idx)):
-            return pool[slot_idx]
+        if not force_recreate:
+            if _is_session_usable(pool.get(slot_idx)):
+                return pool[slot_idx]
+            for _s_idx, _sess in list(pool.items()):
+                if _is_session_usable(_sess):
+                    return _sess
 
         lock_key = (id(client), dc_id, slot_idx)
         if lock_key not in export_auth_locks:
@@ -250,6 +309,7 @@ class ByteStreamer:
                 )
                 await media_session.start()
 
+            tune_media_session_socket(media_session)
             pool[slot_idx] = media_session
             client.media_sessions[dc_id] = media_session
             try:
@@ -322,25 +382,34 @@ class ByteStreamer:
             self._rr_counter += 1
             slot_idx = self._rr_counter % MEDIA_SESSIONS_PER_BOT
 
-        for retry_attempt in range(max_retries):
+        actual_retries = max(1, int(max_retries))
+        for retry_attempt in range(actual_retries):
             cur_slot = (slot_idx + retry_attempt) % MEDIA_SESSIONS_PER_BOT
             try:
                 media_session = await self.generate_media_session(client, file_id, slot_idx=cur_slot)
-                async with self._inflight_sem:
-                    r = await asyncio.wait_for(
-                        media_session.invoke(
-                            raw.functions.upload.GetFile(
-                                location=location, offset=offset, limit=chunk_size
+
+                async def _invoke_get_file():
+                    async with self._inflight_sem:
+                        return await asyncio.wait_for(
+                            media_session.invoke(
+                                raw.functions.upload.GetFile(
+                                    location=location, offset=offset, limit=chunk_size
+                                ),
                             ),
-                        ),
-                        timeout=timeout,
-                    )
+                            timeout=timeout,
+                        )
+
+                invoke_task = asyncio.create_task(_invoke_get_file())
+                invoke_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+                # 使用 asyncio.shield 保护底层在途 MTProto 套接字请求，
+                # 防止 HTTP 客户端 Seek/断开连接触发的上层 Task Cancellation 撕裂 TCP 会话导致断线风暴
+                r = await asyncio.shield(invoke_task)
                 mark_bot_success(client_index)
                 return True, r, client, None
 
             except (asyncio.TimeoutError, TimeoutError) as e:
                 logger.warning(f"客户端 {client_index} 拉取分片超时 (offset={offset})")
-                if retry_attempt < max_retries - 1:
+                if retry_attempt < actual_retries - 1:
                     await asyncio.sleep(0.2 * (retry_attempt + 1))
                 else:
                     mark_bot_failure(client_index, e)
@@ -357,7 +426,7 @@ class ByteStreamer:
                 )
                 is_file_ref_expired = "FILE_REFERENCE" in error_msg
 
-                if retry_attempt < max_retries - 1:
+                if retry_attempt < actual_retries - 1:
                     if is_encryption_error:
                         try:
                             await self.generate_media_session(client, file_id, slot_idx=cur_slot, force_recreate=True)
@@ -365,6 +434,7 @@ class ByteStreamer:
                             pass
                     elif is_file_ref_expired and message_id is not None:
                         try:
+                            clear_global_bot_ctx_cache(message_id)
                             refreshed_file_id = await self.get_file_properties(message_id, force_refresh=True)
                             location = await self.get_location(refreshed_file_id)
                             file_id = refreshed_file_id
@@ -377,15 +447,35 @@ class ByteStreamer:
 
         return False, None, client, None
 
-    async def _prepare_bot_context(self, bot_idx: int, message_id: Optional[int], default_file_id: FileId, default_location):
-        bot_client = multi_clients[bot_idx]
+    async def _prepare_bot_context(
+        self,
+        bot_idx: int,
+        message_id: Optional[int],
+        default_file_id: FileId,
+        default_location,
+        force_refresh: bool = False,
+    ):
+        bot_client = multi_clients.get(bot_idx)
+        if bot_client is None:
+            return None
         bot_streamer = ByteStreamer.for_client(bot_client)
         if bot_idx == self._find_own_index() or message_id is None:
             return bot_client, bot_streamer, default_file_id, default_location
-        # 每个从机器人必须通过自己的会话获取专属 file_reference，否则 Telegram 会拒绝并抛出 FILE_REFERENCE_EXPIRED
-        bot_file_id = await bot_streamer.get_file_properties(message_id, force_refresh=False)
-        bot_location = await bot_streamer.get_location(bot_file_id)
-        return bot_client, bot_streamer, bot_file_id, bot_location
+
+        cache_key = (bot_idx, message_id)
+        if not force_refresh and cache_key in _global_bot_ctx_cache:
+            return _global_bot_ctx_cache[cache_key]
+
+        lock = _global_bot_ctx_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            if not force_refresh and cache_key in _global_bot_ctx_cache:
+                return _global_bot_ctx_cache[cache_key]
+            # 每个从机器人必须通过自己的会话获取专属 file_reference，否则 Telegram 会拒绝并抛出 FILE_REFERENCE_EXPIRED
+            bot_file_id = await bot_streamer.get_file_properties(message_id, force_refresh=force_refresh)
+            bot_location = await bot_streamer.get_location(bot_file_id)
+            res = (bot_client, bot_streamer, bot_file_id, bot_location)
+            _global_bot_ctx_cache[cache_key] = res
+            return res
 
     def _find_own_index(self) -> int:
         for k, v in multi_clients.items():
@@ -489,17 +579,26 @@ class ByteStreamer:
                     logger.warning(f"从机 {bot_idx} 初始化分片上下文失败: {e}")
                     return None
 
-        # 并行预热当前条带所有节点的上下文与 FileId 缓存，消除逐个初始化延迟
+        # 受控全量非阻塞预热：通过 Semaphore(16) 在后台流水线预热当前流分配的全部条带 Bot，
+        # 既保证第 1 分片零延迟极速产出，又在滑动窗口扩展前消除 50+ 节点的冷启动连接风暴
         if len(stripe_bots) > 1 and message_id is not None:
-            try:
-                await asyncio.gather(*[_get_ctx(b) for b in stripe_bots], return_exceptions=True)
-            except Exception:
-                pass
+            warmup_sem = asyncio.Semaphore(16)
 
-        async def _fetch_part(part_idx: int):
+            async def _warm_stripe_bot(b_idx: int):
+                async with warmup_sem:
+                    try:
+                        await _get_ctx(b_idx)
+                    except Exception:
+                        pass
+
+            warmup_targets = [b for b in stripe_bots if b != current_index]
+            for b in warmup_targets:
+                asyncio.create_task(_warm_stripe_bot(b))
+
+        async def _fetch_part(part_idx: int, override_bot: Optional[int] = None):
             part_offset = offset + (part_idx - 1) * chunk_size
             active_bots = stripe_bots or [current_index]
-            assigned_bot = active_bots[(part_idx - 1) % len(active_bots)]
+            assigned_bot = override_bot if override_bot is not None else active_bots[(part_idx - 1) % len(active_bots)]
             slot_idx = ((part_idx - 1) // len(active_bots)) % MEDIA_SESSIONS_PER_BOT
 
             try:
@@ -540,7 +639,8 @@ class ByteStreamer:
         prefetch_tasks: Dict[int, asyncio.Task] = {}
 
         try:
-            initial_window = min(part_count, prefetch_window)
+            # 起播初始预取：以 2 块为起点，避免 Range 嗅探/高频 Seek 时瞬间发射全集群 20+ 个分片导致取消风暴
+            initial_window = min(part_count, 2)
             for p in range(1, initial_window + 1):
                 prefetch_tasks[p] = asyncio.create_task(_fetch_part(p))
 
@@ -551,21 +651,89 @@ class ByteStreamer:
 
                 active_bots = stripe_bots or [current_index]
                 assigned_bot = active_bots[(current_part - 1) % len(active_bots)]
+                success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
 
                 try:
-                    success, r, used_bot, part_offset = await asyncio.wait_for(task, timeout=12.0)
+                    done, pending = await asyncio.wait([task], timeout=3.5)
+                    if done:
+                        res_tuple = task.result()
+                        if res_tuple and res_tuple[0] and isinstance(res_tuple[1], raw.types.upload.File):
+                            success, r, used_bot, part_offset = res_tuple
                 except Exception as e:
-                    logger.warning(f"分片 {current_part} (Bot {assigned_bot}) 预取等待超时或异常 ({e})，执行兜底重试...")
-                    success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
+                    logger.warning(f"分片 {current_part} (Bot {assigned_bot}) 预取异常 ({e})")
+
+                if not success:
+                    # 慢节点快速对冲重试 (Hedged Fetching)：原任务超过 3.5s 未完成时，不取消原任务，
+                    # 立即从已预热的上下文缓存中选出另一个健康节点并发竞速，谁先返回用谁！
+                    fast_fallback = None
+                    for b_cached in list(bot_ctx_cache.keys()):
+                        if b_cached != assigned_bot:
+                            fast_fallback = b_cached
+                            break
+                    if fast_fallback is None:
+                        fast_fallback = current_index
+
+                    logger.debug(
+                        f"分片 {current_part} (Bot {assigned_bot}) 响应超 3.5s，触发无损对冲竞速 (对冲节点: Bot {fast_fallback})..."
+                    )
+                    hedged_task = asyncio.create_task(_fetch_part(current_part, override_bot=fast_fallback))
+                    race_candidates = [hedged_task] if task.done() else [task, hedged_task]
+                    done_hedge, pending_hedge = await asyncio.wait(
+                        race_candidates,
+                        timeout=8.5,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for d in done_hedge:
+                        try:
+                            res_tuple = d.result()
+                            if res_tuple and res_tuple[0] and isinstance(res_tuple[1], raw.types.upload.File):
+                                success, r, used_bot, part_offset = res_tuple
+                                break
+                        except Exception:
+                            pass
+                    if not success and pending_hedge:
+                        done2, pending2 = await asyncio.wait(
+                            pending_hedge, timeout=5.0, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        for d in done2:
+                            try:
+                                res_tuple = d.result()
+                                if res_tuple and res_tuple[0] and isinstance(res_tuple[1], raw.types.upload.File):
+                                    success, r, used_bot, part_offset = res_tuple
+                                    break
+                            except Exception:
+                                pass
+                        for p in pending2:
+                            if not p.done():
+                                p.cancel()
+                    else:
+                        for p in pending_hedge:
+                            if not p.done():
+                                p.cancel()
 
                 if not success or not isinstance(r, raw.types.upload.File):
-                    logger.warning(f"分片 {current_part} 首轮获取未命中，执行备用重试...")
-                    success, r, used_bot, part_offset = await _fetch_part(current_part)
+                    logger.warning(f"分片 {current_part} 首轮与对冲未命中，由主 Bot ({current_index}) 执行兜底重试...")
+                    success, r, used_bot, part_offset = await _fetch_part(current_part, override_bot=current_index)
                     if not success or not isinstance(r, raw.types.upload.File):
                         logger.error(f"所有客户端都无法获取文件块，停止文件流传输 (offset: {part_offset})")
                         break
 
-                for next_p in range(current_part + 1, min(part_count, current_part + prefetch_window) + 1):
+                # 动态自适应滑动窗口（平滑渐进阶梯扩容：2 -> 6 -> 12 -> 24 -> 36 -> prefetch_window）：
+                # 窗口推进速度与后台 16 并发预热对齐，彻底消除从 8 突跃至 55 引发的瞬时连接风暴
+                if current_part == 1:
+                    cur_window = min(prefetch_window, 2)
+                elif current_part == 2:
+                    cur_window = min(prefetch_window, 6)
+                elif current_part == 3:
+                    cur_window = min(prefetch_window, 12)
+                elif current_part == 4:
+                    cur_window = min(prefetch_window, 24)
+                elif current_part == 5:
+                    cur_window = min(prefetch_window, 36)
+                else:
+                    cur_window = prefetch_window
+
+                for next_p in range(current_part + 1, min(part_count, current_part + cur_window) + 1):
                     if next_p not in prefetch_tasks:
                         prefetch_tasks[next_p] = asyncio.create_task(_fetch_part(next_p))
 
@@ -610,4 +778,5 @@ class ByteStreamer:
             await asyncio.sleep(self.clean_timer)
             async with self._cache_lock:
                 self.cached_file_ids.clear()
+            clear_global_bot_ctx_cache()
             logger.debug("Cleaned the cache")

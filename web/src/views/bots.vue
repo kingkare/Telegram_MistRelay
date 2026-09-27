@@ -74,12 +74,12 @@
             <div class="stat-info">
               <div class="stat-value">{{ botDetails.length }} <span class="stat-unit">节点</span></div>
               <div class="stat-label">
-                主控 1 + 从机 {{ Math.max(0, botDetails.length - 1) }} (单号上限 20)
+                主控 1 + 从机 {{ Math.max(0, botDetails.length - 1) }} (多号集群就绪)
               </div>
               <div class="stat-progress">
                 <div
                   class="stat-progress-bar"
-                  :style="{ width: `${Math.min(100, (botDetails.length / 20) * 100)}%` }"
+                  :style="{ width: `${Math.min(100, (botDetails.length / Math.max(20, Math.ceil(botDetails.length / 20) * 20)) * 100)}%` }"
                 ></div>
               </div>
             </div>
@@ -476,33 +476,101 @@
           v-for="part in dcPartitionList"
           :key="part.dc_id"
           class="dc-part-item"
-          :class="{ 'dc-part-active': part.files_count > 0 || part.home_bots.length > 0 }"
+          :class="{
+            'dc-part-active': part.files_count > 0 || part.home_bots.length > 0,
+            'dc-part-idle': part.files_count === 0 && part.home_bots.length === 0 && part.warm_bots.length === 0
+          }"
         >
           <div class="dc-part-top">
             <span class="dc-badge-tag" :class="`dc-tag-${part.dc_id}`">DC{{ part.dc_id }}</span>
-            <span class="dc-region-name">{{ part.label.replace(/^DC\d\s*/, '') }}</span>
+            <span class="dc-region-name" :title="cleanDcRegion(part.label)">{{ cleanDcRegion(part.label) }}</span>
           </div>
           <div class="dc-part-metrics">
             <div class="dc-m-col">
               <span class="dc-m-val text-sky-500">{{ part.files_count }}</span>
-              <span class="dc-m-lbl">网盘文件</span>
+              <span class="dc-m-lbl" title="网盘文件">网盘文件</span>
             </div>
             <div class="dc-m-col">
               <span class="dc-m-val text-pink-500">{{ part.home_bots.length }}</span>
-              <span class="dc-m-lbl">原生Bot</span>
+              <span class="dc-m-lbl" title="原生Bot">原生Bot</span>
             </div>
             <div class="dc-m-col">
               <span class="dc-m-val text-emerald-500">{{ part.warm_bots.length }}</span>
-              <span class="dc-m-lbl">热备就绪</span>
+              <span class="dc-m-lbl" title="热备就绪">热备就绪</span>
             </div>
           </div>
           <div class="dc-part-bots">
-            <span v-if="part.home_bots.length > 0" class="dc-bot-pills text-purple-600 font-medium">
-              原生: {{ part.home_bots.map((i: number) => `#${i}`).join(', ') }}
-            </span>
-            <span v-else-if="part.warm_bots.length > 0" class="dc-bot-pills text-emerald-600 font-medium">
-              热备: {{ part.warm_bots.map((i: number) => `#${i}`).join(', ') }}
-            </span>
+            <el-popover
+              v-if="part.home_bots.length > 0 || part.warm_bots.length > 0"
+              placement="top"
+              :width="320"
+              trigger="hover"
+              popper-class="dc-popover-card"
+            >
+              <template #reference>
+                <div class="dc-bot-preview-pill">
+                  <template v-if="part.home_bots.length > 0">
+                    <span class="dc-bot-type text-purple-600">原生:</span>
+                    <span class="dc-bot-nums text-purple-600 font-medium">
+                      {{ part.home_bots.slice(0, 3).map((i: number) => `#${i}`).join(', ') }}
+                    </span>
+                    <span v-if="part.home_bots.length > 3" class="dc-more-badge bg-purple-50 text-purple-600">
+                      +{{ part.home_bots.length - 3 }}
+                    </span>
+                  </template>
+                  <template v-else-if="part.warm_bots.length > 0">
+                    <span class="dc-bot-type text-emerald-600">热备:</span>
+                    <span class="dc-bot-nums text-emerald-600 font-medium">
+                      {{ part.warm_bots.slice(0, 3).map((i: number) => `#${i}`).join(', ') }}
+                    </span>
+                    <span v-if="part.warm_bots.length > 3" class="dc-more-badge bg-emerald-50 text-emerald-600">
+                      +{{ part.warm_bots.length - 3 }}
+                    </span>
+                  </template>
+                </div>
+              </template>
+
+              <!-- 悬停 Popover 浮层内容 -->
+              <div class="dc-popover-inner">
+                <div class="dc-popover-header">
+                  <span class="dc-badge-tag" :class="`dc-tag-${part.dc_id}`">DC{{ part.dc_id }}</span>
+                  <span class="dc-popover-title">调度亲和明细 ({{ cleanDcRegion(part.label) }})</span>
+                </div>
+
+                <div v-if="part.home_bots.length > 0" class="dc-pop-section">
+                  <div class="dc-pop-sec-title">
+                    <span class="dc-dot-sub bg-purple-500"></span>
+                    <span>原生节点 ({{ part.home_bots.length }} 个)</span>
+                  </div>
+                  <div class="dc-pop-chips-wrap">
+                    <span
+                      v-for="idx in part.home_bots"
+                      :key="`h-${idx}`"
+                      class="dc-pop-chip chip-purple"
+                    >
+                      #{{ idx }}
+                    </span>
+                  </div>
+                </div>
+
+                <div v-if="part.warm_bots.length > 0" class="dc-pop-section">
+                  <div class="dc-pop-sec-title">
+                    <span class="dc-dot-sub bg-emerald-500"></span>
+                    <span>热备就绪 ({{ part.warm_bots.length }} 个)</span>
+                  </div>
+                  <div class="dc-pop-chips-wrap">
+                    <span
+                      v-for="idx in part.warm_bots"
+                      :key="`w-${idx}`"
+                      class="dc-pop-chip chip-emerald"
+                    >
+                      #{{ idx }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </el-popover>
+
             <span v-else class="dc-bot-pills text-slate-400">
               按需跨区拉取
             </span>
@@ -558,6 +626,21 @@
       </div>
     </div>
 
+    <!-- DC1 极速上传贴士 (当有 DC1 节点但无 DC1 写权限时展示) -->
+    <div v-if="hasDc1Worker && !hasDc1Writer" class="dc1-tip-card glass-card mb-4">
+      <div class="dc1-tip-inner">
+        <div class="dc1-tip-icon-wrap">
+          <el-icon :size="20"><Lightning /></el-icon>
+        </div>
+        <div class="dc1-tip-text">
+          <div class="dc1-tip-title">⚡ 极速上传提速贴士：解锁 DC1 极速写入（25~35+ MB/s）</div>
+          <div class="dc1-tip-desc">
+            检测到集群拥有低时延 <strong>DC1 (美西 67ms)</strong> 节点，当前频道发帖写权限仍由主控（DC5 新加坡，物理时延约 170ms）承担。建议在 Telegram 频道管理中将任意带有 <strong>「⚡ 推荐写节点」</strong> 标识的 DC1 从机拉入频道并赋予发帖管理员权限，系统探测后将自动切换至 DC1 极速上传通道，将转存速度从 7~9 MB/s 提升至 <strong>25~35+ MB/s</strong>！
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 节点网格 -->
     <el-row :gutter="14" class="nodes-grid-row">
       <el-col
@@ -595,6 +678,21 @@
                 title="实测单连接播放码率"
               >
                 {{ nodeBenchmarkMap[bot.index].playback_bitrate_mbps }}Mbps
+              </span>
+              <!-- DC1 写节点加速推荐/激活标签 -->
+              <span
+                v-if="bot.home_dc === 1 && !bot.can_write"
+                class="node-dc1-rec-badge"
+                title="DC1 美西物理时延仅 67ms，推荐将此 Bot 拉入频道设为发帖管理员以解锁 25~35+ MB/s 极速上传"
+              >
+                ⚡ 推荐写节点
+              </span>
+              <span
+                v-else-if="bot.home_dc === 1 && bot.can_write"
+                class="node-dc1-active-badge"
+                title="已激活 DC1 极速写节点 (67ms 低时延，可达 25~35+ MB/s)"
+              >
+                🚀 极速写节点
               </span>
               <!-- 接入模式标签 -->
               <span class="node-mode-badge" :class="`badge-${bot.mode}`">
@@ -809,6 +907,11 @@ const dcPartitions = ref<Record<string, DcPartitionEntry>>({})
 const dcPartitionList = computed(() => {
   return Object.values(dcPartitions.value || {}).sort((a, b) => a.dc_id - b.dc_id)
 })
+
+function cleanDcRegion(label: string): string {
+  if (!label) return ''
+  return label.replace(/^DC\d\s*\(?/, '').replace(/\)?$/, '').trim()
+}
 const streamBenchForm = ref<{
   botIndex: number | null
   sampleSizeMb: number
@@ -849,6 +952,9 @@ const noJoinCount = computed(() =>
 const accessibleCount = computed(() =>
   botDetails.value.filter(b => b.can_read).length
 )
+
+const hasDc1Writer = computed(() => botDetails.value.some((b) => b.home_dc === 1 && b.can_write))
+const hasDc1Worker = computed(() => botDetails.value.some((b) => b.home_dc === 1 && b.index > 0))
 
 const totalWorkload = computed(() =>
   Object.values(workloads.value).reduce((acc, v) => acc + (Number(v) || 0), 0)
@@ -3140,17 +3246,23 @@ onMounted(async () => {
 
 .dc-matrix-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
 
-@media (max-width: 1024px) {
+@media (max-width: 1100px) {
   .dc-matrix-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
+  .dc-matrix-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
   .dc-matrix-grid {
     grid-template-columns: 1fr;
   }
@@ -3165,13 +3277,26 @@ onMounted(async () => {
   flex-direction: column;
   gap: 8px;
   transition: all 0.2s ease;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.dc-part-item.dc-part-active {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(192, 132, 252, 0.35);
+  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.06);
+}
+
+.dc-part-item.dc-part-idle {
+  opacity: 0.72;
 }
 
 .dc-part-item:hover {
+  opacity: 1;
   background: rgba(255, 255, 255, 0.95);
-  border-color: rgba(56, 189, 248, 0.4);
+  border-color: rgba(56, 189, 248, 0.5);
   transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(56, 189, 248, 0.1);
+  box-shadow: 0 6px 16px rgba(56, 189, 248, 0.12);
 }
 
 .dc-part-top {
@@ -3179,6 +3304,7 @@ onMounted(async () => {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  min-width: 0;
 }
 
 .dc-badge-tag {
@@ -3186,6 +3312,7 @@ onMounted(async () => {
   font-weight: 700;
   padding: 1px 7px;
   border-radius: 6px;
+  flex-shrink: 0;
 }
 
 .dc-tag-1 { background: rgba(59, 130, 246, 0.12); color: #2563eb; border: 1px solid rgba(59, 130, 246, 0.25); }
@@ -3201,13 +3328,14 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .dc-part-metrics {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
-  padding: 6px 0;
+  padding: 7px 0;
   border-top: 1px solid rgba(241, 245, 249, 0.9);
   border-bottom: 1px solid rgba(241, 245, 249, 0.9);
 }
@@ -3216,24 +3344,69 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   align-items: center;
+  min-width: 0;
 }
 
 .dc-m-val {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   line-height: 1.2;
 }
 
 .dc-m-lbl {
-  font-size: 10px;
+  font-size: 10.5px;
   color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .dc-part-bots {
   font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
+
+.dc-bot-preview-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+  min-width: 0;
+}
+
+.dc-bot-preview-pill:hover {
+  background: rgba(241, 245, 249, 0.8);
+}
+
+.dc-bot-type {
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.dc-bot-nums {
+  font-size: 11px;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+}
+
+.dc-more-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  line-height: 16px;
 }
 
 .dc-bot-pills {
@@ -3242,6 +3415,87 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* DC Popover 浮层样式 */
+.dc-popover-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px;
+}
+
+.dc-popover-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+}
+
+.dc-popover-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.dc-pop-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dc-pop-sec-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.dc-dot-sub {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.dc-pop-chips-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 2px 0;
+}
+
+.dc-pop-chips-wrap::-webkit-scrollbar {
+  width: 4px;
+}
+
+.dc-pop-chips-wrap::-webkit-scrollbar-thumb {
+  background: rgba(203, 213, 225, 0.8);
+  border-radius: 4px;
+}
+
+.dc-pop-chip {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  line-height: 15px;
+}
+
+.chip-purple {
+  background: rgba(168, 85, 247, 0.12);
+  color: #9333ea;
+  border: 1px solid rgba(168, 85, 247, 0.2);
+}
+
+.chip-emerald {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.2);
 }
 
 /* 卡片内的 DC 信息条 */
@@ -3284,6 +3538,72 @@ onMounted(async () => {
   color: #059669;
   font-weight: 600;
   font-size: 10px;
+}
+
+/* DC1 极速提示卡片 */
+.dc1-tip-card {
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(254, 240, 138, 0.25), rgba(56, 189, 248, 0.15));
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.dc1-tip-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.dc1-tip-icon-wrap {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #f59e0b, #ef4444);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.dc1-tip-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #b45309;
+  margin-bottom: 4px;
+}
+
+.dc1-tip-desc {
+  font-size: 12px;
+  color: #475569;
+  line-height: 1.5;
+}
+
+.node-dc1-rec-badge {
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(239, 68, 68, 0.15));
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  animation: pulse-border 2.5s infinite;
+}
+
+.node-dc1-active-badge {
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(56, 189, 248, 0.15));
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: rgba(245, 158, 11, 0.35); }
+  50% { border-color: rgba(239, 68, 68, 0.7); box-shadow: 0 0 8px rgba(245, 158, 11, 0.25); }
 }
 
 </style>

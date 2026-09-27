@@ -507,9 +507,25 @@ import type {
   CheckProtocolAccountResponse,
   ImportTaskStatus,
   ImportTaskStatusResponse,
+  ProtocolAccountDetail,
+  ProtocolAccountDetailResponse,
+  FetchProtocolAccountApiResponse,
+  BatchFetchProtocolAccountApiResponse,
+  UpdateProtocolAccountCredentialsRequest,
+  ProtocolKeepaliveSummary,
+  ProtocolKeepaliveResponse,
+  KeepaliveConfig,
+  KeepaliveConfigResponse,
 } from '@/types/api'
 
 export type {
+  BatchFetchProtocolAccountApiResponse,
+  ProtocolAccountDetail,
+  ProtocolAccountDetailResponse,
+  ProtocolKeepaliveSummary,
+  ProtocolKeepaliveResponse,
+  KeepaliveConfig,
+  KeepaliveConfigResponse,
   HotAddBotResult,
   HotAddBotsResponse,
   HotRemoveBotResponse,
@@ -556,6 +572,70 @@ export function checkProtocolAccount(accountId: number): Promise<CheckProtocolAc
   return api.post<CheckProtocolAccountResponse>(`/telegram/botfather/accounts/${accountId}/check`, {}, {
     timeout: 300000,
   }).then(r => r.data)
+}
+
+export function getProtocolAccountDetail(accountId: number, refresh = false): Promise<ProtocolAccountDetailResponse> {
+  const query = refresh ? '?refresh=1' : ''
+  return api.get<ProtocolAccountDetailResponse>(`/telegram/botfather/accounts/${accountId}/detail${query}`, {
+    timeout: 120000,
+  }).then(r => r.data)
+}
+
+export function fetchProtocolAccountApi(accountId: number, proxyApiUrl?: string): Promise<FetchProtocolAccountApiResponse> {
+  return api.post<FetchProtocolAccountApiResponse>(`/telegram/botfather/accounts/${accountId}/fetch-api`, {
+    proxy_api_url: proxyApiUrl,
+  }, {
+    timeout: 180000,
+  }).then(r => r.data)
+}
+
+export function batchFetchProtocolAccountApi(data?: {
+  account_ids?: number[]
+  proxy_api_url?: string
+  only_missing?: boolean
+}): Promise<BatchFetchProtocolAccountApiResponse> {
+  return api.post<BatchFetchProtocolAccountApiResponse>('/telegram/botfather/accounts/fetch-api-batch', data || {}, {
+    timeout: 600000,
+  }).then(r => r.data)
+}
+
+export function getApiProxyConfig(): Promise<{ success: boolean; data?: { proxy_api_url: string; default_url: string }; error?: string }> {
+  return api.get('/telegram/botfather/proxy-config').then(r => r.data)
+}
+
+export function setApiProxyConfig(proxyApiUrl: string): Promise<{ success: boolean; data?: { proxy_api_url: string }; error?: string }> {
+  return api.post('/telegram/botfather/proxy-config', { proxy_api_url: proxyApiUrl }).then(r => r.data)
+}
+
+export function updateProtocolAccountCredentials(accountId: number, data: UpdateProtocolAccountCredentialsRequest): Promise<ProtocolAccountDetailResponse> {
+  return api.post<ProtocolAccountDetailResponse>(`/telegram/botfather/accounts/${accountId}/credentials`, data, {
+    timeout: 30000,
+  }).then(r => r.data)
+}
+
+export function keepaliveSingleProtocolAccount(accountId: number, checkBots = false): Promise<{ success: boolean; data?: any; error?: string }> {
+  return api.post<{ success: boolean; data?: any; error?: string }>(`/telegram/botfather/accounts/${accountId}/keepalive`, {
+    check_bots: checkBots,
+  }, {
+    timeout: 120000,
+  }).then(r => r.data)
+}
+
+export function keepaliveAllProtocolAccounts(accountIds?: number[], checkBots = false): Promise<ProtocolKeepaliveResponse> {
+  return api.post<ProtocolKeepaliveResponse>('/telegram/botfather/accounts/keepalive', {
+    account_ids: accountIds,
+    check_bots: checkBots,
+  }, {
+    timeout: 300000,
+  }).then(r => r.data)
+}
+
+export function getKeepaliveConfig(): Promise<KeepaliveConfigResponse> {
+  return api.get<KeepaliveConfigResponse>('/telegram/botfather/keepalive/config').then(r => r.data)
+}
+
+export function updateKeepaliveConfig(data: { enabled?: boolean; interval_hours?: number; trigger_now?: boolean }): Promise<KeepaliveConfigResponse> {
+  return api.post<KeepaliveConfigResponse>('/telegram/botfather/keepalive/config', data).then(r => r.data)
 }
 
 export function hotAddBots(tokens: string[] | string): Promise<HotAddBotsResponse> {

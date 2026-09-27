@@ -5,6 +5,12 @@ import asyncio
 import logging
 from ..vars import Var
 from pyrogram import Client
+try:
+    from ..utils.fast_uploader import patch_pyrogram_uploader, close_upload_sessions
+    patch_pyrogram_uploader()
+except Exception:
+    close_upload_sessions = None
+
 from . import (
     multi_clients,
     work_loads,
@@ -225,6 +231,11 @@ async def register_primary_streambot():
 
 
 async def initialize_clients():
+    try:
+        from ..utils.fast_uploader import patch_pyrogram_uploader
+        patch_pyrogram_uploader()
+    except Exception:
+        pass
     """
     初始化客户端
     如果配置了多个BOT_TOKEN，将创建多个客户端以实现负载均衡
@@ -244,61 +255,66 @@ async def initialize_clients():
         logger.info(f"客户端 0 已初始化（默认客户端，使用主BOT_TOKEN）")
         
         # 为额外的BOT_TOKEN创建客户端
-        for index, bot_token in enumerate(Var.MULTI_BOT_TOKENS, start=1):
-            try:
-                bot_id_prefix = str(bot_token).split(":", 1)[0]
-                client_name = f"pyrogram_bot_{bot_id_prefix}"
-                client = Client(
-                    name=client_name,
-                    api_id=Var.API_ID,
-                    api_hash=Var.API_HASH,
-                    workdir=sessions_dir,
-                    bot_token=bot_token,
-                    sleep_threshold=Var.SLEEP_THRESHOLD,
-                    workers=Var.WORKERS,
-                    in_memory=False,
-                    no_updates=True,
-                )
-                
-                # 启动客户端
-                await client.start()
-                bot_info = await client.get_me()
-                client.username = bot_info.username
-                
-                # 智能接入 BIN_CHANNEL（免加频道自动 Peer 解析与权限嗅探）
-                if Var.BIN_CHANNEL:
-                    import WebStreamer.bot as bot_mod
-                    probe_res = await probe_worker_channel_access(
-                        index=index,
-                        client=client,
-                        bin_channel=Var.BIN_CHANNEL,
-                        public_handle=getattr(bot_mod, "channel_public_handle", None),
-                    )
-                    if probe_res["can_read"]:
-                        if probe_res["mode"] == "no_join_resolved":
-                            logger.info(f"客户端 {index} (@{client.username}) 已激活【免加频道】负载均衡模式")
-                        else:
-                            logger.info(f"客户端 {index} (@{client.username}) 已直接连接频道 ({probe_res['mode']})")
-                    else:
-                        logger.warning(f"客户端 {index} (@{client.username}) 暂无法访问频道 {Var.BIN_CHANNEL}: {probe_res.get('last_error')}")
-                        logger.warning(f"💡 提示: 为频道设置公开用户名或关联公开讨论组，从机器人即可全自动免加频道分流！")
-                
-                client.bot_token = bot_token
-                client.bot_id_prefix = bot_id_prefix
-                multi_clients[index] = client
-                work_loads[index] = 0
-                register_bot_client(index)
+        # 为额外的BOT_TOKEN创建客户端（以 Semaphore(10) 受控并发启动，50+ 节点在数秒内极速就绪）
+        init_sem = asyncio.Semaphore(10)
+
+        async def _init_single_worker(index: int, bot_token: str):
+            async with init_sem:
                 try:
-                    if hasattr(client, "storage") and hasattr(client.storage, "dc_id"):
-                        h_dc = await client.storage.dc_id()
-                        set_bot_home_dc(index, h_dc)
-                except Exception:
-                    pass
-                logger.info(f"客户端 {index} 已初始化: @{bot_info.username}")
-            except Exception as e:
-                logger.error(f"初始化客户端 {index} 失败: {e}", exc_info=True)
-                # 继续初始化其他客户端，不因单个失败而停止
-        
+                    bot_id_prefix = str(bot_token).split(":", 1)[0]
+                    client_name = f"pyrogram_bot_{bot_id_prefix}"
+                    client = Client(
+                        name=client_name,
+                        api_id=Var.API_ID,
+                        api_hash=Var.API_HASH,
+                        workdir=sessions_dir,
+                        bot_token=bot_token,
+                        sleep_threshold=Var.SLEEP_THRESHOLD,
+                        workers=Var.WORKERS,
+                        in_memory=False,
+                        no_updates=True,
+                    )
+                    
+                    # 启动客户端
+                    await client.start()
+                    bot_info = await client.get_me()
+                    client.username = bot_info.username
+                    
+                    # 智能接入 BIN_CHANNEL（免加频道自动 Peer 解析与权限嗅探）
+                    if Var.BIN_CHANNEL:
+                        import WebStreamer.bot as bot_mod
+                        probe_res = await probe_worker_channel_access(
+                            index=index,
+                            client=client,
+                            bin_channel=Var.BIN_CHANNEL,
+                            public_handle=getattr(bot_mod, "channel_public_handle", None),
+                        )
+                        if probe_res["can_read"]:
+                            if probe_res["mode"] == "no_join_resolved":
+                                logger.info(f"客户端 {index} (@{client.username}) 已激活【免加频道】负载均衡模式")
+                            else:
+                                logger.info(f"客户端 {index} (@{client.username}) 已直接连接频道 ({probe_res['mode']})")
+                        else:
+                            logger.warning(f"客户端 {index} (@{client.username}) 暂无法访问频道 {Var.BIN_CHANNEL}: {probe_res.get('last_error')}")
+                            logger.warning(f"💡 提示: 为频道设置公开用户名或关联公开讨论组，从机器人即可全自动免加频道分流！")
+                    
+                    client.bot_token = bot_token
+                    client.bot_id_prefix = bot_id_prefix
+                    multi_clients[index] = client
+                    work_loads[index] = 0
+                    register_bot_client(index)
+                    try:
+                        if hasattr(client, "storage") and hasattr(client.storage, "dc_id"):
+                            h_dc = await client.storage.dc_id()
+                            set_bot_home_dc(index, h_dc)
+                    except Exception:
+                        pass
+                    logger.info(f"客户端 {index} 已初始化: @{bot_info.username}")
+                except Exception as e:
+                    logger.error(f"初始化客户端 {index} 失败: {e}", exc_info=True)
+
+        worker_tasks = [_init_single_worker(i, tok) for i, tok in enumerate(Var.MULTI_BOT_TOKENS, start=1)]
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
         successful_clients = len(multi_clients)
         logger.info(f"多机器人负载均衡初始化完成，共 {successful_clients} 个客户端可用")
         
@@ -345,7 +361,7 @@ async def background_dc_prewarm():
                 target_dcs.append(std_dc)
         logger.info(f"🚀 开始执行多机器人后台全 DC 媒体会话并发预热: 目标分区 DC={target_dcs}...")
 
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(16)
 
         async def _warm_one(idx: int, cli, dc_id: int):
             async with sem:
@@ -356,7 +372,7 @@ async def background_dc_prewarm():
                     return
                 try:
                     streamer = ByteStreamer.for_client(cli)
-                    await streamer.generate_media_session(cli, SimpleNamespace(dc_id=dc_id))
+                    await streamer.generate_media_session(cli, SimpleNamespace(dc_id=dc_id), slot_idx=0)
                     logger.info(f"✨ 客户端 {idx} (@{getattr(cli, 'username', idx)}) DC{dc_id} 跨区媒体会话预热完成")
                 except Exception as e:
                     logger.debug(f"客户端 {idx} 预热 DC{dc_id} 跳过: {e}")
@@ -585,6 +601,34 @@ async def hot_add_bot_client(bot_token: str, persist: bool = True) -> dict:
         if _health_check_task is None or _health_check_task.done():
             _health_check_task = asyncio.create_task(client_health_check())
 
+        # 自动异步预热新从机的媒体 DC 会话，确保零冷态即时接单
+        async def _prewarm_new_bot():
+            try:
+                from types import SimpleNamespace
+                from WebStreamer.utils.custom_dl import ByteStreamer
+                import db
+                records = db.list_all_tg_media_records()[:50]
+                hot_dcs = {5, 1}
+                for r in records:
+                    fid = r.get("file_id")
+                    if fid:
+                        try:
+                            from pyrogram.file_id import FileId
+                            hot_dcs.add(FileId.decode(fid).dc_id)
+                        except Exception:
+                            pass
+                streamer = ByteStreamer.for_client(client)
+                for dc in hot_dcs:
+                    try:
+                        if hasattr(streamer, "generate_media_session"):
+                            await streamer.generate_media_session(client, SimpleNamespace(dc_id=dc), slot_idx=0)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        asyncio.create_task(_prewarm_new_bot())
+
         logger.info(f"客户端 {new_index} (@{client.username}) 已成功热挂载入网！")
         return {
             "index": new_index,
@@ -623,6 +667,11 @@ async def hot_remove_bot_client(index: int, persist: bool = True) -> dict:
                 await client.stop()
         except Exception as stop_err:
             logger.debug(f"停止客户端 {index} 异常: {stop_err}")
+        try:
+            if close_upload_sessions is not None:
+                await close_upload_sessions(client)
+        except Exception:
+            pass
 
         if Var.MULTI_BOT_TOKENS and (bot_token or bot_id_prefix):
             Var.MULTI_BOT_TOKENS = [

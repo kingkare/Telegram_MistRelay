@@ -3,6 +3,7 @@
 全部使用 Python 内置库，无额外依赖。
 """
 
+import os
 import hashlib
 import hmac
 import json
@@ -14,8 +15,28 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# JWT 密钥：首次启动时随机生成，重启后旧 token 自动失效
-_JWT_SECRET: str = secrets.token_hex(32)
+# JWT 密钥：优先从持久化文件/环境变量读取，保证容器重启后现有登录 Token 持续有效
+def _load_or_create_jwt_secret() -> str:
+    secret_env = os.environ.get("MISTRELAY_JWT_SECRET")
+    if secret_env:
+        return secret_env
+    db_dir = os.path.dirname(os.environ.get("MISTRELAY_DB_PATH", "/app/db/downloads.db"))
+    key_file = os.path.join(db_dir, "jwt_signing.key")
+    try:
+        if os.path.exists(key_file):
+            with open(key_file, "r", encoding="utf-8") as f:
+                s = f.read().strip()
+                if len(s) >= 32:
+                    return s
+        new_secret = secrets.token_hex(32)
+        os.makedirs(os.path.dirname(os.path.abspath(key_file)), exist_ok=True)
+        with open(key_file, "w", encoding="utf-8") as f:
+            f.write(new_secret)
+        return new_secret
+    except Exception:
+        return secrets.token_hex(32)
+
+_JWT_SECRET: str = _load_or_create_jwt_secret()
 
 # Access tokens are deliberately short lived; refresh tokens are rotated server-side.
 TOKEN_EXPIRE_SECONDS = 15 * 60
@@ -180,3 +201,10 @@ def rotate_signing_secret() -> None:
     """Invalidate every outstanding access token after a security event."""
     global _JWT_SECRET
     _JWT_SECRET = secrets.token_hex(32)
+    db_dir = os.path.dirname(os.environ.get("MISTRELAY_DB_PATH", "/app/db/downloads.db"))
+    key_file = os.path.join(db_dir, "jwt_signing.key")
+    try:
+        with open(key_file, "w", encoding="utf-8") as f:
+            f.write(_JWT_SECRET)
+    except Exception:
+        pass

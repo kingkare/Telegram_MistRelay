@@ -314,6 +314,8 @@ def init_db():
                 status         TEXT NOT NULL DEFAULT 'active',
                 last_used_at   TEXT,
                 remark         TEXT,
+                api_id         INTEGER,
+                api_hash       TEXT,
                 created_at     TEXT NOT NULL
             )
             """
@@ -321,6 +323,23 @@ def init_db():
         cur.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_tg_protocol_accounts_phone ON tg_protocol_accounts (phone)"
         )
+
+        # 协议号资产池表扩展字段迁移
+        for col_name, col_type in [
+            ("dc_id", "INTEGER"),
+            ("tg_user_id", "INTEGER"),
+            ("username", "TEXT"),
+            ("first_name", "TEXT"),
+            ("last_keepalive_at", "TEXT"),
+            ("keepalive_ping_ms", "INTEGER"),
+            ("last_error", "TEXT"),
+            ("api_id", "INTEGER"),
+            ("api_hash", "TEXT"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE tg_protocol_accounts ADD COLUMN {col_name} {col_type}")
+            except sqlite3.OperationalError:
+                pass
 
         # Older releases created this now-unused index table but did not enable
         # SQLite foreign keys. Preserve its records while applying the declared
@@ -367,7 +386,7 @@ def init_db():
             logger.warning("配置表为空，且旧YAML引导未授权")
 
 
-def save_tg_media(message, media=None, custom_file_name=None, custom_caption=None) -> str:
+def save_tg_media(message, media=None, custom_file_name=None, custom_caption=None, custom_media_group_id=None) -> str:
     """
     保存一条 Telegram 媒体元数据，返回 file_unique_id。
 
@@ -424,6 +443,14 @@ def save_tg_media(message, media=None, custom_file_name=None, custom_caption=Non
         message_date = _now_iso()
     elif not isinstance(message_date, str):
         message_date = _format_message_date(message_date)
+
+    resolved_media_group_id = (
+        custom_media_group_id
+        if custom_media_group_id is not None
+        else (getattr(message, "media_group_id", None) or getattr(message, "grouped_id", None))
+    )
+    if resolved_media_group_id is not None:
+        resolved_media_group_id = str(resolved_media_group_id)
 
     file_info = getattr(message, "file", None)
     file_name = custom_file_name or getattr(media, "file_name", None) or getattr(file_info, "name", None)
@@ -508,7 +535,7 @@ def save_tg_media(message, media=None, custom_file_name=None, custom_caption=Non
                 caption,
                 ce_json,
                 message_date,
-                getattr(message, "media_group_id", None),
+                resolved_media_group_id,
                 int(bool(getattr(message, "has_media_spoiler", False) or getattr(media, "has_media_spoiler", False))),
                 int(bool(getattr(media, "supports_streaming", False))),
                 thumbs_json,
@@ -1151,7 +1178,14 @@ def set_configs(updates: list[tuple]):
 
 def set_config(key: str, value: any, value_type: str = 'string', category: str = 'general', description: str = None):
     """设置配置值"""
+    if value_type == 'string' and isinstance(value, bool):
+        value_type = 'bool'
+    elif value_type == 'string' and isinstance(value, int):
+        value_type = 'int'
     set_configs([(key, value, value_type, category, description)])
+
+get_config_value = get_config
+set_config_value = set_config
 
 
 def get_all_configs(category: str = None):
@@ -2794,6 +2828,8 @@ def upsert_protocol_account(
     bot_count: int | None = None,
     status: str | None = None,
     remark: str | None = None,
+    api_id: int | None = None,
+    api_hash: str | None = None,
 ) -> dict:
     """创建或更新协议号资产记录"""
     now = _now_iso()
@@ -2809,6 +2845,8 @@ def upsert_protocol_account(
             new_status = status if status is not None else existing["status"]
             new_remark = remark if remark is not None else existing["remark"]
             new_code_url = code_url if code_url is not None else existing["code_url"]
+            new_api_id = api_id if api_id is not None else existing["api_id"]
+            new_api_hash = api_hash if api_hash is not None else existing["api_hash"]
 
             conn.execute(
                 """
@@ -2819,17 +2857,19 @@ def upsert_protocol_account(
                        bot_count = ?,
                        status = ?,
                        remark = ?,
+                       api_id = ?,
+                       api_hash = ?,
                        last_used_at = ?
                  WHERE id = ?
                 """,
-                (session_data, session_type, new_code_url, new_bot_count, new_status, new_remark, now, account_id),
+                (session_data, session_type, new_code_url, new_bot_count, new_status, new_remark, new_api_id, new_api_hash, now, account_id),
             )
         else:
             cur = conn.execute(
                 """
                 INSERT INTO tg_protocol_accounts (
-                    phone, session_type, session_data, code_url, bot_count, status, remark, created_at, last_used_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    phone, session_type, session_data, code_url, bot_count, status, remark, api_id, api_hash, created_at, last_used_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     phone,
@@ -2839,6 +2879,8 @@ def upsert_protocol_account(
                     bot_count if bot_count is not None else 0,
                     status or "active",
                     remark,
+                    api_id,
+                    api_hash,
                     now,
                     now,
                 ),
@@ -2883,7 +2925,10 @@ def get_protocol_account_by_phone(phone: str) -> dict | None:
 
 def update_protocol_account(account_id: int, **kwargs) -> bool:
     """更新指定协议号的属性"""
-    allowed_keys = {"session_data", "session_type", "code_url", "bot_count", "status", "remark", "last_used_at"}
+    allowed_keys = {
+        "session_data", "session_type", "code_url", "bot_count", "status", "remark", "last_used_at",
+        "dc_id", "tg_user_id", "username", "first_name", "last_keepalive_at", "keepalive_ping_ms", "last_error", "api_id", "api_hash"
+    }
     updates = []
     params = []
     for k, v in kwargs.items():

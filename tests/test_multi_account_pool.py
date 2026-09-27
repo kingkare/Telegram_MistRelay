@@ -57,6 +57,7 @@ class TestMultiAccountPoolAndRelay(unittest.IsolatedAsyncioTestCase):
         self.orig_db_path = db.DB_PATH
         db.DB_PATH = os.path.join(self.tmp_dir.name, "test_pool.db")
         db.init_db()
+        db.set_config("TELEGRAM_API_PROXY_URL", "https://proxy.example.com/api?region=US&num=1&time=10&format=1&type=txt")
         botfather_creator._PHONE_SESSION_CACHE.clear()
         botfather_creator._CACHE_FILES = [os.path.join(self.tmp_dir.name, "sessions.json")]
 
@@ -365,6 +366,438 @@ class TestMultiAccountPoolAndRelay(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_status["reused_count"], 2)
         self.assertEqual(len(final_status["account_history"]), 1)
         self.assertEqual(final_status["account_history"][0]["phone"], "+10000000022")
+
+
+    async def test_inspect_session_metadata_and_telethon_conversion(self):
+        """测试底层会话参数无阻塞解析与 Telethon Session String 转换"""
+        from session_adapter import inspect_session_metadata
+        s = self._make_fake_session(5001)
+        meta = inspect_session_metadata(s)
+        self.assertEqual(meta["dc_id"], 2)
+        self.assertIn("DC2", meta["dc_name"])
+        self.assertTrue(len(meta["auth_key_fingerprint"]) >= 8)
+        self.assertTrue(meta["telethon_session_string"].startswith("1"))
+        self.assertTrue(len(meta["telethon_session_string"]) > 280)
+
+        # 验证往返互转一致性
+        meta_roundtrip = inspect_session_metadata(meta["telethon_session_string"])
+        self.assertEqual(meta_roundtrip["dc_id"], 2)
+        self.assertEqual(meta_roundtrip["auth_key_fingerprint"], meta["auth_key_fingerprint"])
+
+    async def test_get_protocol_account_detail(self):
+        """测试获取协议号详情透视接口（含双端 Session 凭证）"""
+        s = self._make_fake_session(6001)
+        rec = db.upsert_protocol_account(
+            phone="+16813087777",
+            session_data=s,
+            code_url="https://miha.uk/tgapi/xxx",
+            remark="测试号777",
+        )
+        detail = await botfather_creator.get_protocol_account_detail(rec["id"], refresh_online=False)
+        self.assertEqual(detail["account"]["phone"], "+16813087777")
+        self.assertEqual(detail["metadata"]["dc_id"], 2)
+        self.assertEqual(detail["metadata"]["code_url"], "https://miha.uk/tgapi/xxx")
+        self.assertTrue(detail["sessions"]["telethon_session_string"].startswith("1"))
+        self.assertEqual(detail["sessions"]["pyrogram_session_string"], s)
+
+    async def test_keepalive_protocol_account_and_all(self):
+        """测试协议号主动保活握手与全池保活巡检"""
+        s1 = self._make_fake_session(7001)
+        s2 = self._make_fake_session(7002)
+        acc1 = db.upsert_protocol_account(phone="+10000000088", session_data=s1)
+        acc2 = db.upsert_protocol_account(phone="+10000000099", session_data=s2)
+
+        class FakeKeepaliveClient:
+            def __init__(self, *args, **kwargs):
+                self.is_connected = False
+                self.storage = MagicMock()
+                self.storage.dc_id = AsyncMock(return_value=2)
+
+            async def start(self):
+                self.is_connected = True
+
+            async def stop(self):
+                self.is_connected = False
+
+            async def get_me(self):
+                m = MagicMock()
+                m.id = 7001
+                m.first_name = "KeepaliveTester"
+                m.username = "keepalive_user"
+                m.phone_number = "10000000088"
+                return m
+
+        with patch("botfather_creator.Client", FakeKeepaliveClient),              patch("asyncio.sleep", AsyncMock()):
+            # 单号保活测试
+            res = await botfather_creator.keepalive_protocol_account(acc1["id"], check_bots=False)
+            self.assertTrue(res["success"])
+            self.assertEqual(res["phone"], "+10000000088")
+            self.assertTrue(res["ping_ms"] >= 0)
+
+            # 验证数据库字段已更新
+            up1 = db.get_protocol_account_by_id(acc1["id"])
+            self.assertIsNotNone(up1["last_keepalive_at"])
+            self.assertEqual(up1["first_name"], "KeepaliveTester")
+            self.assertEqual(up1["username"], "keepalive_user")
+            self.assertEqual(up1["tg_user_id"], 7001)
+            self.assertEqual(up1["dc_id"], 2)
+
+            # 全量保活巡检测试
+            summary = await botfather_creator.keepalive_all_protocol_accounts(account_ids=[acc1["id"], acc2["id"]])
+            self.assertEqual(summary["total"], 2)
+            self.assertEqual(summary["success_count"], 2)
+            self.assertEqual(summary["failed_count"], 0)
+
+    async def test_keepalive_worker_lifecycle_and_config(self):
+        """测试保活守护 Worker 的生命周期与配置读写"""
+        worker = botfather_creator.get_keepalive_worker()
+        status = worker.get_status()
+        self.assertIn("enabled", status)
+        self.assertIn("interval_hours", status)
+
+        # 修改配置
+        db.set_config_value("PROTOCOL_KEEPALIVE_INTERVAL_HOURS", 6)
+        db.set_config_value("PROTOCOL_KEEPALIVE_ENABLED", True)
+        status2 = worker.get_status()
+        self.assertEqual(status2["interval_hours"], 6)
+        self.assertTrue(status2["enabled"])
+
+    async def test_import_multi_format_api_id_and_hash(self):
+        """测试多格式导入自动解析 api_id 与 api_hash (文本行与 .json 档案)"""
+        s1 = self._make_fake_session(8001)
+        s2 = self._make_fake_session(8002)
+        s3 = self._make_fake_session(8003)
+
+        import json
+        json_bytes = json.dumps({
+            "phone": "+16813088003",
+            "app_id": 28880003,
+            "app_hash": "aabbccddeeff00112233445566778899",
+            "first_name": "JsonUser",
+            "username": "json_u8003",
+            "session_string": s3,
+        }).encode("utf-8")
+
+        with patch("botfather_creator.login_via_phone_and_code_url", AsyncMock(return_value=s1)):
+            res = await botfather_creator.batch_import_protocol_accounts(
+                lines=[
+                    "+16813088001|28880001|11223344556677889900aabbccddeeff|https://miha.uk/tgapi/8001/GetHTML|测试备注A",
+                    f"28880002:fedcba9876543210fedcba9876543210:{s2}",
+                ],
+                files=[
+                    ("+16813088003.json", json_bytes),
+                ],
+            )
+
+        self.assertEqual(res["imported_count"], 3)
+        acc1 = db.get_protocol_account_by_phone("+16813088001")
+        self.assertIsNotNone(acc1)
+        self.assertEqual(acc1["api_id"], 28880001)
+        self.assertEqual(acc1["api_hash"], "11223344556677889900aabbccddeeff")
+        self.assertEqual(acc1["remark"], "测试备注A")
+
+        acc2 = db.get_protocol_account_by_phone("+uid_8002")
+        self.assertIsNotNone(acc2)
+        self.assertEqual(acc2["api_id"], 28880002)
+        self.assertEqual(acc2["api_hash"], "fedcba9876543210fedcba9876543210")
+
+        acc3 = db.get_protocol_account_by_phone("+16813088003")
+        self.assertIsNotNone(acc3)
+        self.assertEqual(acc3["api_id"], 28880003)
+        self.assertEqual(acc3["api_hash"], "aabbccddeeff00112233445566778899")
+        self.assertEqual(acc3["first_name"], "JsonUser")
+
+    def test_detect_region_from_phone(self):
+        """测试国际电话号码 E.164 最长前缀归属地区代码识别"""
+        cases = [
+            ("+16813086196", "US"),
+            ("+14165550199", "CA"),
+            ("+959757485895", "MM"),
+            ("+447700900077", "GB"),
+            ("+85291234567", "HK"),
+            ("+6581234567", "SG"),
+            ("+60123456789", "MY"),
+            ("+8613800000000", "CN"),
+            ("+819012345678", "JP"),
+            ("+79161234567", "RU"),
+            ("+77011234567", "KZ"),
+            ("unknown", "US"),
+        ]
+        for phone, expected in cases:
+            self.assertEqual(botfather_creator.detect_region_from_phone(phone), expected, f"Phone: {phone}")
+
+    def test_build_regional_proxy_api_url_and_parse(self):
+        """测试家宽代理 URL 地区代码替换与响应文本解析"""
+        url1 = botfather_creator.build_regional_proxy_api_url("MM")
+        self.assertIn("region=MM", url1)
+        self.assertNotIn("region=US", url1)
+
+        url2 = botfather_creator.build_regional_proxy_api_url("GB", "https://proxy.example.com/get?region={region}&num=1")
+        self.assertEqual(url2, "https://proxy.example.com/get?region=GB&num=1")
+
+        self.assertEqual(botfather_creator.parse_proxy_line("198.51.100.10:7150\r\n"), "http://198.51.100.10:7150")
+        self.assertEqual(botfather_creator.parse_proxy_line("10.0.0.1:8080:user:pass"), "http://user:pass@10.0.0.1:8080")
+        self.assertEqual(botfather_creator.parse_proxy_line('{"code": 200, "data": ["192.168.1.1:8888"]}'), "http://192.168.1.1:8888")
+
+    async def test_fetch_api_credentials_from_my_telegram(self):
+        """测试通过 my.telegram.org 自动提取或自动创建 App api_id 与 api_hash (含家宽代理注入)"""
+        s1 = self._make_fake_session(9001)
+        acc = db.upsert_protocol_account(phone="+16813089001", session_data=s1)
+
+        class FakeMyTgClient:
+            def __init__(self, *args, **kwargs):
+                self.is_connected = False
+
+            async def start(self):
+                self.is_connected = True
+
+            async def stop(self):
+                self.is_connected = False
+
+            async def get_me(self):
+                m = MagicMock()
+                m.id = 9001
+                m.phone_number = "16813089001"
+                return m
+
+            async def get_chat_history(self, chat_id, limit=3):
+                msg = MagicMock()
+                msg.text = "Web login code:\nAbCdEfGh1234\nDo not give this code to anyone."
+                yield msg
+
+        class FakeResp:
+            def __init__(self, text_val):
+                self._text = text_val
+
+            async def text(self):
+                return self._text
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                pass
+
+        class FakeHttpSession:
+            def __init__(self, *args, **kwargs):
+                self.apps_get_calls = 0
+                self.proxies_used = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                pass
+
+            def post(self, url, data=None, headers=None, proxy=None, **kwargs):
+                if proxy:
+                    self.proxies_used.append(proxy)
+                if "send_password" in url:
+                    return FakeResp('{"random_hash": "rhash_998877"}')
+                if "auth/login" in url:
+                    return FakeResp("true")
+                if "apps/create" in url:
+                    return FakeResp("")
+                return FakeResp("")
+
+            def get(self, url, headers=None, proxy=None, **kwargs):
+                if proxy:
+                    self.proxies_used.append(proxy)
+                if "proxy" in url or "region=" in url:
+                    return FakeResp("198.51.100.10:7150\n")
+                self.apps_get_calls += 1
+                if self.apps_get_calls == 1:
+                    return FakeResp('<form action="/apps/create"><input type="hidden" name="hash" value="form_hash_xyz"/></form>')
+                return FakeResp(
+                    '<label>App api_id:</label><span><strong>29998888</strong></span>'
+                    '<label>App api_hash:</label><span>1234567890abcdef1234567890abcdef</span>'
+                )
+
+        import aiohttp
+        with patch("botfather_creator.Client", FakeMyTgClient), \
+             patch.object(aiohttp, "ClientSession", FakeHttpSession, create=True), \
+             patch("asyncio.sleep", AsyncMock()):
+            res = await botfather_creator.fetch_api_credentials_from_my_telegram(acc["id"])
+
+        self.assertEqual(res["api_id"], 29998888)
+        self.assertEqual(res["api_hash"], "1234567890abcdef1234567890abcdef")
+        self.assertEqual(res["region"], "US")
+        self.assertIn("198.51.100.10", res["proxy_used"])
+
+        updated = db.get_protocol_account_by_id(acc["id"])
+        self.assertEqual(updated["api_id"], 29998888)
+        self.assertEqual(updated["api_hash"], "1234567890abcdef1234567890abcdef")
+
+    async def test_fetch_api_credentials_myanmar_region_matching(self):
+        """测试缅甸 (+95) 协议号自动调度 region=MM 家宽代理并提取凭证"""
+        s_mm = self._make_fake_session(9095)
+        acc_mm = db.upsert_protocol_account(phone="+959757485895", session_data=s_mm)
+
+        requested_proxy_urls = []
+
+        class FakeMyanmarClient:
+            def __init__(self, *args, **kwargs):
+                self.is_connected = False
+            async def start(self): self.is_connected = True
+            async def stop(self): self.is_connected = False
+            async def get_me(self):
+                m = MagicMock()
+                m.id = 9095
+                m.phone_number = "959757485895"
+                return m
+            async def get_chat_history(self, chat_id, limit=5):
+                msg = MagicMock()
+                msg.text = "Web login code: MmCode998877"
+                yield msg
+
+        class FakeResp:
+            def __init__(self, text): self._t = text
+            async def text(self): return self._t
+            async def __aenter__(self): return self
+            async def __aexit__(self, exc_type, exc, tb): pass
+
+        class FakeMyanmarHttpSession:
+            def __init__(self, *args, **kwargs):
+                self.apps_get_calls = 0
+
+            async def __aenter__(self): return self
+            async def __aexit__(self, exc_type, exc, tb): pass
+
+            def post(self, url, data=None, headers=None, proxy=None, **kwargs):
+                if "send_password" in url:
+                    return FakeResp('{"random_hash": "rhash_mm_123"}')
+                if "auth/login" in url:
+                    return FakeResp("true")
+                return FakeResp("")
+
+            def get(self, url, headers=None, proxy=None, **kwargs):
+                if "proxy" in url or "region=" in url:
+                    requested_proxy_urls.append(url)
+                    return FakeResp("198.51.100.10:32043\n")
+                return FakeResp(
+                    '<label>App api_id:</label><span><strong>29999095</strong></span>'
+                    '<label>App api_hash:</label><span>9595959595abcdef9595959595abcdef</span>'
+                )
+
+        import aiohttp
+        with patch("botfather_creator.Client", FakeMyanmarClient), \
+             patch.object(aiohttp, "ClientSession", FakeMyanmarHttpSession, create=True), \
+             patch("asyncio.sleep", AsyncMock()):
+            res = await botfather_creator.fetch_api_credentials_from_my_telegram(acc_mm["id"])
+
+        self.assertEqual(res["region"], "MM")
+        self.assertEqual(res["api_id"], 29999095)
+        self.assertEqual(res["api_hash"], "9595959595abcdef9595959595abcdef")
+        self.assertTrue(any("region=MM" in u for u in requested_proxy_urls), f"Requested URLs: {requested_proxy_urls}")
+
+    async def test_fetch_api_credentials_retry_on_bad_proxy(self):
+        """测试首个家宽代理节点异常时，引擎自动换拉第 2 个代理节点完成提取"""
+        s_retry = self._make_fake_session(9099)
+        acc_retry = db.upsert_protocol_account(phone="+16813089099", session_data=s_retry)
+
+        proxy_call_count = 0
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs): self.is_connected = False
+            async def start(self): self.is_connected = True
+            async def stop(self): self.is_connected = False
+            async def get_me(self):
+                m = MagicMock()
+                m.id = 9099
+                m.phone_number = "16813089099"
+                return m
+            async def get_chat_history(self, chat_id, limit=5):
+                msg = MagicMock()
+                msg.text = "Web login code: RetryCode123"
+                yield msg
+
+        class FakeResp:
+            def __init__(self, text): self._t = text
+            async def text(self): return self._t
+            async def __aenter__(self): return self
+            async def __aexit__(self, exc_type, exc, tb): pass
+
+        class FakeRetryHttpSession:
+            def __init__(self, *args, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, exc_type, exc, tb): pass
+
+            def post(self, url, data=None, headers=None, proxy=None, **kwargs):
+                if "7150" in str(proxy):
+                    raise TimeoutError("家宽代理连接超时")
+                if "send_password" in url:
+                    return FakeResp('{"random_hash": "rhash_retry"}')
+                if "auth/login" in url:
+                    return FakeResp("true")
+                return FakeResp("")
+
+            def get(self, url, headers=None, proxy=None, **kwargs):
+                nonlocal proxy_call_count
+                if "proxy" in url or "region=" in url:
+                    proxy_call_count += 1
+                    if proxy_call_count == 1:
+                        return FakeResp("198.51.100.10:7150\n")
+                    return FakeResp("198.51.100.10:8888\n")
+                return FakeResp(
+                    '<label>App api_id:</label><span><strong>29999099</strong></span>'
+                    '<label>App api_hash:</label><span>9999999999abcdef9999999999abcdef</span>'
+                )
+
+        import aiohttp
+        with patch("botfather_creator.Client", FakeClient), \
+             patch.object(aiohttp, "ClientSession", FakeRetryHttpSession, create=True), \
+             patch("asyncio.sleep", AsyncMock()):
+            res = await botfather_creator.fetch_api_credentials_from_my_telegram(acc_retry["id"])
+
+        self.assertEqual(res["api_id"], 29999099)
+        self.assertIn("8888", res["proxy_used"])
+        self.assertGreaterEqual(proxy_call_count, 2)
+
+    async def test_batch_fetch_api_credentials(self):
+        """测试全池批量提取未配置专属凭证的协议号"""
+        s_b1 = self._make_fake_session(9081)
+        s_b2 = self._make_fake_session(9082)
+        acc1 = db.upsert_protocol_account(phone="+16813089081", session_data=s_b1)
+        acc2 = db.upsert_protocol_account(phone="+959757489082", session_data=s_b2)
+
+        async def fake_fetch(acc_id, proxy_api_url=None):
+            return {
+                "api_id": 30000000 + acc_id,
+                "api_hash": f"batchhash{acc_id:024d}",
+                "region": "MM" if acc_id == acc2["id"] else "US",
+                "proxy_used": "http://198.51.100.10:7150",
+            }
+
+        with patch("botfather_creator.fetch_api_credentials_from_my_telegram", side_effect=fake_fetch), \
+             patch("asyncio.sleep", AsyncMock()):
+            batch_res = await botfather_creator.batch_fetch_api_credentials(account_ids=[acc1["id"], acc2["id"]])
+
+        self.assertEqual(batch_res["total"], 2)
+        self.assertEqual(batch_res["succeeded"], 2)
+        self.assertEqual(batch_res["failed"], 0)
+
+    async def test_update_protocol_account_credentials_manual(self):
+        """测试手动更新与校验协议号的 api_id 与 api_hash"""
+        s1 = self._make_fake_session(9002)
+        acc = db.upsert_protocol_account(phone="+16813089002", session_data=s1)
+
+        detail = await botfather_creator.update_protocol_account_credentials(
+            acc["id"],
+            api_id=21112222,
+            api_hash="ABCDEF1234567890ABCDEF1234567890",
+            remark="手动录入凭证",
+        )
+        self.assertEqual(detail["metadata"]["api_id"], 21112222)
+        self.assertEqual(detail["metadata"]["api_hash"], "abcdef1234567890abcdef1234567890")
+        self.assertEqual(detail["account"]["remark"], "手动录入凭证")
+        self.assertTrue(detail["account"]["has_api_hash"])
+
+        with self.assertRaises(ValueError):
+            await botfather_creator.update_protocol_account_credentials(
+                acc["id"],
+                api_id=21112222,
+                api_hash="invalid_short_hash",
+            )
 
 
 if __name__ == "__main__":

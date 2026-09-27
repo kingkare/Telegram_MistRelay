@@ -50,6 +50,9 @@ if "aiohttp" not in sys.modules:
     web_module.middleware = lambda func: func
     aiohttp_module.web = web_module
     aiohttp_module.ClientSession = SimpleNamespace
+    aiohttp_module.ClientTimeout = lambda **kwargs: SimpleNamespace(**kwargs)
+    aiohttp_module.TCPConnector = lambda **kwargs: SimpleNamespace(**kwargs)
+    aiohttp_module.CookieJar = lambda **kwargs: SimpleNamespace(**kwargs)
     sys.modules["aiohttp"] = aiohttp_module
     sys.modules["aiohttp.web"] = web_module
 
@@ -86,8 +89,23 @@ if "pyrogram" not in sys.modules:
         def __getattr__(self, name):
             return self
 
+    class StopTransmission(Exception):
+        pass
+
+    class DummySaveFile:
+        save_file = None
+
     pyrogram_module.Client = DummyClient
     pyrogram_module.filters = DummyFilter()
+    pyrogram_module.StopTransmission = StopTransmission
+
+    pyrogram_methods = types.ModuleType("pyrogram.methods")
+    pyrogram_methods_adv = types.ModuleType("pyrogram.methods.advanced")
+    pyrogram_save_file_mod = types.ModuleType("pyrogram.methods.advanced.save_file")
+    pyrogram_save_file_mod.SaveFile = DummySaveFile
+    sys.modules["pyrogram.methods"] = pyrogram_methods
+    sys.modules["pyrogram.methods.advanced"] = pyrogram_methods_adv
+    sys.modules["pyrogram.methods.advanced.save_file"] = pyrogram_save_file_mod
 
     pyrogram_file_id = types.ModuleType("pyrogram.file_id")
     def _mock_decode_file_id(val):
@@ -110,6 +128,18 @@ if "pyrogram" not in sys.modules:
     pyrogram_types.User = SimpleNamespace
     pyrogram_types.InlineKeyboardMarkup = SimpleNamespace
     pyrogram_types.InlineKeyboardButton = SimpleNamespace
+
+    class DummyInputMedia:
+        def __init__(self, media=None, **kwargs):
+            self.media = media
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    pyrogram_types.InputMediaPhoto = DummyInputMedia
+    pyrogram_types.InputMediaVideo = DummyInputMedia
+    pyrogram_types.InputMediaAudio = DummyInputMedia
+    pyrogram_types.InputMediaDocument = DummyInputMedia
+    pyrogram_module.types = pyrogram_types
     
     pyrogram_enums = types.ModuleType("pyrogram.enums")
     pyrogram_enums.ChatType = SimpleNamespace(CHANNEL="channel", SUPERGROUP="supergroup", GROUP="group")
@@ -126,7 +156,7 @@ if "pyrogram" not in sys.modules:
     
     pyrogram_raw = types.ModuleType("pyrogram.raw")
     pyrogram_raw.__path__ = []
-    pyrogram_raw.functions = SimpleNamespace(upload=SimpleNamespace(GetFile=SimpleNamespace), auth=SimpleNamespace(ExportAuthorization=SimpleNamespace, ImportAuthorization=SimpleNamespace))
+    pyrogram_raw.functions = SimpleNamespace(upload=SimpleNamespace(GetFile=SimpleNamespace, SaveFilePart=SimpleNamespace, SaveBigFilePart=SimpleNamespace), auth=SimpleNamespace(ExportAuthorization=SimpleNamespace, ImportAuthorization=SimpleNamespace))
     
     pyrogram_raw_types = types.ModuleType("pyrogram.raw.types")
     pyrogram_raw_types.__path__ = []
@@ -134,6 +164,8 @@ if "pyrogram" not in sys.modules:
     pyrogram_raw_types.InputPhotoFileLocation = SimpleNamespace
     pyrogram_raw_types.InputPeerPhotoFileLocation = SimpleNamespace
     pyrogram_raw_types.InputStickerSetThumb = SimpleNamespace
+    pyrogram_raw_types.InputFile = SimpleNamespace
+    pyrogram_raw_types.InputFileBig = SimpleNamespace
     upload_file_cls = type("UploadFile", (), {})
     pyrogram_raw_types.upload = SimpleNamespace(File=upload_file_cls)
     pyrogram_raw.types = pyrogram_raw_types

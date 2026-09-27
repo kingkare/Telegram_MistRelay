@@ -47,6 +47,12 @@ _AT_USERNAME_RE = re.compile(
 # 合法文件扩展名正则（1~8 位字母数字，常见媒体/文档/压缩包扩展名）
 _VALID_EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
 
+# 常见网站宣传后缀（如 _17黑料网、_吃瓜网、_某某导航）
+_PROMO_SITE_SUFFIX_RE = re.compile(
+    r"[-_]?(?:\d+)?(?:黑料网|吃瓜网|福利网|发布网|导航网|资源网|官方网|备用网|发布页)(?:\.[a-zA-Z]{2,6})?",
+    re.IGNORECASE,
+)
+
 # 清理后残留的空括号对
 _EMPTY_BRACKETS_RE = re.compile(
     r"(?:\(\s*\)|\[\s*\]|【\s*】|（\s*）|《\s*》|「\s*」|『\s*』)"
@@ -289,8 +295,9 @@ def clean_drive_filename(
     cleaned_stem = _STANDALONE_PROMO_WORD_RE.sub("", cleaned_stem)
     cleaned_stem = _AT_USERNAME_RE.sub("", cleaned_stem)
 
-    # 4. 移除残留空括号
+    # 4. 移除残留空括号与网站宣传后缀
     cleaned_stem = _EMPTY_BRACKETS_RE.sub("", cleaned_stem)
+    cleaned_stem = _PROMO_SITE_SUFFIX_RE.sub("", cleaned_stem)
 
     # 5. 合并多余空白与连接符，保留如 (1)、01、E01 等集数标记
     cleaned_stem = re.sub(r"\s{2,}", " ", cleaned_stem)
