@@ -4873,6 +4873,77 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
 
 
 
+
+
+@routes.post("/api/telegram/harvester/start")
+async def telegram_harvester_start_handler(request: web.Request):
+    """启动私密/受限频道采集任务"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        body = await request.json()
+        links_text = (body.get("links_text") or "").strip()
+        invite_link = body.get("invite_link")
+        account_id = body.get("account_id")
+        rebrand_enabled = bool(body.get("rebrand_enabled", True))
+
+        if not links_text:
+            return web.json_response(
+                {"success": False, "error": "请提供待采集的频道帖子链接或连号区间"},
+                status=400,
+            )
+
+        from private_channel_harvester import HarvesterTaskManager
+        manager = HarvesterTaskManager.get_instance()
+        res = await manager.start_task(
+            links_text=links_text,
+            invite_link=invite_link,
+            account_id=account_id,
+            rebrand_enabled=rebrand_enabled,
+        )
+        status_code = 200 if res.get("success") else 400
+        return web.json_response(res, status=status_code)
+    except Exception as e:
+        logger.error(f"启动私密频道采集流水线失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.get("/api/telegram/harvester/status")
+async def telegram_harvester_status_handler(request: web.Request):
+    """获取当前私密/受限频道采集任务状态与实时日志"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        from private_channel_harvester import HarvesterTaskManager
+        manager = HarvesterTaskManager.get_instance()
+        status_data = manager.get_status()
+        return web.json_response({"success": True, "data": status_data})
+    except Exception as e:
+        logger.error(f"获取频道采集任务状态失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+@routes.post("/api/telegram/harvester/cancel")
+async def telegram_harvester_cancel_handler(request: web.Request):
+    """中止当前正在执行的频道采集任务"""
+    try:
+        user = request.get("user")
+        if user and user.get("role") not in (None, "admin"):
+            return web.json_response({"success": False, "error": "权限不足，仅限管理员操作"}, status=403)
+
+        from private_channel_harvester import HarvesterTaskManager
+        manager = HarvesterTaskManager.get_instance()
+        res = await manager.cancel_task()
+        return web.json_response(res)
+    except Exception as e:
+        logger.error(f"中止频道采集任务失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
 # Keep this catch-all route last. aiohttp matches registered routes in order, so
 # registering it before later /api routes would make those API endpoints
 # unreachable.

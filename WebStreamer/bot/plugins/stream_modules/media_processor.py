@@ -7,6 +7,8 @@
 支持无痕复制（Copy）与智能第三方引流清洗归属改写
 """
 
+import re
+import time
 import logging
 import asyncio
 from collections import defaultdict
@@ -488,3 +490,127 @@ async def media_receive_handler(_, m: Message):
     else:
         if not enqueue_message_task(process_single_media, m):
             await m.reply("消息队列已满，请稍后重试", quote=True)
+
+
+@StreamBot.on_message(
+    filters.private
+    & filters.text
+    & ~filters.command(["start", "help", "menu", "status"]),
+    group=5,
+)
+async def channel_link_receive_handler(_, m: Message):
+    """
+    处理用户私聊发送的私密/受限频道帖子链接或连号区间，调度采集流水线并实时编辑汇报进度
+    """
+    if not Var.ENABLE_STREAM:
+        return
+
+    text = (m.text or "").strip()
+    if not text or not re.search(r"(?:https?://)?(?:t\.me|telegram\.me)/", text, re.IGNORECASE):
+        return
+
+    if not is_allowed_user(m):
+        logger.warning(
+            "拒绝未授权用户发送频道采集链接 user_id=%s",
+            getattr(getattr(m, "from_user", None), "id", None),
+        )
+        return
+
+    if not Var.BIN_CHANNEL:
+        await m.reply("❌ BIN_CHANNEL 未配置，无法保存媒体到 TG 网盘", quote=True)
+        return
+
+    from private_channel_harvester import parse_telegram_post_links, HarvesterTaskManager
+
+    targets, _ = parse_telegram_post_links(text)
+    if not targets:
+        return
+
+    manager = HarvesterTaskManager.get_instance()
+    status = manager.get_status()
+    if status.get("status") == "running":
+        await m.reply(
+            "⚠️ 当前已有频道采集任务正在后台执行中，请稍候再试或在 Web 控制端查看实时进度。",
+            quote=True,
+        )
+        return
+
+    total_msgs = sum(len(t.msg_ids) for t in targets)
+    status_msg = await m.reply_text(
+        f"📡 <b>收到频道采集请求</b>\n\n"
+        f"📊 目标: {len(targets)} 个频道，共 {total_msgs} 条消息\n"
+        f"🔍 正在建立连接并准备转存...",
+        quote=True,
+        parse_mode=ParseMode.HTML,
+    )
+
+    last_edit_time = 0.0
+
+    async def tg_progress_callback(curr_status: dict):
+        nonlocal last_edit_time
+        now = time.time()
+        st = curr_status.get("status")
+        if now - last_edit_time < 2.0 and st not in ("completed", "failed", "cancelled"):
+            return
+        last_edit_time = now
+
+        if st == "running":
+            mode_desc = "⚡ 秒传" if curr_status.get("current_mode") == "fast_copy" else "🔓 受限重传"
+            speed_str = f" ({curr_status['speed_text']})" if curr_status.get("speed_text") else ""
+            txt = (
+                f"🔄 <b>私密/受限频道采集进行中...</b>\n\n"
+                f"📊 进度: {curr_status.get('current_index', 0)}/{curr_status.get('total_messages', 0)}\n"
+                f"🚀 模式: {mode_desc}{speed_str}\n"
+                f"📁 当前: <code>{curr_status.get('current_file', '准备中...')}</code>\n"
+                f"✅ 成功: {curr_status.get('success_count', 0)}  "
+                f"⚠️ 跳过: {curr_status.get('skipped_count', 0)}  "
+                f"❌ 失败: {curr_status.get('failed_count', 0)}"
+            )
+            try:
+                await status_msg.edit_text(txt, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+        elif st == "completed":
+            results = curr_status.get("results", [])
+            txt = (
+                f"🎉 <b>频道采集完成！</b>\n\n"
+                f"📊 <b>统计信息:</b>\n"
+                f"  • 总计分析: {curr_status.get('total_messages', 0)} 条\n"
+                f"  • 成功入库: {curr_status.get('success_count', 0)} 个文件\n"
+                f"  • 跳过/失败: {curr_status.get('skipped_count', 0) + curr_status.get('failed_count', 0)}\n"
+            )
+            if Var.SEND_STREAM_LINK and results:
+                txt += "\n📋 <b>直链列表 (部分展示):</b>\n\n"
+                for i, item in enumerate(results[:5], 1):
+                    txt += f"{i}. <code>{item.get('name')}</code>\n🔗 {item.get('full_link')}\n\n"
+                if len(results) > 5:
+                    txt += f"<i>... 以及另外 {len(results) - 5} 个文件已全部入库 TG 网盘</i>"
+            try:
+                await status_msg.edit_text(txt, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+        elif st == "cancelled":
+            try:
+                await status_msg.edit_text("🛑 采集任务已被中止", parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+        elif st == "failed":
+            err = curr_status.get("error") or "未知错误"
+            try:
+                await status_msg.edit_text(f"❌ 采集失败: <code>{err}</code>", parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+
+    res = await manager.start_task(
+        links_text=text,
+        rebrand_enabled=True,
+        progress_callback=tg_progress_callback,
+    )
+    if not res.get("success"):
+        try:
+            await status_msg.edit_text(
+                f"❌ 启动采集失败: {res.get('error')}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass

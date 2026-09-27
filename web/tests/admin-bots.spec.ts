@@ -384,9 +384,9 @@ async function setupBotsPageMocks(page: Page) {
     })
   })
 
-  await page.route(new RegExp('.*/api/telegram/botfather/accounts/\\d+$'), async (route) => {
+  await page.route(new RegExp('.*/api/telegram/botfather/accounts/\\d+.*'), async (route) => {
     if (route.request().method() === 'DELETE') {
-      const match = route.request().url().match(/\/accounts\/(\d+)$/)
+      const match = route.request().url().match(/\/accounts\/(\d+)/)
       const id = match ? Number(match[1]) : 0
       currentAccounts = currentAccounts.filter(a => a.id !== id)
       await route.fulfill({

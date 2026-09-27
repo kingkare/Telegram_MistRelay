@@ -676,3 +676,65 @@ export interface RebrandPreviewResponse {
 export function previewRebrand(data: RebrandPreviewRequest): Promise<RebrandPreviewResponse> {
   return api.post<RebrandPreviewResponse>('/telegram/rebrand/preview', data).then(response => response.data)
 }
+
+
+export interface HarvesterStartRequest {
+  links_text: string
+  invite_link?: string
+  account_id?: number | null
+  rebrand_enabled?: boolean
+}
+
+export interface HarvesterTaskStatus {
+  status: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled'
+  task_id: string
+  total_messages: number
+  current_index: number
+  success_count: number
+  failed_count: number
+  skipped_count: number
+  current_mode: 'idle' | 'fast_copy' | 'restricted_relay'
+  current_file: string
+  speed_text: string
+  logs: string[]
+  results: Array<{
+    name: string
+    full_link: string
+    short_link: string
+    msg_id: number
+  }>
+  account_phone: string | null
+  error: string | null
+}
+
+export interface HarvesterStartResponse {
+  success: boolean
+  message?: string
+  task_id?: string
+  total_messages?: number
+  error?: string
+}
+
+export interface HarvesterStatusResponse {
+  success: boolean
+  data?: HarvesterTaskStatus
+  error?: string
+}
+
+export interface HarvesterCancelResponse {
+  success: boolean
+  message?: string
+  error?: string
+}
+
+export function startHarvesterTask(data: HarvesterStartRequest): Promise<HarvesterStartResponse> {
+  return api.post<HarvesterStartResponse>('/telegram/harvester/start', data).then(r => r.data)
+}
+
+export function getHarvesterStatus(): Promise<HarvesterStatusResponse> {
+  return api.get<HarvesterStatusResponse>('/telegram/harvester/status').then(r => r.data)
+}
+
+export function cancelHarvesterTask(): Promise<HarvesterCancelResponse> {
+  return api.post<HarvesterCancelResponse>('/telegram/harvester/cancel').then(r => r.data)
+}

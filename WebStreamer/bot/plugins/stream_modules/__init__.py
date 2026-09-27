@@ -57,7 +57,8 @@ from .media_processor import (
     media_group_tasks,
     process_media_group,
     process_single_media,
-    media_receive_handler
+    media_receive_handler,
+    channel_link_receive_handler
 )
 
 __all__ = [
@@ -102,4 +103,5 @@ __all__ = [
     'process_media_group',
     'process_single_media',
     'media_receive_handler',
+    'channel_link_receive_handler',
 ]

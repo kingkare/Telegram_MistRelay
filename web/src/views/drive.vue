@@ -40,6 +40,14 @@
           </div>
 
           <el-button
+            type="primary"
+            class="header-btn harvest-btn"
+            :icon="Promotion"
+            @click="openHarvesterDialog"
+          >
+            私密/受限频道采集
+          </el-button>
+          <el-button
             class="header-btn refresh-btn"
             :icon="RefreshRight"
             @click="refreshAll"
@@ -845,11 +853,211 @@
         </div>
       </template>
     </el-dialog>
+    <!-- 私密/受限频道采集与无痕转存模态框 -->
+    <el-dialog
+      v-model="harvesterVisible"
+      title="私密/受限频道采集与无痕转存"
+      width="min(760px, 94vw)"
+      class="harvester-dialog custom-glass-dialog"
+      append-to-body
+      destroy-on-close
+      :close-on-click-modal="false"
+    >
+      <div class="harvester-body">
+        <!-- 提示横幅 -->
+        <div class="harvester-intro-banner">
+          <div class="intro-icon-box">
+            <el-icon :size="24"><Promotion /></el-icon>
+          </div>
+          <div class="intro-text">
+            <div class="intro-title">协议号自动化双模采集流水线</div>
+            <div class="intro-desc">
+              支持私密频道（<code>https://t.me/c/...</code>）与公开频道单帖或连号区间。协议号自动入群、受限内容破除、第三方引流广告清洗，并秒传/转存至网盘。
+            </div>
+          </div>
+        </div>
+
+        <!-- 采集配置表单 -->
+        <el-form label-position="top" class="harvester-form">
+          <el-form-item label="私密频道邀请链接（可选，首次采集该私密频道时提供）">
+            <el-input
+              v-model="harvesterInviteLink"
+              placeholder="https://t.me/+AbCdEf... 或 https://t.me/joinchat/... (已在群中可留空)"
+              clearable
+              :disabled="harvesterStatus?.status === 'running'"
+            />
+          </el-form-item>
+
+          <el-form-item label="待采集帖子链接或连号区间（支持多行批量输入）" required>
+            <el-input
+              v-model="harvesterLinksText"
+              type="textarea"
+              :rows="4"
+              placeholder="每行一条，支持私密链接与连号区间，例如：&#10;https://t.me/c/1998444696/100-120&#10;https://t.me/c/1998444696/135&#10;https://t.me/public_channel/50-60"
+              :disabled="harvesterStatus?.status === 'running'"
+            />
+          </el-form-item>
+
+          <el-row :gutter="14">
+            <el-col :xs="24" :sm="14">
+              <el-form-item label="调度协议号资产">
+                <el-select
+                  v-model="harvesterAccountId"
+                  placeholder="自动智能轮询可用协议号"
+                  clearable
+                  style="width: 100%"
+                  :disabled="harvesterStatus?.status === 'running'"
+                >
+                  <el-option :value="null" label="⚡ 智能自动调度（优先活跃协议号）" />
+                  <el-option
+                    v-for="acc in protocolAccounts"
+                    :key="acc.id"
+                    :value="acc.id"
+                    :label="`${acc.phone} (${acc.status === 'active' ? '正常' : acc.status}) - ${acc.bot_count || 0} Bots`"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="10">
+              <el-form-item label="无痕洗白与归属替换">
+                <div class="rebrand-switch-wrapper">
+                  <el-switch
+                    v-model="harvesterRebrandEnabled"
+                    active-text="启用"
+                    inactive-text="原样"
+                    :disabled="harvesterStatus?.status === 'running'"
+                  />
+                  <span class="rebrand-switch-hint">去转发标/清广告</span>
+                </div>
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </el-form>
+
+        <!-- 任务状态与实时终端 -->
+        <div v-if="harvesterStatus && harvesterStatus.status !== 'idle'" class="harvester-status-panel">
+          <div class="status-panel-header">
+            <div class="status-panel-title">
+              <span class="status-pulse-dot" :class="harvesterStatus.status"></span>
+              <span class="status-title-text">
+                <template v-if="harvesterStatus.status === 'running'">流水线正在采集中...</template>
+                <template v-else-if="harvesterStatus.status === 'completed'">🎉 采集已完成</template>
+                <template v-else-if="harvesterStatus.status === 'cancelled'">🛑 任务已中止</template>
+                <template v-else-if="harvesterStatus.status === 'failed'">❌ 任务异常终止</template>
+              </span>
+            </div>
+            <div class="status-panel-tags">
+              <span
+                v-if="harvesterStatus.current_mode === 'fast_copy'"
+                class="harvester-mode-pill mode-fast"
+              >
+                ⚡ 零流量秒传
+              </span>
+              <span
+                v-else-if="harvesterStatus.current_mode === 'restricted_relay'"
+                class="harvester-mode-pill mode-relay"
+              >
+                🔓 受限破除重传
+              </span>
+              <span v-if="harvesterStatus.speed_text" class="harvester-speed-pill">
+                {{ harvesterStatus.speed_text }}
+              </span>
+            </div>
+          </div>
+
+          <!-- 进度条 -->
+          <div class="harvester-progress-wrapper">
+            <el-progress
+              :percentage="harvesterProgressPercent"
+              :status="harvesterProgressStatus"
+              :stroke-width="10"
+              striped
+              :striped-flow="harvesterStatus.status === 'running'"
+            />
+            <div class="harvester-progress-stats">
+              <span>处理进度: {{ harvesterStatus.current_index }} / {{ harvesterStatus.total_messages }}</span>
+              <span>
+                成功: <b class="text-success">{{ harvesterStatus.success_count }}</b>
+                &nbsp;|&nbsp;
+                跳过: <b class="text-warning">{{ harvesterStatus.skipped_count }}</b>
+                &nbsp;|&nbsp;
+                失败: <b class="text-danger">{{ harvesterStatus.failed_count }}</b>
+              </span>
+            </div>
+          </div>
+
+          <!-- 正在处理文件名 -->
+          <div v-if="harvesterStatus.current_file" class="harvester-current-file">
+            <el-icon><Document /></el-icon>
+            <span class="file-text">{{ harvesterStatus.current_file }}</span>
+          </div>
+
+          <!-- 暗色磨砂实时终端日志 -->
+          <div class="harvester-terminal">
+            <div class="terminal-bar">
+              <div class="term-dots">
+                <span class="dot dot-red"></span>
+                <span class="dot dot-yellow"></span>
+                <span class="dot dot-green"></span>
+              </div>
+              <span class="term-title">harvester-execution.log</span>
+            </div>
+            <div ref="terminalBodyRef" class="terminal-body">
+              <div v-for="(log, idx) in harvesterStatus.logs" :key="idx" class="term-line">
+                {{ log }}
+              </div>
+              <div v-if="harvesterStatus.logs.length === 0" class="term-line text-muted">
+                等待任务启动输出...
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="harvester-footer">
+          <div class="footer-left">
+            <el-button
+              v-if="harvesterStatus?.status === 'running'"
+              type="danger"
+              plain
+              :icon="Close"
+              @click="handleCancelHarvester"
+              :loading="harvesterCancelling"
+            >
+              中止任务
+            </el-button>
+          </div>
+          <div class="footer-right">
+            <el-button @click="harvesterVisible = false">关闭窗口</el-button>
+            <el-button
+              v-if="harvesterStatus?.status === 'completed'"
+              type="success"
+              :icon="RefreshRight"
+              @click="handleFinishAndRefresh"
+            >
+              完成并刷新网盘
+            </el-button>
+            <el-button
+              v-else
+              type="primary"
+              class="start-harvest-btn"
+              :icon="Promotion"
+              :loading="harvesterStarting"
+              :disabled="harvesterStatus?.status === 'running'"
+              @click="handleStartHarvester"
+            >
+              开始采集入库
+            </el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowDown,
@@ -887,9 +1095,15 @@ import {
   deleteTelegramItem,
   getTelegramThumbnailStatus,
   getTelegramUsage,
+  getProtocolAccounts,
+  startHarvesterTask,
+  getHarvesterStatus,
+  cancelHarvesterTask,
   isTelegramDriveFile,
   isTelegramDriveFolder,
   warmupTelegramThumbnails,
+  type HarvesterTaskStatus,
+  type ProtocolAccount,
   type TelegramDriveFile,
   type TelegramDriveFolder,
   type TelegramDriveItem,
@@ -1733,10 +1947,138 @@ onMounted(() => {
   refreshAll()
 })
 
+
+// =========================================================================
+// 私密/受限频道采集与无痕转存状态与控制
+// =========================================================================
+const harvesterVisible = ref(false)
+const harvesterInviteLink = ref('')
+const harvesterLinksText = ref('')
+const harvesterAccountId = ref<number | null>(null)
+const harvesterRebrandEnabled = ref(true)
+const harvesterStarting = ref(false)
+const harvesterCancelling = ref(false)
+const harvesterStatus = ref<HarvesterTaskStatus | null>(null)
+const protocolAccounts = ref<ProtocolAccount[]>([])
+const terminalBodyRef = ref<HTMLElement | null>(null)
+let harvesterTimer: any = null
+
+const harvesterProgressPercent = computed(() => {
+  if (!harvesterStatus.value || !harvesterStatus.value.total_messages) return 0
+  const pct = Math.floor((harvesterStatus.value.current_index / harvesterStatus.value.total_messages) * 100)
+  return Math.min(100, Math.max(0, pct))
+})
+
+const harvesterProgressStatus = computed(() => {
+  if (!harvesterStatus.value) return undefined
+  if (harvesterStatus.value.status === 'completed') return 'success'
+  if (harvesterStatus.value.status === 'failed') return 'exception'
+  if (harvesterStatus.value.status === 'cancelled') return 'warning'
+  return undefined
+})
+
+watch(
+  () => harvesterStatus.value?.logs.length,
+  () => {
+    nextTick(() => {
+      if (terminalBodyRef.value) {
+        terminalBodyRef.value.scrollTop = terminalBodyRef.value.scrollHeight
+      }
+    })
+  }
+)
+
+async function openHarvesterDialog() {
+  harvesterVisible.value = true
+  try {
+    const accRes = await getProtocolAccounts()
+    if (accRes.success && Array.isArray(accRes.data)) {
+      protocolAccounts.value = accRes.data
+    }
+  } catch (err) {
+    console.debug('获取协议号资产列表提示:', err)
+  }
+
+  await pollHarvesterStatusOnce()
+}
+
+function stopHarvesterPolling() {
+  if (harvesterTimer) {
+    clearTimeout(harvesterTimer)
+    harvesterTimer = null
+  }
+}
+
+async function pollHarvesterStatusOnce() {
+  try {
+    const res = await getHarvesterStatus()
+    if (res.success && res.data) {
+      harvesterStatus.value = res.data
+      if (res.data.status === 'running') {
+        stopHarvesterPolling()
+        harvesterTimer = setTimeout(pollHarvesterStatusOnce, 1500)
+      }
+    }
+  } catch (err) {
+    console.debug('轮询采集任务状态提示:', err)
+  }
+}
+
+async function handleStartHarvester() {
+  const text = (harvesterLinksText.value || '').trim()
+  if (!text) {
+    ElMessage.warning('请先输入待采集的频道帖子链接或连号区间')
+    return
+  }
+
+  harvesterStarting.value = true
+  try {
+    const res = await startHarvesterTask({
+      links_text: text,
+      invite_link: harvesterInviteLink.value?.trim() || undefined,
+      account_id: harvesterAccountId.value,
+      rebrand_enabled: harvesterRebrandEnabled.value,
+    })
+    if (res.success) {
+      ElMessage.success(res.message || '私密频道采集流水线已启动')
+      await pollHarvesterStatusOnce()
+    } else {
+      ElMessage.error(res.error || '启动采集失败')
+    }
+  } catch (err: any) {
+    ElMessage.error(err.message || '启动采集失败')
+  } finally {
+    harvesterStarting.value = false
+  }
+}
+
+async function handleCancelHarvester() {
+  harvesterCancelling.value = true
+  try {
+    const res = await cancelHarvesterTask()
+    if (res.success) {
+      ElMessage.info(res.message || '中止信号已发送')
+      await pollHarvesterStatusOnce()
+    } else {
+      ElMessage.error(res.error || '中止任务失败')
+    }
+  } catch (err: any) {
+    ElMessage.error(err.message || '中止任务失败')
+  } finally {
+    harvesterCancelling.value = false
+  }
+}
+
+async function handleFinishAndRefresh() {
+  harvesterVisible.value = false
+  await refreshAll()
+}
+
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('keyup', handleKeyup)
   stopThumbPolling()
+  stopHarvesterPolling()
 })
 </script>
 
@@ -3146,3 +3488,263 @@ onUnmounted(() => {
 }
 
 </style>
+
+/* 私密/受限频道采集模态框与组件样式 */
+.harvest-btn {
+  background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%) !important;
+  border: none !important;
+  color: #ffffff !important;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(255, 117, 151, 0.25);
+  transition: all 0.25s ease;
+}
+
+.harvest-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(56, 189, 248, 0.35);
+  opacity: 0.95;
+}
+
+.harvester-intro-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, rgba(255, 117, 151, 0.08), rgba(56, 189, 248, 0.08));
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 12px;
+  margin-bottom: 18px;
+}
+
+.intro-icon-box {
+  color: #ff7597;
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+
+.intro-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 4px;
+}
+
+.intro-desc {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.6;
+}
+
+.intro-desc code {
+  background: rgba(255, 255, 255, 0.7);
+  padding: 1px 4px;
+  border-radius: 4px;
+  color: #0284c7;
+  font-size: 11px;
+}
+
+.rebrand-switch-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+}
+
+.rebrand-switch-hint {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.harvester-status-panel {
+  margin-top: 16px;
+  padding: 14px;
+  background: rgba(248, 250, 252, 0.85);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 12px;
+}
+
+.status-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.status-pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+.status-pulse-dot.running {
+  background: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.3);
+  animation: pulse-ring 1.5s infinite;
+}
+
+.status-pulse-dot.completed {
+  background: #10b981;
+}
+
+.status-pulse-dot.cancelled {
+  background: #f59e0b;
+}
+
+.status-pulse-dot.failed {
+  background: #ef4444;
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+.status-panel-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.harvester-mode-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.mode-fast {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.mode-relay {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.harvester-speed-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #0284c7;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+}
+
+.harvester-progress-stats {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.text-success { color: #10b981; }
+.text-warning { color: #f59e0b; }
+.text-danger { color: #ef4444; }
+
+.harvester-current-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: #475569;
+  background: #ffffff;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+}
+
+.harvester-current-file .file-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
+
+.harvester-terminal {
+  margin-top: 12px;
+  background: #0f172a;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: #1e293b;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.term-dots {
+  display: flex;
+  gap: 5px;
+}
+
+.term-dots .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.dot-red { background: #ef4444; }
+.dot-yellow { background: #f59e0b; }
+.dot-green { background: #10b981; }
+
+.term-title {
+  font-size: 11px;
+  color: #94a3b8;
+  font-family: monospace;
+}
+
+.terminal-body {
+  height: 140px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #e2e8f0;
+}
+
+.term-line {
+  word-break: break-all;
+}
+
+.text-muted {
+  color: #64748b;
+}
+
+.harvester-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.start-harvest-btn {
+  background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%) !important;
+  border: none !important;
+  font-weight: 600;
+}
+

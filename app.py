@@ -231,11 +231,20 @@ async def send_welcome(event):
         return
     # 获取输入信息
     if text.startswith('http'):
-        url_arr = text.split('\n')
-        for url in url_arr:
-            await client.add_uri(
-                uris=[url],
-            )
+        url_arr = [u.strip() for u in text.split('\n') if u.strip()]
+        # 过滤掉 Telegram 链接（由 Pyrogram 频道采集器/直链功能处理，避免误入 Aria2）
+        aria2_urls = [
+            u for u in url_arr
+            if not re.search(r'(?:https?://)?(?:t\.me|telegram\.me)/', u, re.IGNORECASE)
+        ]
+        if aria2_urls:
+            for url in aria2_urls:
+                await client.add_uri(
+                    uris=[url],
+                )
+        if not aria2_urls:
+            log.debug('检测到 Telegram 频道/帖子链接，跳过 Aria2，交由 Pyrogram 采集器处理')
+            return
     elif text.startswith('magnet'):
         pattern_res = re.findall(r'magnet:\?xt=urn:btih:[0-9a-fA-F]{40,}.*', text)
         for text in pattern_res:

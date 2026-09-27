@@ -239,3 +239,98 @@ test('supports stream link copy, M3U export, shift selection, and view preferenc
   await page.reload()
   await expect(page.locator('.grid-view')).toBeVisible()
 })
+
+test('private and restricted channel harvester modal and workflow', async ({ page }) => {
+  await mockAdminDrive(page)
+
+  await page.route('**/api/telegram/botfather/accounts', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: [
+          { id: 1, phone: '+18048484620', status: 'active', bot_count: 5 },
+          { id: 2, phone: '+16813086196', status: 'limit_reached', bot_count: 20 },
+        ],
+      }),
+    })
+  })
+
+  let startPayload: any = null
+  await page.route('**/api/telegram/harvester/start', async route => {
+    startPayload = route.request().postDataJSON()
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        task_id: 'harvest_test_001',
+        total_messages: 5,
+        message: '私密/受限频道采集流水线已启动',
+      }),
+    })
+  })
+
+  let statusCallCount = 0
+  await page.route('**/api/telegram/harvester/status', async route => {
+    statusCallCount++
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          status: statusCallCount <= 1 ? 'idle' : 'running',
+          task_id: 'harvest_test_001',
+          total_messages: 5,
+          current_index: 2,
+          success_count: 2,
+          failed_count: 0,
+          skipped_count: 0,
+          current_mode: 'restricted_relay',
+          current_file: 'sample_video.mp4',
+          speed_text: '12.5 MB/s (40%)',
+          logs: ['[12:00:00] 启动频道采集任务', '[12:00:02] 已解密受限消息 #101 并上传成功'],
+          results: [],
+          account_phone: '+18048484620',
+          error: null,
+        },
+      }),
+    })
+  })
+
+  let cancelCalled = false
+  await page.route('**/api/telegram/harvester/cancel', async route => {
+    cancelCalled = true
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true, message: '已发送中止信号' }),
+    })
+  })
+
+  await page.goto('/drive')
+  await page.getByRole('button', { name: '私密/受限频道采集' }).click()
+
+  const dialog = page.locator('.harvester-dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByText('协议号自动化双模采集流水线')).toBeVisible()
+
+  // Fill in links
+  await dialog.locator('textarea').fill('https://t.me/c/1998444696/100-104')
+  await dialog.getByRole('button', { name: '开始采集入库' }).click()
+
+  expect(startPayload).not.toBeNull()
+  expect(startPayload.links_text).toContain('https://t.me/c/1998444696/100-104')
+  expect(startPayload.rebrand_enabled).toBe(true)
+
+  // Verify status panel elements
+  await expect(dialog.locator('.harvester-status-panel')).toBeVisible()
+  await expect(dialog.locator('.mode-relay')).toContainText('受限破除重传')
+  await expect(dialog.locator('.term-line').first()).toBeVisible()
+
+  // Cancel task
+  await dialog.getByRole('button', { name: '中止任务' }).click()
+  expect(cancelCalled).toBe(true)
+})

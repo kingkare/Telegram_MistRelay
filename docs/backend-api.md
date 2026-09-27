@@ -2320,3 +2320,84 @@ curl -L "$BASE_URL/12345/movie.mp4?hash=a1b2c3d4"
 - **`POST /api/telegram/benchmark/stream-and-download`**：
   - 参数：`sample_size_mb` (`10` \| `100` \| `1024`)，可选 `bot_index` 与 `message_id`；
   - 实测真实单连接在线播放吞吐速度（`Single Connection Playback Speed`）与多连接并发下载吞吐速度（`Concurrent Download Speed`），输出峰值/平均速率与链路耗时报告。
+
+---
+
+## 16. Telegram 私密/受限频道采集与无痕转存 (Private & Restricted Channel Harvester)
+
+用于采集第三方 Telegram 私密频道（`https://t.me/c/...`）及开启了“禁止复制与转发 (`has_protected_content` / `noforwards`)”的内容，借助协议号资产池（`tg_protocol_accounts`）自动入群、解除受限并无痕洗白转存至 `BIN_CHANNEL` 入库网盘。
+
+### 16.1 启动采集流水线
+- **端点**：`POST /api/telegram/harvester/start`
+- **权限**：管理员权限
+- **请求体 (JSON)**：
+  ```json
+  {
+    "links_text": "https://t.me/c/1998444696/100-120\nhttps://t.me/c/1998444696/135",
+    "invite_link": "https://t.me/+AbCdEfGhIj_123",
+    "account_id": 1,
+    "rebrand_enabled": true
+  }
+  ```
+  - `links_text` (string, required): 待采集的私密频道链接（`t.me/c/<raw_id>/<msg_id>`）或公开频道链接，支持 `-` 连号区间；
+  - `invite_link` (string, optional): 私密频道邀请链接，首次抓取未加入的私密频道时由协议号自动加群；
+  - `account_id` (integer, optional): 指定调度的协议号 ID；若留空则自动智能轮询可用协议号；
+  - `rebrand_enabled` (boolean, optional, 默认 `true`): 是否开启无痕洗白与第三方广告清洗。
+- **响应示例**：
+  ```json
+  {
+    "success": true,
+    "task_id": "harvest_1774699200_a1b2",
+    "total_messages": 22,
+    "message": "私密/受限频道采集流水线已启动"
+  }
+  ```
+
+### 16.2 查询采集任务状态与实时终端日志
+- **端点**：`GET /api/telegram/harvester/status`
+- **权限**：管理员权限
+- **响应示例**：
+  ```json
+  {
+    "success": true,
+    "data": {
+      "status": "running",
+      "task_id": "harvest_1774699200_a1b2",
+      "total_messages": 22,
+      "current_index": 5,
+      "success_count": 4,
+      "failed_count": 0,
+      "skipped_count": 1,
+      "current_mode": "restricted_relay",
+      "current_file": "episode_05.mp4",
+      "speed_text": "14.2 MB/s (62%)",
+      "logs": [
+        "[21:00:00] 🚀 启动频道采集任务 (harvest_1774699200_a1b2)...",
+        "[21:00:02] ✅ [⚡秒传] #100 -> episode_01.mp4 入库成功 (ID: 5801)"
+      ],
+      "results": [
+        {
+          "status": "success",
+          "mode": "fast_copy",
+          "msg_id": 5801,
+          "name": "episode_01.mp4",
+          "full_link": "http://127.0.0.1:8080/5801/episode_01.mp4?hash=...",
+          "short_link": "http://127.0.0.1:8080/hash5801"
+        }
+      ],
+      "account_phone": "+18048484620",
+      "error": null
+    }
+  }
+  ```
+
+### 16.3 中止采集任务
+- **端点**：`POST /api/telegram/harvester/cancel`
+- **权限**：管理员权限
+- **响应示例**：
+  ```json
+  {
+    "success": true,
+    "message": "已发送中止信号，任务即将停止"
+  }
+  ```

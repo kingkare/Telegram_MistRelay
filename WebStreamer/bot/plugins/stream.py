@@ -47,6 +47,7 @@ from .stream_modules import (
     process_media_group,
     process_single_media,
     media_receive_handler,
+    channel_link_receive_handler,
 )
 
 # 导出所有接口（保持向后兼容）
@@ -90,4 +91,5 @@ __all__ = [
     'process_media_group',
     'process_single_media',
     'media_receive_handler',
+    'channel_link_receive_handler',
 ]
