@@ -1264,6 +1264,17 @@ async def get_config_handler(request: web.Request):
     try:
         category = request.query.get('category')
         configs = get_all_configs(category=category)
+        if category in ('stream', None):
+            rebrand_defaults = {
+                'FORWARD_REBRAND_ENABLED': True,
+                'FORWARD_TARGET_CHANNEL': '',
+                'FORWARD_CHANNEL_SIGNATURE': '',
+                'FORWARD_CLEAN_FILENAMES': True,
+                'FORWARD_CUSTOM_REPLACE_RULES': '',
+            }
+            for k, def_val in rebrand_defaults.items():
+                if k not in configs:
+                    configs[k] = def_val
         redacted_keys = []
         secret_counts = {}
         for key in SECRET_CONFIG_KEYS:
@@ -1339,6 +1350,11 @@ async def update_config_handler(request: web.Request):
             'MAX_CONCURRENT_MESSAGES': ('int', 'stream', '消息处理最大并发数'),
             'MAX_MESSAGE_QUEUE_SIZE': ('int', 'stream', '消息等待队列上限（1-1000）'),
             'MULTI_BOT_TOKENS': ('list', 'stream', '多机器人Token列表'),
+            'FORWARD_REBRAND_ENABLED': ('bool', 'stream', '启用转发无痕洗白（抹除转发标并清洗配文）'),
+            'FORWARD_TARGET_CHANNEL': ('string', 'stream', '归属替换目标频道（留空自动使用本频道）'),
+            'FORWARD_CHANNEL_SIGNATURE': ('string', 'stream', '配文落款签名（支持{channel}占位符）'),
+            'FORWARD_CLEAN_FILENAMES': ('bool', 'stream', '净化入库媒体文件名中的第三方引流广告'),
+            'FORWARD_CUSTOM_REPLACE_RULES': ('string', 'stream', '自定义剔除或替换规则（每行一条，原词=>新词）'),
         }
         
         # 需要重启才能生效的配置项
@@ -1406,6 +1422,50 @@ async def update_config_handler(request: web.Request):
             "success": False,
             "error": str(e)
         }, status=500)
+
+
+@routes.post("/api/telegram/rebrand/preview")
+async def rebrand_preview_handler(request: web.Request):
+    """实时预览配文与文件名清洗效果"""
+    try:
+        data = await request.json()
+        if not isinstance(data, dict):
+            return web.json_response({"success": False, "error": "请求格式错误"}, status=400)
+        caption = data.get("caption", "")
+        filename = data.get("filename", "")
+        target_channel = data.get("target_channel")
+        signature = data.get("signature")
+        clean_filenames = data.get("clean_filenames", True)
+        custom_rules = data.get("custom_rules")
+
+        from WebStreamer.utils.rebrand_cleaner import (
+            clean_and_rebrand_caption,
+            clean_drive_filename,
+            get_effective_target_channel,
+        )
+        effective_channel = get_effective_target_channel(target_channel)
+        cleaned_caption = clean_and_rebrand_caption(
+            caption,
+            target_channel=target_channel,
+            signature=signature,
+            custom_rules=custom_rules,
+        )
+        cleaned_filename = clean_drive_filename(
+            filename,
+            clean_enabled=bool(clean_filenames),
+            custom_rules=custom_rules,
+        )
+        return web.json_response({
+            "success": True,
+            "data": {
+                "effective_channel": effective_channel,
+                "cleaned_caption": cleaned_caption,
+                "cleaned_filename": cleaned_filename,
+            }
+        })
+    except Exception as e:
+        logger.error(f"预览洗白效果失败: {e}", exc_info=True)
+        return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
 @routes.post("/api/config/reload")
@@ -4423,19 +4483,42 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
         c = conn.cursor()
         target_file = None
         if req_msg_id:
-            c.execute("SELECT message_id, file_name, file_size, mime_type, file_unique_id FROM tg_media WHERE message_id = ? LIMIT 1", (int(req_msg_id),))
+            c.execute("SELECT message_id, file_name, file_size, mime_type, file_unique_id, file_id FROM tg_media WHERE message_id = ? LIMIT 1", (int(req_msg_id),))
             r = c.fetchone()
             if r:
                 target_file = dict(r)
 
         if not target_file:
             min_size = int(sample_mb * 1024 * 1024)
-            c.execute("SELECT message_id, file_name, file_size, mime_type, file_unique_id FROM tg_media WHERE file_size >= ? ORDER BY file_size ASC, message_id DESC LIMIT 1", (min_size,))
-            r = c.fetchone()
-            if r:
-                target_file = dict(r)
+            c.execute("SELECT message_id, file_name, file_size, mime_type, file_unique_id, file_id FROM tg_media WHERE file_size >= ? ORDER BY file_size ASC, message_id DESC LIMIT 20", (min_size,))
+            candidates = [dict(row) for row in c.fetchall()]
+            if candidates:
+                target_file = candidates[0]
+                try:
+                    from pyrogram.file_id import FileId as PyrogramFileId
+                    dc_weights = {}
+                    for st in bot_mod.bot_runtime.values():
+                        hdc = st.get("home_dc")
+                        if hdc:
+                            dc_weights[hdc] = dc_weights.get(hdc, 0) + 2
+                        for wdc in st.get("warm_dcs", ()):
+                            dc_weights[wdc] = dc_weights.get(wdc, 0) + 1
+                    best_score = -1
+                    for cand in candidates:
+                        fid_str = cand.get("file_id")
+                        if fid_str:
+                            try:
+                                cdc = PyrogramFileId.decode(fid_str).dc_id
+                                sc = dc_weights.get(cdc, 0)
+                                if sc > best_score:
+                                    best_score = sc
+                                    target_file = cand
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
             else:
-                c.execute("SELECT message_id, file_name, file_size, mime_type, file_unique_id FROM tg_media WHERE file_size > 102400 ORDER BY message_id DESC LIMIT 1")
+                c.execute("SELECT message_id, file_name, file_size, mime_type, file_unique_id, file_id FROM tg_media WHERE file_size > 102400 ORDER BY message_id DESC LIMIT 1")
                 r = c.fetchone()
                 if r:
                     target_file = dict(r)
@@ -4448,6 +4531,15 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
 
         msg_id = target_file["message_id"]
 
+        target_dc = None
+        fid_raw = target_file.get("file_id")
+        if fid_raw:
+            try:
+                from pyrogram.file_id import FileId as PyrogramFileId
+                target_dc = PyrogramFileId.decode(fid_raw).dc_id
+            except Exception:
+                pass
+
         # 2. 确定测速节点（指定单节点 或 全集群自适应条带调度）
         is_cluster_mode = False
         if bot_idx_req is not None and str(bot_idx_req).strip() != "":
@@ -4457,7 +4549,7 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
             test_cli = bot_mod.multi_clients[selected_bot_idx]
         else:
             is_cluster_mode = True
-            selected_bot_idx = select_stream_bot(prefer_channel=True)
+            selected_bot_idx = select_stream_bot(prefer_channel=True, target_dc=target_dc)
             if selected_bot_idx is None:
                 selected_bot_idx = 0
             test_cli = bot_mod.multi_clients.get(selected_bot_idx, StreamBot)
@@ -4465,6 +4557,8 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
         streamer = get_byte_streamer(test_cli)
         file_id = await asyncio.wait_for(streamer.get_file_properties(msg_id, force_refresh=False), timeout=10.0)
         loc = await streamer.get_location(file_id)
+        if target_dc is None:
+            target_dc = getattr(file_id, "dc_id", None)
 
         # ==================== 测试 1: 单连接流播播放测试 (Playback / Streaming) ====================
         play_chunk_size = min(524288, target_file["file_size"])  # 512 KB 起播块
@@ -4515,21 +4609,28 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
         max_safe_offset = max(0, file_size - chunk_dl_size)
 
         if is_cluster_mode:
-            dl_bots = get_available_bot_indices(selected_bot_idx, set()) or [selected_bot_idx]
+            dl_bots = get_available_bot_indices(selected_bot_idx, set(), target_dc=target_dc) or [selected_bot_idx]
         else:
             dl_bots = [selected_bot_idx]
 
-        # 先预热所有参与下载节点的媒体会话，排除首次握手噪音
-        async def _warm_bot(b_idx):
-            try:
-                b_cli = bot_mod.multi_clients[b_idx]
-                b_str = get_byte_streamer(b_cli)
-                b_fid = await b_str.get_file_properties(msg_id, force_refresh=False)
-                await b_str.generate_media_session(b_cli, b_fid, slot_idx=0)
-            except Exception:
-                pass
+        # 先预热并缓存所有参与下载节点的媒体会话与位置上下文，排除首次握手与属性解析噪音
+        bot_contexts = {}
+        warm_sem = asyncio.Semaphore(4)
 
-        await asyncio.gather(*[_warm_bot(b) for b in set(dl_bots[:min(total_dl_chunks, len(dl_bots))])], return_exceptions=True)
+        async def _warm_bot(b_idx):
+            async with warm_sem:
+                try:
+                    b_cli = bot_mod.multi_clients[b_idx]
+                    b_str = get_byte_streamer(b_cli)
+                    b_fid = await b_str.get_file_properties(msg_id, force_refresh=False)
+                    b_loc = await b_str.get_location(b_fid)
+                    await b_str.generate_media_session(b_cli, b_fid, slot_idx=0)
+                    bot_contexts[b_idx] = (b_cli, b_str, b_fid, b_loc)
+                except Exception as e:
+                    logger.debug(f"测速节点 #{b_idx} 预热跳过: {e}")
+
+        warm_targets = set(dl_bots[:min(total_dl_chunks, len(dl_bots))])
+        await asyncio.gather(*[_warm_bot(b) for b in warm_targets], return_exceptions=True)
 
         # 若处于集群模式且媒体体积足够，进一步拉取 4 个连续分片测量服务端多 Bot 聚合播放码率 (Sustained Streaming Bitrate)
         if is_cluster_mode and len(dl_bots) > 1 and target_file["file_size"] >= play_chunk_size * 6:
@@ -4590,11 +4691,16 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
                 p_offset = 0
 
             assigned_bot = dl_bots[p_idx % len(dl_bots)]
-            c_cli = bot_mod.multi_clients[assigned_bot]
-            c_streamer = get_byte_streamer(c_cli)
+            ctx = bot_contexts.get(assigned_bot)
+            if ctx:
+                c_cli, c_streamer, c_file_id, c_loc = ctx
+            else:
+                c_cli = bot_mod.multi_clients[assigned_bot]
+                c_streamer = get_byte_streamer(c_cli)
+                c_file_id = await c_streamer.get_file_properties(msg_id, force_refresh=False)
+                c_loc = await c_streamer.get_location(c_file_id)
+
             t_c0 = time.perf_counter()
-            c_file_id = await c_streamer.get_file_properties(msg_id, force_refresh=False)
-            c_loc = await c_streamer.get_location(c_file_id)
             c_succ, c_r, _, _ = await asyncio.wait_for(
                 c_streamer._try_get_file_chunk(
                     c_cli, assigned_bot, c_file_id, c_loc,
@@ -4701,6 +4807,7 @@ async def telegram_stream_and_download_benchmark_handler(request: web.Request):
             "file_size": target_file["file_size"],
             "file_size_formatted": f"{round(target_file['file_size'] / (1024 * 1024), 1)} MB",
             "mime_type": target_file["mime_type"],
+            "dc_id": target_dc,
         }
 
         # 对于大样本时序展示，采样精简为最多 24 个代表性分片（首部、中部与尾部），防止前端长列表滚动卡顿

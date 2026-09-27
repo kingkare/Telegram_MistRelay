@@ -653,3 +653,26 @@ export function benchmarkStreamAndDownload(params: {
     timeout: 300000,
   }).then(r => r.data)
 }
+
+export interface RebrandPreviewRequest {
+  caption?: string
+  filename?: string
+  target_channel?: string
+  signature?: string
+  clean_filenames?: boolean
+  custom_rules?: string
+}
+
+export interface RebrandPreviewResponse {
+  success: boolean
+  data?: {
+    effective_channel: string
+    cleaned_caption: string
+    cleaned_filename: string
+  }
+  error?: string
+}
+
+export function previewRebrand(data: RebrandPreviewRequest): Promise<RebrandPreviewResponse> {
+  return api.post<RebrandPreviewResponse>('/telegram/rebrand/preview', data).then(response => response.data)
+}

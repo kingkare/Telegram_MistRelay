@@ -42,7 +42,11 @@ if "aiohttp" not in sys.modules:
     web_module.HTTPNotFound = HTTPException
     web_module.HTTPForbidden = HTTPException
     web_module.HTTPInternalServerError = HTTPException
-    web_module.json_response = lambda data, status=200: Response(status=status, body=data)
+    def _mock_json_response(data, status=200):
+        import json
+        text_val = json.dumps(data, ensure_ascii=False) if isinstance(data, (dict, list)) else str(data)
+        return Response(status=status, body=data, text=text_val)
+    web_module.json_response = _mock_json_response
     web_module.middleware = lambda func: func
     aiohttp_module.web = web_module
     aiohttp_module.ClientSession = SimpleNamespace
@@ -65,6 +69,10 @@ if "pyrogram" not in sys.modules:
             return lambda func: func
         def on_callback_query(self, *args, **kwargs):
             return lambda func: func
+        async def copy_message(self, *args, **kwargs):
+            pass
+        async def copy_media_group(self, *args, **kwargs):
+            pass
 
     class DummyFilter:
         def __or__(self, other):

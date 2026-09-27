@@ -328,7 +328,7 @@ async def background_dc_prewarm():
         from WebStreamer.utils.custom_dl import ByteStreamer
         from pyrogram.file_id import FileId
 
-        records = db.list_all_tg_media_records()[:100]
+        records = db.list_all_tg_media_records()[:200]
         dc_counts = Counter()
         for r in records:
             fid_str = r.get("file_id")
@@ -338,11 +338,14 @@ async def background_dc_prewarm():
                 except Exception:
                     pass
 
-        # 优先预热主媒体分区（如 DC5）
-        target_dcs = [dc for dc, cnt in dc_counts.most_common() if cnt >= 5] or [5]
-        logger.info(f"🚀 开始执行多机器人后台跨 DC 媒体会话并发预热: 目标主分区 DC={target_dcs}...")
+        # 预热库中出现的所有媒体分区（按文件数量排序，如 DC5, DC1, DC4）
+        target_dcs = [dc for dc, _ in dc_counts.most_common()] or [5]
+        for std_dc in (5, 1, 4):
+            if std_dc not in target_dcs:
+                target_dcs.append(std_dc)
+        logger.info(f"🚀 开始执行多机器人后台全 DC 媒体会话并发预热: 目标分区 DC={target_dcs}...")
 
-        sem = asyncio.Semaphore(4)
+        sem = asyncio.Semaphore(3)
 
         async def _warm_one(idx: int, cli, dc_id: int):
             async with sem:

@@ -363,7 +363,7 @@
                   <span class="pb-val text-purple-500 truncate-filename" :title="streamBenchResult.target_file.file_name">
                     {{ streamBenchResult.target_file.file_name }}
                   </span>
-                  <span class="pb-hint">{{ streamBenchResult.target_file.file_size_formatted }} ({{ streamBenchResult.target_file.mime_type }})</span>
+                  <span class="pb-hint">{{ streamBenchResult.target_file.file_size_formatted }}<template v-if="streamBenchResult.target_file.dc_id"> · DC{{ streamBenchResult.target_file.dc_id }}</template> ({{ streamBenchResult.target_file.mime_type }})</span>
                 </div>
               </div>
             </div>

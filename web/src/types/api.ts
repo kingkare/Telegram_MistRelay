@@ -688,6 +688,7 @@ export interface StreamAndDownloadBenchmarkResult {
     file_size: number
     file_size_formatted: string
     mime_type: string
+    dc_id?: number
   }
   playback: {
     ttfb_ms: number

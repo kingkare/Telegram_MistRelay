@@ -367,7 +367,7 @@ def init_db():
             logger.warning("配置表为空，且旧YAML引导未授权")
 
 
-def save_tg_media(message, media=None) -> str:
+def save_tg_media(message, media=None, custom_file_name=None, custom_caption=None) -> str:
     """
     保存一条 Telegram 媒体元数据，返回 file_unique_id。
 
@@ -426,7 +426,8 @@ def save_tg_media(message, media=None) -> str:
         message_date = _format_message_date(message_date)
 
     file_info = getattr(message, "file", None)
-    file_name = getattr(media, "file_name", None) or getattr(file_info, "name", None)
+    file_name = custom_file_name or getattr(media, "file_name", None) or getattr(file_info, "name", None)
+    caption = custom_caption if custom_caption is not None else getattr(message, "caption", None)
     mime_type = getattr(media, "mime_type", None) or getattr(file_info, "mime_type", None)
     file_size = getattr(media, "file_size", None) or getattr(file_info, "size", None)
 
@@ -504,7 +505,7 @@ def save_tg_media(message, media=None) -> str:
                 getattr(media, "duration", None),
                 getattr(media, "width", None),
                 getattr(media, "height", None),
-                getattr(message, "caption", None),
+                caption,
                 ce_json,
                 message_date,
                 getattr(message, "media_group_id", None),

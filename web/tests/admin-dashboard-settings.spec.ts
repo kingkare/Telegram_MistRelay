@@ -483,3 +483,36 @@ test('settings multi-bot cluster supports hot-add dialog and botfather auto-crea
   await expect(page.getByText('目标扩容节点数')).toBeVisible()
   await page.getByRole('button', { name: '关闭', exact: true }).click()
 })
+
+test('settings stream tab renders forward rebrand configuration and preview', async ({ page }) => {
+  await mockSettingsApis(page)
+  await page.route('**/api/telegram/rebrand/preview', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          effective_channel: '@jiuyue1314520',
+          cleaned_caption: '精彩热门视频 欢迎关注 @jiuyue1314520 https://t.me/jiuyue1314520 获取更多！\n\n📢 关注官方频道: @jiuyue1314520',
+          cleaned_filename: '棒棒糖 (1).mp4'
+        }
+      })
+    })
+  })
+
+  await page.goto('/settings')
+  await page.getByRole('tab', { name: /直链功能/ }).click()
+
+  await expect(page.getByText('频道入库无痕洗白与智能归属改写')).toBeVisible()
+  await expect(page.getByText('启用无痕洗白')).toBeVisible()
+  await expect(page.getByText('归属目标频道')).toBeVisible()
+  await expect(page.getByText('配文落款签名')).toBeVisible()
+  await expect(page.getByText('净化网盘文件名', { exact: true })).toBeVisible()
+  await expect(page.getByText('自定义替换/剔除规则')).toBeVisible()
+
+  // Trigger preview
+  await page.getByRole('button', { name: '测试预览' }).click()
+  await expect(page.getByText('棒棒糖 (1).mp4')).toBeVisible()
+  await expect(page.getByText(/📢 关注官方频道: @jiuyue1314520/)).toBeVisible()
+})

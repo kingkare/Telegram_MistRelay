@@ -410,6 +410,115 @@
               </el-form-item>
             </el-form>
 
+            <!-- 频道入库无痕洗白与智能归属改写面板 -->
+            <div class="bot-cluster-card rebrand-config-card glass-card mt-6">
+              <div class="cluster-card-header">
+                <div class="flex items-center gap-2">
+                  <div class="cluster-icon-pill">
+                    <el-icon><Brush /></el-icon>
+                  </div>
+                  <div>
+                    <h4 class="cluster-title">频道入库无痕洗白与智能归属改写</h4>
+                    <p class="cluster-desc">
+                      抹除用户转发的外部来源标，自动清洗第三方引流广告、替换为本频道落款与净化网盘文件名
+                    </p>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <el-button size="small" type="primary" @click="saveConfig('stream')" :loading="saving">
+                    保存洗白策略
+                  </el-button>
+                </div>
+              </div>
+
+              <el-form :model="configs.stream" label-width="180px" class="modern-form mt-4">
+                <el-form-item label="启用无痕洗白">
+                  <el-switch v-model="configs.stream.FORWARD_REBRAND_ENABLED" />
+                  <div class="el-form-item__help">
+                    开启后使用 Telegram 无痕 Copy 发布，彻底抹除顶部的“转发自 XXX”来源标，并清洗配文。
+                  </div>
+                </el-form-item>
+
+                <el-form-item label="归属目标频道">
+                  <el-input
+                    v-model="configs.stream.FORWARD_TARGET_CHANNEL"
+                    placeholder="例如: @jiuyue1314520 （留空则自动使用主控嗅探到的公开频道标识）"
+                  />
+                  <div class="el-form-item__help">
+                    所有第三方 @username 与 t.me 链接将自动替换为该频道标识。
+                  </div>
+                </el-form-item>
+
+                <el-form-item label="配文落款签名">
+                  <el-input
+                    v-model="configs.stream.FORWARD_CHANNEL_SIGNATURE"
+                    placeholder="例如: 📢 关注官方频道: {channel}"
+                  />
+                  <div class="el-form-item__help">
+                    自动追加在频道消息配文末尾（支持 {channel} 与 {url} 占位符，自动防重复追加）。
+                  </div>
+                </el-form-item>
+
+                <el-form-item label="净化网盘文件名">
+                  <el-switch v-model="configs.stream.FORWARD_CLEAN_FILENAMES" />
+                  <div class="el-form-item__help">
+                    入库时自动剔除文件名中的第三方引流后缀（如 电报TG@xxx、tg搜@xxx），严格保留原始格式与集数编号。
+                  </div>
+                </el-form-item>
+
+                <el-form-item label="自定义替换/剔除规则">
+                  <el-input
+                    v-model="configs.stream.FORWARD_CUSTOM_REPLACE_RULES"
+                    type="textarea"
+                    :rows="3"
+                    placeholder="每行一条，支持 原词=>新词 或直接填写需剔除的广告词"
+                  />
+                  <div class="el-form-item__help">
+                    支持“原词=>替换词”定向改写，或直接填写词条整词剔除。
+                  </div>
+                </el-form-item>
+              </el-form>
+
+              <!-- 实时洗白效果交互预览框 -->
+              <div class="rebrand-preview-box mt-4">
+                <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+                  <div class="flex items-center gap-1.5 font-semibold text-sm text-slate-700">
+                    <el-icon><View /></el-icon>
+                    <span>实时清洗效果交互预览</span>
+                  </div>
+                  <el-button size="small" type="primary" plain @click="runRebrandPreview" :loading="previewLoading">
+                    测试预览
+                  </el-button>
+                </div>
+                <div class="rebrand-preview-grid">
+                  <div class="preview-col">
+                    <div class="preview-col-label">测试输入（原始配文 &amp; 文件名）</div>
+                    <el-input
+                      v-model="previewInput.caption"
+                      type="textarea"
+                      :rows="2"
+                      placeholder="测试配文，例如：精彩热门视频 电报TG@yijiqwq 关注 @other_bot https://t.me/other"
+                    />
+                    <el-input
+                      v-model="previewInput.filename"
+                      size="small"
+                      class="mt-2"
+                      placeholder="测试文件名，例如：电报TG@yijiqwq 棒棒糖 (1).mp4"
+                    />
+                  </div>
+                  <div class="preview-col">
+                    <div class="preview-col-label">清洗输出预览（洗白后结果）</div>
+                    <div class="preview-output-caption">
+                      {{ previewOutput.caption || '（点击右上方【测试预览】查看配文洗白与落款效果）' }}
+                    </div>
+                    <div class="preview-output-filename mt-2">
+                      📁 {{ previewOutput.filename || '（净化后文件名）' }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- 多 Bot 负载均衡与免加频道状态诊断卡片 -->
             <div class="bot-cluster-card glass-card mt-6">
               <div class="cluster-card-header">
@@ -996,6 +1105,7 @@ import {
   hotAddBots,
   hotRemoveBot,
   botfatherAutoCreate,
+  previewRebrand,
   type LogFile
 } from '@/api'
 import { useAuthStore } from '@/stores/auth'
@@ -1013,7 +1123,9 @@ import {
   Promotion,
   Cpu,
   Box,
-  Document
+  Document,
+  Brush,
+  View
 } from '@element-plus/icons-vue'
 import type { DockerStatus, ServerStatus } from '@/types/api'
 import { formatDate } from '@/utils/formatters'
@@ -1280,7 +1392,12 @@ const configs = ref({
     STREAM_ALLOWED_USERS: '',
     STREAM_AUTO_DOWNLOAD: false,
     SEND_STREAM_LINK: false,
-    MULTI_BOT_TOKENS: [] as string[]
+    MULTI_BOT_TOKENS: [] as string[],
+    FORWARD_REBRAND_ENABLED: true,
+    FORWARD_TARGET_CHANNEL: '',
+    FORWARD_CHANNEL_SIGNATURE: '',
+    FORWARD_CLEAN_FILENAMES: true,
+    FORWARD_CUSTOM_REPLACE_RULES: ''
   }
 })
 
@@ -1294,6 +1411,41 @@ const multiBotTokensText = computed({
     updateMultiBotTokens(val)
   }
 })
+
+const previewInput = ref({
+  caption: '精彩热门视频 电报TG@yijiqwq 欢迎关注 @other_bot https://t.me/other 获取更多！',
+  filename: '电报TG@yijiqwq 棒棒糖 (1).mp4'
+})
+const previewOutput = ref({
+  caption: '',
+  filename: ''
+})
+const previewLoading = ref(false)
+
+async function runRebrandPreview() {
+  previewLoading.value = true
+  try {
+    const res = await previewRebrand({
+      caption: previewInput.value.caption,
+      filename: previewInput.value.filename,
+      target_channel: configs.value.stream.FORWARD_TARGET_CHANNEL,
+      signature: configs.value.stream.FORWARD_CHANNEL_SIGNATURE,
+      clean_filenames: configs.value.stream.FORWARD_CLEAN_FILENAMES,
+      custom_rules: configs.value.stream.FORWARD_CUSTOM_REPLACE_RULES
+    })
+    if (res.success && res.data) {
+      previewOutput.value.caption = res.data.cleaned_caption
+      previewOutput.value.filename = res.data.cleaned_filename
+      ElMessage.success('已完成试运行清洗预览')
+    } else {
+      ElMessage.error(res.error || '预览失败')
+    }
+  } catch (err: any) {
+    ElMessage.error(err.message || '预览请求失败')
+  } finally {
+    previewLoading.value = false
+  }
+}
 
 function updateMultiBotTokens(text: string) {
   if (!text.trim()) {
@@ -2373,5 +2525,57 @@ onUnmounted(() => {
 .cap-readonly {
   background: rgba(148, 163, 184, 0.15);
   color: #475569;
+}
+
+.rebrand-preview-box {
+  padding: 16px;
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.85);
+  border: 1px dashed rgba(255, 117, 151, 0.35);
+}
+
+.rebrand-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 768px) {
+  .rebrand-preview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.preview-col-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+.preview-output-caption {
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #1e293b;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 8px;
+  min-height: 54px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.preview-output-filename {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #0369a1;
+  background: rgba(240, 249, 255, 0.9);
+  border: 1px solid rgba(186, 230, 253, 0.9);
+  border-radius: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

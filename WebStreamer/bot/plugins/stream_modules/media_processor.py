@@ -4,6 +4,7 @@
 """
 媒体处理模块
 处理媒体组和单个媒体文件，保存到 TG 网盘并生成直链
+支持无痕复制（Copy）与智能第三方引流清洗归属改写
 """
 
 import logging
@@ -14,9 +15,11 @@ from pyrogram import filters, errors
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums.parse_mode import ParseMode
 
+from configer import get_config_value
 from WebStreamer.vars import Var
 from WebStreamer.bot import StreamBot, logger
 from WebStreamer.utils import get_hash, get_name
+from WebStreamer.utils.rebrand_cleaner import clean_and_rebrand_caption, clean_drive_filename
 from db import save_tg_media
 
 # 媒体组缓存：用于收集同一媒体组的所有消息
@@ -36,7 +39,7 @@ def is_allowed_user(message: Message) -> bool:
 
 async def process_media_group(messages: list, queue_reply_msg=None):
     """
-    处理媒体组：一次性转发所有媒体文件到频道，保持消息完整性
+    处理媒体组：一次性转发/无痕发布所有媒体文件到频道，保持消息完整性
     
     Args:
         messages: 媒体组消息列表
@@ -64,60 +67,122 @@ async def process_media_group(messages: list, queue_reply_msg=None):
         return
     
     try:
-        # 一次性转发整个媒体组到频道（保持消息完整性）
-        # 使用 forward_messages 一次性转发所有消息，保持媒体组完整性
-        try:
-            # 获取所有消息的 ID
-            message_ids = [msg.id for msg in messages]
-            chat_id = messages[0].chat.id
-            
-            # 一次性转发整个媒体组
-            forwarded_msgs = await StreamBot.forward_messages(
-                chat_id=Var.BIN_CHANNEL,
-                from_chat_id=chat_id,
-                message_ids=message_ids
-            )
-            
-            # 构建 (原始消息, 转发消息) 的配对列表
-            forwarded_messages = []
-            if isinstance(forwarded_msgs, list):
-                # 如果返回的是列表（多条消息）
-                for i, log_msg in enumerate(forwarded_msgs):
-                    if i < len(messages):
-                        forwarded_messages.append((messages[i], log_msg))
-            else:
-                # 如果返回的是单个消息对象（理论上不应该发生）
-                forwarded_messages.append((messages[0], forwarded_msgs))
-                
-        except Exception as e:
-            logger.error(f"转发媒体组失败: {e}", exc_info=True)
-            # 如果一次性转发失败，回退到逐条转发
-            forwarded_messages = []
-            for msg in messages:
+        rebrand_enabled = bool(get_config_value("FORWARD_REBRAND_ENABLED", True))
+        clean_filenames = bool(get_config_value("FORWARD_CLEAN_FILENAMES", True))
+        target_channel = get_config_value("FORWARD_TARGET_CHANNEL", "")
+        signature = get_config_value("FORWARD_CHANNEL_SIGNATURE", "")
+        custom_rules = get_config_value("FORWARD_CUSTOM_REPLACE_RULES", "")
+
+        chat_id = messages[0].chat.id
+        message_ids = [msg.id for msg in messages]
+        forwarded_messages = []
+
+        # 1. 尝试无痕复制入库（抹除“转发自”标识并应用配文清洗）
+        if rebrand_enabled:
+            try:
+                captions = [
+                    clean_and_rebrand_caption(
+                        msg.caption,
+                        target_channel=target_channel,
+                        signature=signature,
+                        custom_rules=custom_rules,
+                    ) if (msg.caption or (i == 0 and signature)) else (msg.caption or "")
+                    for i, msg in enumerate(messages)
+                ]
+                copied_msgs = await StreamBot.copy_media_group(
+                    chat_id=Var.BIN_CHANNEL,
+                    from_chat_id=chat_id,
+                    message_id=messages[0].id,
+                    captions=captions,
+                )
+                if isinstance(copied_msgs, list):
+                    for i, log_msg in enumerate(copied_msgs):
+                        if i < len(messages):
+                            forwarded_messages.append((messages[i], log_msg))
+                elif copied_msgs:
+                    forwarded_messages.append((messages[0], copied_msgs))
+            except Exception as copy_grp_err:
+                logger.warning(f"copy_media_group 无痕发布失败: {copy_grp_err}，尝试逐条 copy_message")
                 try:
-                    log_msg = await msg.forward(chat_id=Var.BIN_CHANNEL)
-                    forwarded_messages.append((msg, log_msg))
-                except Exception as e2:
-                    logger.error(f"转发单条消息失败: {e2}", exc_info=True)
+                    for msg in messages:
+                        c_caption = clean_and_rebrand_caption(
+                            msg.caption,
+                            target_channel=target_channel,
+                            signature=signature,
+                            custom_rules=custom_rules,
+                        ) if msg.caption else msg.caption
+                        c_msg = await StreamBot.copy_message(
+                            chat_id=Var.BIN_CHANNEL,
+                            from_chat_id=chat_id,
+                            message_id=msg.id,
+                            caption=c_caption,
+                        )
+                        forwarded_messages.append((msg, c_msg))
+                except Exception as copy_each_err:
+                    logger.warning(f"逐条 copy_message 也失败: {copy_each_err}，回退到 forward")
+                    forwarded_messages = []
+
+        # 2. 若未启用无痕洗白或复制异常，安全回退到原转发
+        if not forwarded_messages:
+            try:
+                forwarded_msgs = await StreamBot.forward_messages(
+                    chat_id=Var.BIN_CHANNEL,
+                    from_chat_id=chat_id,
+                    message_ids=message_ids
+                )
+                if isinstance(forwarded_msgs, list):
+                    for i, log_msg in enumerate(forwarded_msgs):
+                        if i < len(messages):
+                            forwarded_messages.append((messages[i], log_msg))
+                else:
+                    forwarded_messages.append((messages[0], forwarded_msgs))
+            except Exception as e:
+                logger.error(f"转发媒体组失败: {e}", exc_info=True)
+                for msg in messages:
+                    try:
+                        log_msg = await msg.forward(chat_id=Var.BIN_CHANNEL)
+                        forwarded_messages.append((msg, log_msg))
+                    except Exception as e2:
+                        logger.error(f"转发单条消息失败: {e2}", exc_info=True)
         
         if not forwarded_messages:
             return
         
-        # 为每个媒体文件生成直链，并把已转发到频道的消息写入 tg_media
+        # 为每个媒体文件生成直链，并把已保存到频道的消息写入 tg_media
         stream_links = []
 
         for original_msg, log_msg in forwarded_messages:
             try:
+                raw_file_name = get_name(original_msg)
+                cleaned_file_name = clean_drive_filename(
+                    raw_file_name,
+                    clean_enabled=clean_filenames,
+                    custom_rules=custom_rules,
+                ) if clean_filenames else raw_file_name
+
+                raw_caption = getattr(original_msg, "caption", None)
+                cleaned_caption = clean_and_rebrand_caption(
+                    raw_caption,
+                    target_channel=target_channel,
+                    signature=signature,
+                    custom_rules=custom_rules,
+                ) if rebrand_enabled and raw_caption else getattr(log_msg, "caption", None)
+
                 file_hash = get_hash(log_msg, Var.HASH_LENGTH)
-                stream_link = f"{Var.URL}{log_msg.id}/{quote_plus(get_name(original_msg))}?hash={file_hash}"
+                stream_link = f"{Var.URL}{log_msg.id}/{quote_plus(cleaned_file_name)}?hash={file_hash}"
                 short_link = f"{Var.URL}{file_hash}{log_msg.id}"
-                file_name = get_name(original_msg)
+                file_name = cleaned_file_name
                 log_media = getattr(log_msg, log_msg.media.value, None) if getattr(log_msg, "media", None) else None
                 file_unique_id = None
 
                 if log_media:
                     try:
-                        file_unique_id = save_tg_media(log_msg, log_media)
+                        file_unique_id = save_tg_media(
+                            log_msg,
+                            log_media,
+                            custom_file_name=cleaned_file_name if clean_filenames else None,
+                            custom_caption=cleaned_caption if rebrand_enabled else None,
+                        )
                         try:
                             from thumbnail_worker import get_thumbnail_worker
                             get_thumbnail_worker().enqueue(log_msg.id)
@@ -143,7 +208,6 @@ async def process_media_group(messages: list, queue_reply_msg=None):
         
         # 构建回复消息
         if len(stream_links) == 1:
-            # 单个文件
             link_info = stream_links[0]
             reply_text = (
                 f"☁️ <b>已保存到 TG 网盘</b>\n\n"
@@ -153,7 +217,6 @@ async def process_media_group(messages: list, queue_reply_msg=None):
             )
             main_link = link_info['full_link']
         else:
-            # 多个文件（媒体组）
             saved_count = sum(1 for item in stream_links if item.get('file_unique_id'))
             reply_text = (
                 f"☁️ <b>媒体组已保存到 TG 网盘</b>\n\n"
@@ -194,7 +257,6 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                     parse_mode=ParseMode.HTML,
                 )
         else:
-            # 如果不发送直链信息，更新队列通知消息为处理中状态
             if queue_reply_msg:
                 try:
                     processing_text = (
@@ -210,10 +272,8 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                 except Exception as e:
                     logger.debug(f"更新队列通知消息失败: {e}")
             
-            # 记录日志
             logger.info(f"已处理媒体组（不发送直链信息）：共 {len(stream_links)} 个文件，已保存到TG网盘")
         
-        # TG 网盘媒体不再创建 aria2 下载任务。
         return task_gids
     except Exception as e:
         logger.error(f"处理媒体组失败: {e}", exc_info=True)
@@ -225,7 +285,7 @@ async def process_media_group(messages: list, queue_reply_msg=None):
             await first_msg.reply(error_reply, quote=True, parse_mode=ParseMode.HTML)
         except Exception:
             pass
-        return []  # 返回空列表
+        return []
 
 
 async def process_single_media(m: Message, queue_reply_msg=None):
@@ -239,8 +299,6 @@ async def process_single_media(m: Message, queue_reply_msg=None):
     if not Var.ENABLE_STREAM:
         return
     
-    # 如果有排队通知，且启用了发送直链信息，则删除它（因为我们要发送实际的处理结果）
-    # 如果没有启用发送直链信息，保留队列通知消息，以便后续更新为完成状态
     if queue_reply_msg and Var.SEND_STREAM_LINK:
         try:
             await queue_reply_msg.delete()
@@ -261,13 +319,52 @@ async def process_single_media(m: Message, queue_reply_msg=None):
         return await m.reply("直链功能未配置，请在配置文件中设置 BIN_CHANNEL", quote=True)
     
     try:
-        # 转发到日志频道并生成直链
-        log_msg = await m.forward(chat_id=Var.BIN_CHANNEL)
+        rebrand_enabled = bool(get_config_value("FORWARD_REBRAND_ENABLED", True))
+        clean_filenames = bool(get_config_value("FORWARD_CLEAN_FILENAMES", True))
+        target_channel = get_config_value("FORWARD_TARGET_CHANNEL", "")
+        signature = get_config_value("FORWARD_CHANNEL_SIGNATURE", "")
+        custom_rules = get_config_value("FORWARD_CUSTOM_REPLACE_RULES", "")
+
+        raw_caption = getattr(m, "caption", None)
+        cleaned_caption = clean_and_rebrand_caption(
+            raw_caption,
+            target_channel=target_channel,
+            signature=signature,
+            custom_rules=custom_rules,
+        ) if rebrand_enabled else raw_caption
+
+        raw_file_name = get_name(m)
+        cleaned_file_name = clean_drive_filename(
+            raw_file_name,
+            clean_enabled=clean_filenames,
+            custom_rules=custom_rules,
+        ) if clean_filenames else raw_file_name
+
+        log_msg = None
+        if rebrand_enabled:
+            try:
+                log_msg = await StreamBot.copy_message(
+                    chat_id=Var.BIN_CHANNEL,
+                    from_chat_id=m.chat.id,
+                    message_id=m.id,
+                    caption=cleaned_caption,
+                )
+            except Exception as copy_err:
+                logger.warning(f"copy_message 无痕发布失败: {copy_err}，回退到 forward")
+                log_msg = await m.forward(chat_id=Var.BIN_CHANNEL)
+        else:
+            log_msg = await m.forward(chat_id=Var.BIN_CHANNEL)
+
         log_media = getattr(log_msg, log_msg.media.value, None) if getattr(log_msg, "media", None) else None
         saved_file_unique_id = None
         if log_media:
             try:
-                saved_file_unique_id = save_tg_media(log_msg, log_media)
+                saved_file_unique_id = save_tg_media(
+                    log_msg,
+                    log_media,
+                    custom_file_name=cleaned_file_name if clean_filenames else None,
+                    custom_caption=cleaned_caption if rebrand_enabled else None,
+                )
                 try:
                     from thumbnail_worker import get_thumbnail_worker
                     get_thumbnail_worker().enqueue(log_msg.id)
@@ -275,31 +372,18 @@ async def process_single_media(m: Message, queue_reply_msg=None):
                     pass
             except Exception as db_e:
                 logger.error(f"记录频道媒体到数据库失败: {db_e}", exc_info=True)
+
         file_hash = get_hash(log_msg, Var.HASH_LENGTH)
-        stream_link = f"{Var.URL}{log_msg.id}/{quote_plus(get_name(m))}?hash={file_hash}"
+        stream_link = f"{Var.URL}{log_msg.id}/{quote_plus(cleaned_file_name)}?hash={file_hash}"
         short_link = f"{Var.URL}{file_hash}{log_msg.id}"
         
         logger.info(f"媒体已保存到TG网盘并生成直链： {stream_link} for {m.from_user.first_name}")
         
         # 返回直链给用户（如果启用了发送直链信息）
         if Var.SEND_STREAM_LINK:
-            file_name = ""
-            if m.document:
-                file_name = m.document.file_name or "未知文件"
-            elif m.video:
-                file_name = m.video.file_name or "视频文件"
-            elif m.audio:
-                file_name = m.audio.file_name or "音频文件"
-            elif m.photo:
-                file_name = "图片文件"
-            elif m.animation:
-                file_name = m.animation.file_name or "动画文件"
-            else:
-                file_name = "媒体文件"
-            
             reply_text = (
                 f"☁️ <b>已保存到 TG 网盘</b>\n\n"
-                f"📁 <b>文件:</b> <code>{file_name}</code>\n\n"
+                f"📁 <b>文件:</b> <code>{cleaned_file_name}</code>\n\n"
                 f"🌐 <b>完整链接:</b>\n<code>{stream_link}</code>\n\n"
                 f"🔗 <b>短链接:</b>\n<code>{short_link}</code>"
             )
@@ -320,7 +404,6 @@ async def process_single_media(m: Message, queue_reply_msg=None):
                     parse_mode=ParseMode.HTML,
                 )
         else:
-            # 如果不发送直链信息，更新队列通知消息为处理中状态
             if queue_reply_msg:
                 try:
                     processing_text = (
@@ -335,14 +418,13 @@ async def process_single_media(m: Message, queue_reply_msg=None):
                 except Exception as e:
                     logger.debug(f"更新队列通知消息失败: {e}")
             
-            logger.info(f"已处理文件（不发送直链信息）：{get_name(m)}，已保存到TG网盘")
+            logger.info(f"已处理文件（不发送直链信息）：{cleaned_file_name}，已保存到TG网盘")
         
-        # TG 网盘媒体不再创建 aria2 下载任务。
         return []
     except Exception as e:
         logger.error(f"生成直链失败: {e}", exc_info=True)
         await m.reply("生成直链时出错，请稍后重试", quote=True)
-        return []  # 返回空列表
+        return []
 
 
 @StreamBot.on_message(
@@ -375,12 +457,10 @@ async def media_receive_handler(_, m: Message):
         )
         return
 
-    # 延迟导入避免循环依赖
     from .queue_manager import enqueue_message_task
     
     # 检查是否是媒体组
     if m.media_group_id:
-        # 媒体组：收集所有消息，延迟处理
         group_id = f"{m.chat.id}_{m.media_group_id}"
         if group_id not in media_group_cache and len(media_group_cache) >= MAX_PENDING_MEDIA_GROUPS:
             await m.reply("消息队列繁忙，请稍后重试", quote=True)
@@ -390,27 +470,21 @@ async def media_receive_handler(_, m: Message):
             return
         media_group_cache[group_id].append(m)
         
-        # 取消之前的任务（如果有）
         if group_id in media_group_tasks:
             media_group_tasks[group_id].cancel()
         
-        # 创建新任务：等待500ms后处理（给其他消息时间到达）
         async def delayed_process():
-            await asyncio.sleep(0.5)  # 等待500ms
+            await asyncio.sleep(0.5)
             if group_id in media_group_cache:
                 messages = media_group_cache.pop(group_id)
-                # 按照消息 ID 排序，确保顺序正确
                 messages.sort(key=lambda x: x.id)
                 if group_id in media_group_tasks:
                     del media_group_tasks[group_id]
-                # 将媒体组处理任务加入队列，而不是直接执行
-                # 注意：排队通知会在enqueue_message_task中自动发送
                 if not enqueue_message_task(process_media_group, messages):
                     await messages[0].reply("消息队列已满，请稍后重试", quote=True)
         
         task = asyncio.create_task(delayed_process())
         media_group_tasks[group_id] = task
     else:
-        # 单个媒体文件：加入队列处理，而不是立即处理
         if not enqueue_message_task(process_single_media, m):
             await m.reply("消息队列已满，请稍后重试", quote=True)
