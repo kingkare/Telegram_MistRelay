@@ -60,6 +60,7 @@ class TestMultiAccountPoolAndRelay(unittest.IsolatedAsyncioTestCase):
         db.set_config("TELEGRAM_API_PROXY_URL", "https://proxy.example.com/api?region=US&num=1&time=10&format=1&type=txt")
         botfather_creator._PHONE_SESSION_CACHE.clear()
         botfather_creator._CACHE_FILES = [os.path.join(self.tmp_dir.name, "sessions.json")]
+        botfather_creator._CREDENTIALS_CACHE_FILES = [os.path.join(self.tmp_dir.name, "credentials.json")]
 
     def tearDown(self):
         db.DB_PATH = self.orig_db_path
@@ -798,6 +799,74 @@ class TestMultiAccountPoolAndRelay(unittest.IsolatedAsyncioTestCase):
                 api_id=21112222,
                 api_hash="invalid_short_hash",
             )
+
+
+    async def test_unconfigured_account_never_polluted_by_session_meta_api_id(self):
+        """验证未配置专属凭证的协议号决不回退会话内置的 meta_api_id (如 2420373)，避免假数据污染与误解"""
+        # 创建一个内置 api_id=2420373 的 Pyrogram 会话
+        sess = pack_pyrogram_session(
+            dc_id=1,
+            auth_key=os.urandom(256),
+            api_id=2420373,
+            user_id=10086,
+        )
+        rec = db.upsert_protocol_account(phone="+16813087777", session_data=sess)
+        self.assertIsNone(rec["api_id"])
+        self.assertIsNone(rec["api_hash"])
+
+        # 校验脱敏记录中 api_id 为 None，且 has_api_hash 为 False
+        sanitized = botfather_creator.sanitize_account_record(rec)
+        self.assertIsNone(sanitized["api_id"], "未提取账号脱敏 api_id 必须为 None")
+        self.assertFalse(sanitized["has_api_hash"])
+        self.assertEqual(sanitized["masked_api_hash"], "")
+
+        # 校验详情中 metadata.api_id 为 None
+        detail = await botfather_creator.get_protocol_account_detail(rec["id"])
+        self.assertIsNone(detail["metadata"]["api_id"], "未提取账号详情 metadata.api_id 必须为 None")
+        self.assertFalse(detail["metadata"]["has_api_hash"])
+
+    async def test_credentials_dual_persistence_and_self_healing(self):
+        """验证 SQLite 数据库与磁盘 JSON 凭证备份的双向持久化与自愈"""
+        s1 = self._make_fake_session(9005)
+        phone = "+16813089005"
+        rec = db.upsert_protocol_account(phone=phone, session_data=s1)
+
+        # 1. 更新凭证 -> 校验同时写入 DB 与磁盘 JSON
+        detail = await botfather_creator.update_protocol_account_credentials(
+            rec["id"],
+            api_id=33078544,
+            api_hash="65ef3f63d4f109c7290bea5e4f329be6",
+            remark="双写测试",
+        )
+        self.assertEqual(detail["metadata"]["api_id"], 33078544)
+        self.assertEqual(detail["metadata"]["api_hash"], "65ef3f63d4f109c7290bea5e4f329be6")
+
+        # 验证磁盘缓存文件内容
+        cached = botfather_creator._load_cached_credentials()
+        self.assertIn(phone, cached)
+        self.assertEqual(cached[phone]["api_id"], 33078544)
+        self.assertEqual(cached[phone]["api_hash"], "65ef3f63d4f109c7290bea5e4f329be6")
+
+        # 2. 模拟 SQLite 意外丢失 api_id 与 api_hash
+        db.update_protocol_account(rec["id"], api_id=None, api_hash=None)
+        wiped_row = db.get_protocol_account_by_id(rec["id"])
+        self.assertIsNone(wiped_row["api_id"])
+        self.assertIsNone(wiped_row["api_hash"])
+
+        # 3. 执行 sync_cached_sessions_to_db -> 自动从磁盘凭证备份自愈回填 SQLite
+        pool = botfather_creator.sync_cached_sessions_to_db()
+        healed_item = next(p for p in pool if p["phone"] == phone)
+        self.assertEqual(healed_item["api_id"], 33078544)
+        self.assertTrue(healed_item["has_api_hash"])
+
+        db_healed = db.get_protocol_account_by_id(rec["id"])
+        self.assertEqual(db_healed["api_id"], 33078544)
+        self.assertEqual(db_healed["api_hash"], "65ef3f63d4f109c7290bea5e4f329be6")
+
+        # 4. 删除账号 -> 校验磁盘凭证备份中该账号被安全清理
+        self.assertTrue(botfather_creator.remove_protocol_account(rec["id"]))
+        cached_after = botfather_creator._load_cached_credentials()
+        self.assertNotIn(phone, cached_after)
 
 
 if __name__ == "__main__":

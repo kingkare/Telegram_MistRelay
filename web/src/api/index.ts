@@ -542,7 +542,7 @@ export type {
 }
 
 export function getProtocolAccounts(): Promise<ProtocolAccountsResponse> {
-  return api.get<ProtocolAccountsResponse>('/telegram/botfather/accounts').then(r => r.data)
+  return api.get<ProtocolAccountsResponse>(`/telegram/botfather/accounts?_t=${Date.now()}`).then(r => r.data)
 }
 
 export function importProtocolAccounts(
@@ -575,7 +575,7 @@ export function checkProtocolAccount(accountId: number): Promise<CheckProtocolAc
 }
 
 export function getProtocolAccountDetail(accountId: number, refresh = false): Promise<ProtocolAccountDetailResponse> {
-  const query = refresh ? '?refresh=1' : ''
+  const query = refresh ? `?refresh=1&_t=${Date.now()}` : `?_t=${Date.now()}`
   return api.get<ProtocolAccountDetailResponse>(`/telegram/botfather/accounts/${accountId}/detail${query}`, {
     timeout: 120000,
   }).then(r => r.data)
@@ -686,7 +686,7 @@ export type {
 }
 
 export function getBotFatherTaskStatus(): Promise<BotFatherTaskStatusResponse> {
-  return api.get<BotFatherTaskStatusResponse>('/telegram/botfather/task-status').then(r => r.data)
+  return api.get<BotFatherTaskStatusResponse>(`/telegram/botfather/task-status?_t=${Date.now()}`).then(r => r.data)
 }
 
 export function startBotFatherTask(data: FormData | BotFatherAutoCreateRequest): Promise<BotFatherTaskStatusResponse> {

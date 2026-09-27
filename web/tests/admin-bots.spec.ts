@@ -367,7 +367,7 @@ async function setupBotsPageMocks(page: Page) {
     })
   })
 
-  await page.route('**/api/telegram/botfather/task-status', async (route) => {
+  await page.route(/\/api\/telegram\/botfather\/task-status.*/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -376,7 +376,7 @@ async function setupBotsPageMocks(page: Page) {
   })
 
   let currentAccounts = [...MOCK_ACCOUNTS.data]
-  await page.route('**/api/telegram/botfather/accounts', async (route) => {
+  await page.route(/\/api\/telegram\/botfather\/accounts([?#].*)?$/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -1106,10 +1106,13 @@ test.describe('Admin Bots Cluster Management View', () => {
     await expect(batchApiDialog).toContainText('提取执行结果明细')
     await batchApiDialog.locator('.el-button', { hasText: '关闭' }).click()
 
-    // 验证单个协议号“保活”按钮
+    // 验证单个协议号“保活”按钮与卡片专属 API 凭证回显栏
     const singleKeepaliveBtn = firstAccCard.locator('.keepalive-account-btn')
     await expect(singleKeepaliveBtn).toBeVisible()
     await singleKeepaliveBtn.click()
+
+    const apiBanner = firstAccCard.locator('.acc-api-banner')
+    await expect(apiBanner).toBeVisible()
 
     // 验证协议号卡片布局严谨无横向溢出
     const cardBox = await firstAccCard.boundingBox()

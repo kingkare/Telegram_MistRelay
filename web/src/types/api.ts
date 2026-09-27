@@ -523,6 +523,7 @@ export interface FetchProtocolAccountApiResponse {
     region?: string
     proxy_used?: string
     detail: ProtocolAccountDetail
+    pool?: ProtocolAccount[]
   }
   error?: string
 }

@@ -60,6 +60,75 @@ _CACHE_FILES = [
     "/tmp/tg_phone_sessions.json",
     "db/sessions/tg_phone_sessions.json",
 ]
+_CREDENTIALS_CACHE_FILES = [
+    "/app/db/sessions/tg_api_credentials.json",
+    "/tmp/tg_api_credentials.json",
+    "db/sessions/tg_api_credentials.json",
+]
+
+
+def _normalize_phone_key(phone: str) -> str:
+    norm = str(phone or "").strip()
+    if re.fullmatch(r"\d{8,15}", norm):
+        norm = "+" + norm
+    return norm
+
+
+def _save_cached_credentials(phone: str, api_id: Optional[int], api_hash: Optional[str]) -> None:
+    norm = _normalize_phone_key(phone)
+    if not norm or not api_id or not api_hash:
+        return
+    for cpath in _CREDENTIALS_CACHE_FILES:
+        try:
+            os.makedirs(os.path.dirname(cpath), exist_ok=True)
+            data: Dict[str, Any] = {}
+            if os.path.exists(cpath):
+                with open(cpath, "r", encoding="utf-8") as f:
+                    content = json.load(f)
+                    if isinstance(content, dict):
+                        data = content
+            data[norm] = {
+                "api_id": int(api_id),
+                "api_hash": str(api_hash).strip(),
+                "updated_at": db._now_iso(),
+            }
+            with open(cpath, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"保存凭证文件备份异常 {cpath}: {e}")
+
+
+def _remove_cached_credentials(phone: str) -> None:
+    norm = _normalize_phone_key(phone)
+    if not norm:
+        return
+    for cpath in _CREDENTIALS_CACHE_FILES:
+        try:
+            if os.path.exists(cpath):
+                with open(cpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and norm in data:
+                    data.pop(norm, None)
+                    with open(cpath, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.debug(f"清理凭证文件备份异常 {cpath}: {e}")
+
+
+def _load_cached_credentials() -> Dict[str, Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    for cpath in _CREDENTIALS_CACHE_FILES:
+        if os.path.exists(cpath):
+            try:
+                with open(cpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        for k, v in data.items():
+                            if isinstance(v, dict) and v.get("api_id") and v.get("api_hash"):
+                                merged[_normalize_phone_key(k)] = v
+            except Exception:
+                pass
+    return merged
 
 
 def _normalize_session_str(sess_str: str) -> str:
@@ -142,6 +211,9 @@ def _save_cached_session(
                 json.dump(data, f)
         except Exception:
             pass
+
+    if api_id and api_hash:
+        _save_cached_credentials(norm_phone, api_id, api_hash)
 
     try:
         return db.upsert_protocol_account(
@@ -356,10 +428,9 @@ def sanitize_account_record(row: Dict) -> Dict:
     tg_user_id = row.get("tg_user_id") if row.get("tg_user_id") is not None else meta.get("user_id")
 
     db_api_id = row.get("api_id")
-    meta_api_id = meta.get("api_id")
-    api_id = db_api_id if db_api_id else (meta_api_id if meta_api_id and meta_api_id not in (0, 2040) else None)
+    api_id = int(db_api_id) if db_api_id and str(db_api_id).strip() not in ("0", "") else None
 
-    api_hash = row.get("api_hash") or ""
+    api_hash = str(row.get("api_hash") or "").strip()
     has_api_hash = bool(api_hash)
     masked_api_hash = ""
     if api_hash:
@@ -442,6 +513,7 @@ def remove_protocol_account(account_identifier: Union[int, str], phone_hint: Opt
 
     for p in phones_to_remove:
         _PHONE_SESSION_CACHE.pop(p, None)
+        _remove_cached_credentials(p)
 
     for cpath in _CACHE_FILES:
         if os.path.exists(cpath):
@@ -468,10 +540,36 @@ def sync_cached_sessions_to_db() -> List[Dict]:
     获取所有已纳管的协议号资产列表。
     当且仅当数据库表为空时（如首次系统启动、历史升级迁移），才从历史 JSON 文件和内存会话中同步迁移数据，
     避免反复将管理员已主动移除的协议号从磁盘遗留缓存中重新复原。
+    同时实现磁盘凭证备份与 SQLite 数据库的双向自愈同步。
     """
     try:
         existing_rows = db.list_protocol_accounts()
+        cached_creds = _load_cached_credentials()
+
+        # 双向自愈：同步磁盘凭证备份与 SQLite 数据库
         if existing_rows:
+            for row in existing_rows:
+                r_phone = _normalize_phone_key(row.get("phone") or "")
+                r_api_id = row.get("api_id")
+                r_api_hash = row.get("api_hash")
+                # 1. 若 SQLite 缺失 api_id/api_hash，但磁盘凭证备份中存在，则自动回填 SQLite
+                if (not r_api_id or not r_api_hash) and r_phone in cached_creds:
+                    c_info = cached_creds[r_phone]
+                    try:
+                        db.update_protocol_account(
+                            row["id"],
+                            api_id=int(c_info["api_id"]),
+                            api_hash=str(c_info["api_hash"]).strip(),
+                        )
+                        row["api_id"] = int(c_info["api_id"])
+                        row["api_hash"] = str(c_info["api_hash"]).strip()
+                        logger.info(f"从磁盘凭证备份成功自愈协议号 {r_phone} API 凭证: api_id={c_info['api_id']}")
+                    except Exception as e_heal:
+                        logger.debug(f"自愈协议号 API 凭证异常: {e_heal}")
+                # 2. 若 SQLite 存有有效凭证，确保同步备份至磁盘 JSON
+                elif r_api_id and r_api_hash:
+                    _save_cached_credentials(r_phone, r_api_id, r_api_hash)
+
             return [sanitize_account_record(r) for r in existing_rows]
 
         # 仅当数据库完全为空时执行一次初始化历史迁移
@@ -490,15 +588,16 @@ def sync_cached_sessions_to_db() -> List[Dict]:
 
         existing_phones = {r["phone"] for r in existing_rows}
         for phone_k, sess_v in found.items():
-            norm_p = phone_k.strip()
-            if re.fullmatch(r"\d{8,15}", norm_p):
-                norm_p = "+" + norm_p
+            norm_p = _normalize_phone_key(phone_k)
             if norm_p not in existing_phones:
+                c_cred = cached_creds.get(norm_p)
                 db.upsert_protocol_account(
                     phone=norm_p,
                     session_data=_normalize_session_str(sess_v),
                     session_type="pyrogram_string",
                     status="active",
+                    api_id=c_cred.get("api_id") if c_cred else None,
+                    api_hash=c_cred.get("api_hash") if c_cred else None,
                 )
         return [sanitize_account_record(r) for r in db.list_protocol_accounts()]
     except Exception as e:
@@ -2254,9 +2353,10 @@ async def get_protocol_account_detail(account_id: int, refresh_online: bool = Fa
             "tg_user_id": acc.get("tg_user_id") or meta.get("user_id"),
             "username": acc.get("username") or "",
             "first_name": acc.get("first_name") or "",
-            "api_id": acc.get("api_id") or meta.get("api_id"),
-            "api_hash": acc.get("api_hash") or "",
-            "has_api_hash": bool(acc.get("api_hash")),
+            "api_id": int(acc["api_id"]) if acc.get("api_id") and str(acc.get("api_id")).strip() not in ("0", "") else None,
+            "api_hash": str(acc.get("api_hash") or "").strip(),
+            "has_api_hash": bool(str(acc.get("api_hash") or "").strip()),
+            "session_embedded_api_id": meta.get("api_id"),
             "test_mode": meta.get("test_mode"),
             "is_bot": meta.get("is_bot"),
             "auth_key_len": meta.get("auth_key_len"),
@@ -2515,8 +2615,16 @@ async def fetch_api_credentials_from_my_telegram(
 
         logger.info(f"成功为协议号 {real_phone} (地区: {region}) 提取 Telegram API 凭证: api_id={found_id}, api_hash={found_hash[:6]}**** (代理: {masked_proxy})")
 
-        # 5. 持久化到数据库
+        # 5. 持久化到 SQLite 数据库与磁盘凭证备份
         db.update_protocol_account(account_id, api_id=found_id, api_hash=found_hash)
+        _save_cached_credentials(real_phone, found_id, found_hash)
+
+        # 校验写入结果
+        verified = db.get_protocol_account_by_id(account_id)
+        if not verified or verified.get("api_id") != found_id:
+            logger.error(f"协议号 {account_id} 凭证写入数据库校验失败！")
+        else:
+            logger.info(f"协议号 {real_phone} 凭证已成功持久化落库到 SQLite 与磁盘 JSON 备份: api_id={found_id}")
 
         # 尝试将会话内嵌的 api_id 更新为真实提取的 api_id
         try:
@@ -2535,12 +2643,14 @@ async def fetch_api_credentials_from_my_telegram(
             logger.debug(f"更新会话内嵌 api_id 跳过: {e_pack}")
 
         updated_detail = await get_protocol_account_detail(account_id)
+        updated_pool = [sanitize_account_record(r) for r in db.list_protocol_accounts()]
         return {
             "api_id": found_id,
             "api_hash": found_hash,
             "region": region,
             "proxy_used": masked_proxy,
             "detail": updated_detail,
+            "pool": updated_pool,
         }
 
     finally:
@@ -2642,7 +2752,15 @@ async def update_protocol_account_credentials(
     if updates:
         db.update_protocol_account(int(account_id), **updates)
 
-    return await get_protocol_account_detail(int(account_id))
+    acc_after = db.get_protocol_account_by_id(int(account_id))
+    if acc_after and acc_after.get("api_id") and acc_after.get("api_hash"):
+        _save_cached_credentials(acc_after.get("phone") or "", acc_after["api_id"], acc_after["api_hash"])
+    elif acc_after and (not acc_after.get("api_id") or not acc_after.get("api_hash")):
+        _remove_cached_credentials(acc_after.get("phone") or "")
+
+    detail = await get_protocol_account_detail(int(account_id))
+    detail["pool"] = [sanitize_account_record(r) for r in db.list_protocol_accounts()]
+    return detail
 
 
 async def keepalive_protocol_account(account_id: int, check_bots: bool = False) -> Dict[str, Any]:

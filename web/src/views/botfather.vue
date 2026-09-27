@@ -302,6 +302,45 @@
             </div>
           </div>
 
+          <!-- API 凭证持久化落库回显条 (高对比度双模展示，彻底消除刷新后消失感) -->
+          <div
+            v-if="acc.api_id && acc.has_api_hash"
+            class="acc-api-banner ready"
+            @click="handleOpenAccountDetail(acc)"
+            title="Telegram 开发者 API 凭证已持久化落库，点击查看详情"
+          >
+            <div class="acc-api-banner-left">
+              <span class="acc-api-banner-badge">
+                <el-icon><Check /></el-icon>
+                <span>已落库</span>
+              </span>
+              <span class="acc-api-banner-id">ID: <strong>{{ acc.api_id }}</strong></span>
+              <span class="acc-api-banner-hash font-mono">{{ acc.masked_api_hash }}</span>
+            </div>
+            <button
+              type="button"
+              class="acc-api-banner-copy-btn"
+              @click.stop="copyToClipboard(`${acc.api_id}:${acc.masked_api_hash}`, 'API 凭证')"
+              title="一键复制已落库的 API 凭证组合"
+            >
+              <el-icon><CopyDocument /></el-icon>
+            </button>
+          </div>
+          <div
+            v-else
+            class="acc-api-banner pending"
+            @click="handleOpenAccountDetail(acc)"
+            title="未配置专属开发者 API 凭证，点击前往 my.telegram.org 自动提取"
+          >
+            <div class="acc-api-banner-left">
+              <span class="acc-api-banner-badge pending">
+                <el-icon><Connection /></el-icon>
+                <span>未提取</span>
+              </span>
+              <span class="acc-api-banner-prompt">点击前往自动提取 API 凭证 →</span>
+            </div>
+          </div>
+
           <!-- 底部操作按钮栏 (全宽等比分配，零溢出) -->
           <div class="acc-card-actions">
             <el-button
@@ -941,7 +980,7 @@
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="font-semibold text-slate-800 text-sm">Telegram 开发者 API 凭证</span>
                 <span v-if="accountDetail.metadata.api_id && accountDetail.metadata.api_hash" class="text-xs text-emerald-600 font-medium bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                  已就绪
+                  ✓ 已持久化落库
                 </span>
                 <span v-else class="text-xs text-amber-600 font-medium bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
                   未配置专属凭证
@@ -2135,7 +2174,11 @@ async function handleStartBatchFetchApi() {
     })
     if (res.success && res.data) {
       batchFetchApiResults.value = res.data.results
-      ElMessage.success(`批量提取完成！成功: ${res.data.succeeded} 个，失败: ${res.data.failed} 个`)
+      if (res.data.accounts) {
+        accountsList.value = res.data.accounts
+      }
+      batchExportCachedDetails.value = {}
+      ElMessage.success(`批量提取并持久化落库完成！成功: ${res.data.succeeded} 个，失败: ${res.data.failed} 个`)
       await fetchAccounts()
     } else {
       ElMessage.error(res.error || "批量提取执行失败")
@@ -2157,8 +2200,12 @@ async function handleFetchApiFromMyTelegram() {
     const res = await fetchProtocolAccountApi(accId, customProxyApiUrl.value.trim() || undefined)
     if (res.success && res.data) {
       accountDetail.value = res.data.detail
+      if ((res.data as any).pool) {
+        accountsList.value = (res.data as any).pool
+      }
+      batchExportCachedDetails.value = {}
       const usedProxy = res.data.proxy_used ? ` (代理: ${res.data.proxy_used})` : ''
-      ElMessage.success(`成功通过 ${res.data.region || targetRegion} 家宽代理提取 API 凭证！api_id: ${res.data.api_id}${usedProxy}`)
+      ElMessage.success(`成功提取并已持久化落库！api_id: ${res.data.api_id}${usedProxy}`)
       await fetchAccounts()
     } else {
       ElMessage.error(res.error || "从官网提取凭证失败")
@@ -2194,8 +2241,12 @@ async function handleSaveCredentials() {
     })
     if (res.success && res.data) {
       accountDetail.value = res.data
+      if ((res.data as any).pool) {
+        accountsList.value = (res.data as any).pool
+      }
+      batchExportCachedDetails.value = {}
       editCredentialsDialogVisible.value = false
-      ElMessage.success("开发者 API 凭证保存成功！")
+      ElMessage.success("开发者 API 凭证保存并已持久化落库！")
       await fetchAccounts()
     } else {
       ElMessage.error(res.error || "保存凭证失败")
@@ -4427,6 +4478,112 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.acc-api-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  margin-top: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.acc-api-banner.ready {
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  color: #065f46;
+}
+
+.acc-api-banner.ready:hover {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.acc-api-banner.pending {
+  background: rgba(248, 250, 252, 0.95);
+  border: 1px dashed rgba(203, 213, 225, 0.9);
+  color: #64748b;
+}
+
+.acc-api-banner.pending:hover {
+  background: rgba(254, 243, 199, 0.6);
+  border-color: rgba(245, 158, 11, 0.5);
+  color: #b45309;
+}
+
+.acc-api-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.acc-api-banner-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(16, 185, 129, 0.2);
+  color: #047857;
+  white-space: nowrap;
+}
+
+.acc-api-banner-badge.pending {
+  background: rgba(226, 232, 240, 0.8);
+  color: #64748b;
+}
+
+.acc-api-banner-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-weight: 600;
+  color: #0f172a;
+  white-space: nowrap;
+}
+
+.acc-api-banner-hash {
+  color: #475569;
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 110px;
+}
+
+.acc-api-banner-prompt {
+  font-size: 10.5px;
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.acc-api-banner-copy-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: #059669;
+  padding: 2px 4px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.acc-api-banner-copy-btn:hover {
+  background: rgba(16, 185, 129, 0.2);
+  color: #047857;
 }
 
 .acc-card-actions {

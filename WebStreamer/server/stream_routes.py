@@ -206,6 +206,12 @@ OFFLINE_ONLY_CONFIG_KEYS = frozenset({
 
 routes = web.RouteTableDef()
 
+NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
 # 缩略图生成信号量（限制并发数为1，实现"一个一个加载"）
 thumbnail_semaphore = asyncio.Semaphore(1)
 
@@ -3866,7 +3872,7 @@ async def telegram_botfather_accounts_list_handler(request: web.Request):
 
         from botfather_creator import sync_cached_sessions_to_db
         accounts = sync_cached_sessions_to_db()
-        return web.json_response({"success": True, "data": accounts})
+        return web.json_response({"success": True, "data": accounts}, headers=NO_CACHE_HEADERS)
     except Exception as e:
         logger.error(f"获取协议号资产池列表失败: {e}", exc_info=True)
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -4031,7 +4037,7 @@ async def telegram_botfather_account_detail_handler(request: web.Request):
 
         from botfather_creator import get_protocol_account_detail
         result = await get_protocol_account_detail(int(account_id_str), refresh_online=refresh_online)
-        return web.json_response({"success": True, "data": result})
+        return web.json_response({"success": True, "data": result}, headers=NO_CACHE_HEADERS)
     except KeyError as e:
         return web.json_response({"success": False, "error": str(e)}, status=404)
     except ValueError as e:
@@ -4062,7 +4068,7 @@ async def telegram_botfather_account_fetch_api_handler(request: web.Request):
 
         from botfather_creator import fetch_api_credentials_from_my_telegram
         result = await fetch_api_credentials_from_my_telegram(int(account_id_str), proxy_api_url=proxy_api_url)
-        return web.json_response({"success": True, "data": result})
+        return web.json_response({"success": True, "data": result}, headers=NO_CACHE_HEADERS)
     except KeyError as e:
         return web.json_response({"success": False, "error": str(e)}, status=404)
     except (ValueError, RuntimeError, TimeoutError) as e:
@@ -4096,7 +4102,7 @@ async def telegram_botfather_account_fetch_api_batch_handler(request: web.Reques
             proxy_api_url=proxy_api_url,
             only_missing=only_missing,
         )
-        return web.json_response({"success": True, "data": result})
+        return web.json_response({"success": True, "data": result}, headers=NO_CACHE_HEADERS)
     except Exception as e:
         logger.error(f"批量提取 API 凭证失败: {e}", exc_info=True)
         return web.json_response({"success": False, "error": str(e)}, status=500)
@@ -4176,7 +4182,7 @@ async def telegram_botfather_account_update_credentials_handler(request: web.Req
             api_hash=api_hash_val,
             remark=str(remark).strip() if remark is not None else None,
         )
-        return web.json_response({"success": True, "data": result})
+        return web.json_response({"success": True, "data": result}, headers=NO_CACHE_HEADERS)
     except KeyError as e:
         return web.json_response({"success": False, "error": str(e)}, status=404)
     except ValueError as e:
@@ -4294,7 +4300,7 @@ async def telegram_botfather_task_status_handler(request: web.Request):
     """获取后台 @BotFather 自动铸造流水线实时状态"""
     try:
         from botfather_creator import mint_manager
-        return web.json_response({"success": True, "data": mint_manager.get_status()})
+        return web.json_response({"success": True, "data": mint_manager.get_status()}, headers=NO_CACHE_HEADERS)
     except Exception as e:
         logger.error(f"查询自动铸造任务状态失败: {e}", exc_info=True)
         return web.json_response({"success": False, "error": str(e)}, status=500)
