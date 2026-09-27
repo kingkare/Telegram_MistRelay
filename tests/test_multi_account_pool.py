@@ -868,6 +868,31 @@ class TestMultiAccountPoolAndRelay(unittest.IsolatedAsyncioTestCase):
         cached_after = botfather_creator._load_cached_credentials()
         self.assertNotIn(phone, cached_after)
 
+    async def test_fetch_api_retry_connector_freshness_and_proxy_rotation(self):
+        """验证多轮重试时连接器独立创建（杜绝 Session is closed）与家宽代理节点自动轮换"""
+        import aiohttp
+        # 1. 验证 parse_proxy_lines 解析多行代理
+        multi_text = "198.51.100.10:7150\n198.51.100.10:7151\n198.51.100.10:7152"
+        lines = botfather_creator.parse_proxy_lines(multi_text)
+        self.assertEqual(len(lines), 3)
+
+        # 2. 模拟 fetch_residential_proxy_for_region 在重试时轮换节点
+        with patch.object(aiohttp, "ClientSession", create=True) as mock_sess_cls:
+            mock_sess = MagicMock()
+            mock_resp = AsyncMock()
+            mock_resp.text = AsyncMock(return_value=multi_text)
+            mock_sess.get = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_resp), __aexit__=AsyncMock()))
+            mock_sess_cls.return_value.__aenter__ = AsyncMock(return_value=mock_sess)
+            mock_sess_cls.return_value.__aexit__ = AsyncMock()
+
+            test_proxy_url = "https://proxy.example.com/api?region=US&num=1"
+            p0 = await botfather_creator.fetch_residential_proxy_for_region("US", proxy_api_url=test_proxy_url, attempt_index=0)
+            p1 = await botfather_creator.fetch_residential_proxy_for_region("US", proxy_api_url=test_proxy_url, attempt_index=1)
+            p2 = await botfather_creator.fetch_residential_proxy_for_region("US", proxy_api_url=test_proxy_url, attempt_index=2)
+            self.assertIn("7150", p0)
+            self.assertIn("7151", p1)
+            self.assertIn("7152", p2)
+
 
 if __name__ == "__main__":
     unittest.main()

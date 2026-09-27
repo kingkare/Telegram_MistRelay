@@ -370,14 +370,64 @@ def mask_proxy_url(proxy_url: Optional[str]) -> str:
         return "直连"
     return re.sub(r"://([^:@]+):[^@]+@", r"://:***@", proxy_url)
 
-async def fetch_residential_proxy_for_region(region: str, proxy_api_url: Optional[str] = None) -> str:
+def parse_proxy_lines(raw_text: str) -> List[str]:
+    """从代理 API 响应文本中解析并归一化全部候选代理地址列表"""
+    if not raw_text:
+        return []
+    raw_clean = raw_text.strip()
+    results: List[str] = []
+
+    if (raw_clean.startswith("{") and raw_clean.endswith("}")) or (raw_clean.startswith("[") and raw_clean.endswith("]")):
+        try:
+            data = json.loads(raw_clean)
+            if isinstance(data, dict):
+                code = data.get("code")
+                if code is not None and code not in (0, 200, "0", "200"):
+                    msg = data.get("msg") or data.get("error") or data.get("message") or raw_clean
+                    raise ValueError(f"代理接口返回错误: {msg}")
+                for k in ("proxy", "proxies", "data", "list", "ips"):
+                    val = data.get(k)
+                    if isinstance(val, str):
+                        cand = parse_proxy_line(val)
+                        if cand and cand not in results:
+                            results.append(cand)
+                    elif isinstance(val, list):
+                        for item in val:
+                            cand = parse_proxy_line(str(item))
+                            if cand and cand not in results:
+                                results.append(cand)
+        except json.JSONDecodeError:
+            pass
+        if results:
+            return results
+
+    for line in raw_clean.splitlines():
+        line = line.strip()
+        if not line or line.startswith("<"):
+            continue
+        cand = parse_proxy_line(line)
+        if cand and cand not in results:
+            results.append(cand)
+    return results
+
+
+async def fetch_residential_proxy_for_region(
+    region: str,
+    proxy_api_url: Optional[str] = None,
+    attempt_index: int = 0,
+) -> str:
     """
     向家宽代理接口动态请求匹配目标账号地区的 10 分钟粘性住宅家宽代理。
+    支持在重试 (attempt_index > 0) 时批量拉取并轮换不同端口/出口 IP，规避单 IP 频控。
     返回 http://ip:port 标准代理 URL。
     """
     clean_region = (region or "US").strip().upper()
     api_url = build_regional_proxy_api_url(clean_region, proxy_api_url=proxy_api_url)
-    logger.info(f"正在从家宽代理接口拉取 {clean_region} 地区住宅代理 (URL: {api_url})...")
+    request_url = api_url
+    if attempt_index > 0 and "num=1" in request_url:
+        request_url = re.sub(r"([?&]num=)1(?=&|$)", r"\g<1>3", request_url)
+
+    logger.info(f"正在从家宽代理接口拉取 {clean_region} 地区住宅代理 (URL: {request_url})...")
 
     import aiohttp
     timeout_cfg = aiohttp.ClientTimeout(total=15) if hasattr(aiohttp, "ClientTimeout") else None
@@ -385,18 +435,24 @@ async def fetch_residential_proxy_for_region(region: str, proxy_api_url: Optiona
 
     async with aiohttp.ClientSession(timeout=timeout_cfg, connector=connector) as sess:
         try:
-            async with sess.get(api_url, headers={"User-Agent": "curl/7.88.1"}) as resp:
+            async with sess.get(request_url, headers={"User-Agent": "curl/7.88.1"}) as resp:
                 text = await resp.text()
         except Exception as net_err:
             raise RuntimeError(f"请求家宽代理接口网络异常: {net_err}")
 
-    parsed = parse_proxy_line(text)
-    if not parsed:
+    cand_list = parse_proxy_lines(text)
+    if not cand_list:
+        parsed_single = parse_proxy_line(text)
+        if parsed_single:
+            cand_list = [parsed_single]
+
+    if not cand_list:
         clean_hint = text.strip()[:160]
         raise ValueError(f"未能从家宽代理接口获取地区 {clean_region} 的有效代理节点 (接口响应: {clean_hint})")
 
-    logger.info(f"成功获取 {clean_region} 地区住宅家宽代理: {mask_proxy_url(parsed)}")
-    return parsed
+    selected = cand_list[attempt_index % len(cand_list)]
+    logger.info(f"成功获取 {clean_region} 地区住宅家宽代理: {mask_proxy_url(selected)}")
+    return selected
 
 
 
@@ -2436,9 +2492,6 @@ async def fetch_api_credentials_from_my_telegram(
         }
 
         import aiohttp
-        timeout_cfg = aiohttp.ClientTimeout(total=25) if hasattr(aiohttp, "ClientTimeout") else None
-        connector = aiohttp.TCPConnector(ssl=False) if hasattr(aiohttp, "TCPConnector") else None
-        jar = aiohttp.CookieJar(unsafe=True) if hasattr(aiohttp, "CookieJar") else None
 
         def _call_http(method_fn, url: str, **kwargs):
             try:
@@ -2473,9 +2526,18 @@ async def fetch_api_credentials_from_my_telegram(
 
         for attempt in range(1, max_attempts + 1):
             try:
-                proxy_url = await fetch_residential_proxy_for_region(region, proxy_api_url=proxy_api_url)
+                proxy_url = await fetch_residential_proxy_for_region(
+                    region,
+                    proxy_api_url=proxy_api_url,
+                    attempt_index=attempt - 1,
+                )
                 masked_proxy = mask_proxy_url(proxy_url)
                 logger.info(f"[API提取] 账号 {real_phone} (地区: {region}) 第 {attempt}/{max_attempts} 次尝试，已分配同地区家宽代理: {masked_proxy}")
+
+                # 每轮重试必须新建独立的 TCPConnector 与 CookieJar，防止上一轮退出时自动关闭 connector 引发 "Session is closed"
+                timeout_cfg = aiohttp.ClientTimeout(total=25) if hasattr(aiohttp, "ClientTimeout") else None
+                connector = aiohttp.TCPConnector(ssl=False) if hasattr(aiohttp, "TCPConnector") else None
+                jar = aiohttp.CookieJar(unsafe=True) if hasattr(aiohttp, "CookieJar") else None
 
                 async with aiohttp.ClientSession(timeout=timeout_cfg, connector=connector, cookie_jar=jar) as http_sess:
                     # 1. 请求下发 Web 登录码
@@ -2588,6 +2650,7 @@ async def fetch_api_credentials_from_my_telegram(
                             create_text = await create_resp.text()
                             if create_text.strip().upper() == "ERROR":
                                 logger.warning(f"my.telegram.org/apps/create 响应 ERROR (代理: {masked_proxy})")
+                                raise ValueError("my.telegram.org 创建 App 触发单 IP 频控限制 (响应 ERROR)，将轮换家宽代理重试")
 
                         async with _call_http(
                             http_sess.get,
@@ -2608,9 +2671,12 @@ async def fetch_api_credentials_from_my_telegram(
                 last_err = attempt_err
                 logger.warning(f"[API提取] 账号 {real_phone} 第 {attempt}/{max_attempts} 次尝试失败: {attempt_err}")
                 if attempt < max_attempts:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(2.0)
                     continue
                 else:
+                    err_str = str(last_err)
+                    if "ERROR" in err_str or "频控" in err_str:
+                        raise RuntimeError(f"Telegram 官网限制当前 IP/地区短时间内创建多个 App（连续 {max_attempts} 次触发 ERROR）。建议稍等 2~3 分钟后再试，或在协议号详情中配置其他可用代理")
                     raise last_err
 
         logger.info(f"成功为协议号 {real_phone} (地区: {region}) 提取 Telegram API 凭证: api_id={found_id}, api_hash={found_hash[:6]}**** (代理: {masked_proxy})")
