@@ -8,6 +8,7 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import './style.css'
 import App from './App.vue'
 import { router } from './router'
+import { setupTelegramMiniApp } from './utils/tma'
 
 const app = createApp(App)
 const pinia = createPinia()
@@ -20,4 +21,5 @@ for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
 app.use(pinia)
 app.use(router)
 app.use(ElementPlus, { locale: zhCn })
+setupTelegramMiniApp(router)
 app.mount('#app')

@@ -1210,4 +1210,48 @@ onMounted(() => {
   margin-top: 10px;
   border-radius: 10px;
 }
+
+/* ========== 移动端响应式覆盖 ========== */
+@media (max-width: 768px) {
+  .cache-page {
+    padding: 0 !important;
+  }
+
+  .cache-header-card,
+  .category-card,
+  .policy-card {
+    padding: 14px !important;
+    border-radius: 14px !important;
+  }
+
+  .cache-header-actions {
+    flex-direction: column !important;
+    width: 100% !important;
+    gap: 8px !important;
+  }
+
+  .cache-header-actions > * {
+    width: 100% !important;
+  }
+
+  .card-actions {
+    flex-direction: column !important;
+    width: 100% !important;
+    gap: 6px !important;
+  }
+
+  .card-actions > * {
+    width: 100% !important;
+  }
+
+  .policy-input-num {
+    width: 100% !important;
+  }
+
+  .dry-run-summary-box {
+    grid-template-columns: 1fr !important;
+    gap: 8px !important;
+  }
+}
+
 </style>

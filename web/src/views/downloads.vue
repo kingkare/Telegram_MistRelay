@@ -198,6 +198,72 @@
               class="my-8"
             />
             <div v-else class="tasks-table-wrapper">
+              <!-- 移动端下载任务卡片流 (桌面端隐藏) -->
+              <div class="mobile-task-cards-list md:hidden flex flex-col gap-2.5">
+                <div
+                  v-for="row in activeDownloads"
+                  :key="row.id"
+                  class="mobile-task-card glass-card p-3 rounded-xl cursor-pointer"
+                  @click="openGroupForActiveRow(row)"
+                >
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="flex items-center gap-2 min-w-0 flex-1">
+                      <div class="file-type-icon text-lg flex-shrink-0" :style="{ color: getFileIcon(row.file_name).color }">
+                        <component :is="getFileIcon(row.file_name).icon" />
+                      </div>
+                      <div class="flex flex-col min-w-0 flex-1">
+                        <span class="text-sm font-semibold text-gray-800 truncate">{{ row.file_name || row.source_url?.substring(0, 40) || '未知文件' }}</span>
+                        <span class="text-xs text-gray-500 truncate" v-if="row.group_title">{{ row.group_title }}</span>
+                      </div>
+                    </div>
+                    <el-tag :type="getStatusTagTypeWithSkip(row.status, row.error_message)" size="small" round>
+                      {{ getStatusTextWithSkip(row.status, row.error_message) }}
+                    </el-tag>
+                  </div>
+
+                  <div class="mt-2.5">
+                    <el-progress
+                      :percentage="getProgress(row.total_length, row.completed_length, row.status)"
+                      :status="getProgressStatus(row.status)"
+                      :stroke-width="6"
+                      class="modern-progress"
+                    />
+                    <div class="flex items-center justify-between text-xs text-gray-500 mt-1 font-mono">
+                      <span>{{ formatSize(row.completed_length || 0) }} / {{ formatSize(row.total_length || 0) }}</span>
+                      <span v-if="row.status === 'downloading'" class="text-sky-500 font-bold">
+                        ⚡ {{ formatSpeed(row.download_speed) }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div class="flex items-center justify-between mt-2.5 pt-2 border-t border-pink-100/60" @click.stop>
+                    <span class="text-xs text-gray-400 font-mono">{{ formatDate(row.updated_at || row.created_at) }}</span>
+                    <div class="flex items-center gap-2">
+                      <el-button
+                        size="small"
+                        circle
+                        :icon="RefreshRight"
+                        :loading="operationLoading"
+                        :disabled="!row.gid && !row.source_url"
+                        @click.stop="handleRetry(row)"
+                        title="重试任务"
+                      />
+                      <el-button
+                        size="small"
+                        circle
+                        type="danger"
+                        :icon="Delete"
+                        :loading="operationLoading"
+                        @click.stop="handleDelete(row, false)"
+                        title="删除下载任务"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 桌面端表格 (移动端隐藏) -->
+              <div class="hidden md:block">
               <el-table
                 :data="activeDownloads"
                 size="default"
@@ -284,6 +350,7 @@
                   </template>
                 </el-table-column>
               </el-table>
+              </div>
               <div class="table-tip-bar">
                 <el-icon class="mr-1 text-sky-500"><InfoFilled /></el-icon>
                 <span>点击任意行可自动切换至“任务记录”并展开对应消息媒体组</span>
@@ -310,6 +377,77 @@
               class="my-8"
             />
             <div v-else class="tasks-table-wrapper">
+              <!-- 移动端上传任务卡片流 (桌面端隐藏) -->
+              <div class="mobile-task-cards-list md:hidden flex flex-col gap-2.5">
+                <div
+                  v-for="row in activeUploads"
+                  :key="row.id"
+                  class="mobile-task-card glass-card p-3 rounded-xl"
+                >
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="flex items-center gap-2 min-w-0 flex-1">
+                      <div class="file-type-icon text-lg flex-shrink-0" :style="{ color: getFileIcon(row.file_name).color }">
+                        <component :is="getFileIcon(row.file_name).icon" />
+                      </div>
+                      <div class="flex flex-col min-w-0 flex-1">
+                        <span class="text-sm font-semibold text-gray-800 truncate">{{ row.file_name || '未知文件' }}</span>
+                        <div class="flex items-center gap-1.5 mt-0.5">
+                          <el-tag size="small" :type="getUploadTargetTagType(row.upload_target)" round style="font-size: 10px; height: 18px; padding: 0 4px;">
+                            {{ getUploadTargetLabel(row.upload_target) }}
+                          </el-tag>
+                          <span class="text-xs text-gray-400 font-mono">{{ formatSize(row.total_size) }}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <el-tag :type="getUploadStatusTagType(row.status)" size="small" round>
+                      {{ getUploadStatusText(row.status, row.upload_target) }}
+                    </el-tag>
+                  </div>
+
+                  <div class="mt-2.5">
+                    <el-progress
+                      :percentage="getUploadProgress(row.total_size, row.uploaded_size)"
+                      :status="row.status === 'failed' ? 'exception' : row.status === 'completed' ? 'success' : 'warning'"
+                      :stroke-width="6"
+                      class="modern-progress"
+                    />
+                    <div class="flex items-center justify-between text-xs text-gray-500 mt-1 font-mono">
+                      <span>{{ formatSize(row.uploaded_size || 0) }} / {{ formatSize(row.total_size || 0) }}</span>
+                      <span v-if="row.status === 'uploading' && row.upload_speed && row.upload_speed > 0" class="text-pink-500 font-bold">
+                        🚀 {{ formatSpeed(row.upload_speed) }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div class="flex items-center justify-between mt-2.5 pt-2 border-t border-pink-100/60" @click.stop>
+                    <span class="text-xs text-gray-400 font-mono">{{ formatDate(row.updated_at || row.created_at) }}</span>
+                    <div class="flex items-center gap-2">
+                      <el-button
+                        size="small"
+                        circle
+                        :icon="RefreshRight"
+                        :loading="operationLoading"
+                        :disabled="isDeprecatedUploadTarget(row.upload_target)"
+                        @click.stop="handleRetryUpload(row)"
+                        :title="isDeprecatedUploadTarget(row.upload_target) ? '历史第三方网盘已废弃' : '重试'"
+                      />
+                      <el-button
+                        size="small"
+                        circle
+                        type="danger"
+                        :icon="Delete"
+                        :loading="operationLoading"
+                        :disabled="row.status === 'completed' || (row.status as string) === 'cleaned'"
+                        @click.stop="handleDeleteUpload(row)"
+                        title="删除上传任务"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 桌面端表格 (移动端隐藏) -->
+              <div class="hidden md:block">
               <el-table :data="activeUploads" size="default" style="width: 100%" row-key="id" class="modern-task-table">
                 <el-table-column prop="file_name" label="文件名" min-width="250" show-overflow-tooltip>
                   <template #default="{ row }">
@@ -399,6 +537,7 @@
                   </template>
                 </el-table-column>
               </el-table>
+              </div>
             </div>
           </el-tab-pane>
 
@@ -609,81 +748,132 @@
                 </template>
 
                 <div class="group-downloads-inner">
-                  <el-table
-                    :data="group.downloads"
-                    size="default"
-                    style="width: 100%"
-                    row-key="id"
-                    @row-click="handleRowClick"
-                    class="modern-task-table cursor-pointer"
-                  >
-                    <el-table-column prop="file_name" label="文件名" min-width="250" show-overflow-tooltip>
-                      <template #default="{ row }">
-                        <div class="file-name-cell">
-                          <div class="file-type-icon" :style="{ color: getFileIcon(row.file_name).color }">
+                  <!-- 移动端任务卡片列表 -->
+                  <div class="mobile-history-cards md:hidden flex flex-col gap-2 p-2">
+                    <div
+                      v-for="row in group.downloads"
+                      :key="row.id"
+                      class="p-2.5 rounded-xl border border-pink-100/70 bg-white/90 shadow-sm flex flex-col gap-1.5 cursor-pointer"
+                      @click="handleRowClick(row)"
+                    >
+                      <div class="flex items-start justify-between gap-2">
+                        <div class="flex items-center gap-2 min-w-0">
+                          <div class="file-type-icon shrink-0" :style="{ color: getFileIcon(row.file_name).color }">
                             <component :is="getFileIcon(row.file_name).icon" />
                           </div>
-                          <span class="file-name-text">{{ row.file_name || row.source_url?.substring(0, 40) || '未知文件' }}</span>
+                          <span class="text-xs font-semibold text-gray-800 truncate" :title="row.file_name">
+                            {{ row.file_name || row.source_url?.substring(0, 40) || "未知文件" }}
+                          </span>
                         </div>
-                      </template>
-                    </el-table-column>
-
-                    <el-table-column label="大小" width="120">
-                      <template #default="{ row }">
-                        <span class="font-mono text-xs font-medium text-gray-700">
-                          {{ formatSize(row.total_length || row.file_size) }}
-                        </span>
-                      </template>
-                    </el-table-column>
-
-                    <el-table-column label="综合状态" width="130">
-                      <template #default="{ row }">
-                        <el-tag :type="getRecordStatusTagType(row)" size="small" round>
+                        <el-tag :type="getRecordStatusTagType(row)" size="small" round class="shrink-0 scale-90">
                           {{ getRecordStatusText(row) }}
                         </el-tag>
-                        <el-tooltip
-                          v-if="row.status === 'failed' && row.error_message"
-                          :content="row.error_message"
-                          placement="top"
-                        >
-                          <el-icon class="ml-1 cursor-pointer text-gray-400 hover:text-red-500">
-                            <InfoFilled />
-                          </el-icon>
-                        </el-tooltip>
-                      </template>
-                    </el-table-column>
+                      </div>
+                      <div class="flex items-center justify-between text-[11px] text-gray-500 pt-1 border-t border-pink-50">
+                        <span class="font-mono">{{ formatSize(row.total_length || row.file_size) }}</span>
+                        <span class="font-mono text-gray-400">{{ formatDate(row.created_at) }}</span>
+                      </div>
+                      <div class="flex items-center justify-end gap-2 pt-1" @click.stop>
+                        <el-button
+                          size="small"
+                          circle
+                          :icon="RefreshRight"
+                          :loading="operationLoading"
+                          :disabled="!row.gid && !row.source_url"
+                          @click.stop="handleRetry(row)"
+                          title="重试任务"
+                        />
+                        <el-button
+                          size="small"
+                          circle
+                          type="danger"
+                          :icon="Delete"
+                          :loading="operationLoading"
+                          @click.stop="handleDelete(row, true)"
+                          title="删除记录与本地文件"
+                        />
+                      </div>
+                    </div>
+                  </div>
 
-                    <el-table-column label="创建时间" width="160">
-                      <template #default="{ row }">
-                        <span class="text-xs text-gray-500 font-mono">{{ formatDate(row.created_at) }}</span>
-                      </template>
-                    </el-table-column>
-
-                    <el-table-column label="操作" width="130" fixed="right">
-                      <template #default="{ row }">
-                        <div class="action-btn-group" @click.stop>
-                          <el-button
-                            size="small"
-                            circle
-                            :icon="RefreshRight"
-                            :loading="operationLoading"
-                            :disabled="!row.gid && !row.source_url"
-                            @click.stop="handleRetry(row)"
-                            title="重试任务"
-                          />
-                          <el-button
-                            size="small"
-                            circle
-                            type="danger"
-                            :icon="Delete"
-                            :loading="operationLoading"
-                            @click.stop="handleDelete(row, true)"
-                            title="删除记录与本地文件"
-                          />
-                        </div>
-                      </template>
-                    </el-table-column>
-                  </el-table>
+                  <!-- 桌面端表格 -->
+                  <div class="hidden md:block">
+                    <el-table
+                      :data="group.downloads"
+                      size="default"
+                      style="width: 100%"
+                      row-key="id"
+                      @row-click="handleRowClick"
+                      class="modern-task-table cursor-pointer"
+                    >
+                      <el-table-column prop="file_name" label="文件名" min-width="250" show-overflow-tooltip>
+                        <template #default="{ row }">
+                          <div class="file-name-cell">
+                            <div class="file-type-icon" :style="{ color: getFileIcon(row.file_name).color }">
+                              <component :is="getFileIcon(row.file_name).icon" />
+                            </div>
+                            <span class="file-name-text">{{ row.file_name || row.source_url?.substring(0, 40) || '未知文件' }}</span>
+                          </div>
+                        </template>
+                      </el-table-column>
+  
+                      <el-table-column label="大小" width="120">
+                        <template #default="{ row }">
+                          <span class="font-mono text-xs font-medium text-gray-700">
+                            {{ formatSize(row.total_length || row.file_size) }}
+                          </span>
+                        </template>
+                      </el-table-column>
+  
+                      <el-table-column label="综合状态" width="130">
+                        <template #default="{ row }">
+                          <el-tag :type="getRecordStatusTagType(row)" size="small" round>
+                            {{ getRecordStatusText(row) }}
+                          </el-tag>
+                          <el-tooltip
+                            v-if="row.status === 'failed' && row.error_message"
+                            :content="row.error_message"
+                            placement="top"
+                          >
+                            <el-icon class="ml-1 cursor-pointer text-gray-400 hover:text-red-500">
+                              <InfoFilled />
+                            </el-icon>
+                          </el-tooltip>
+                        </template>
+                      </el-table-column>
+  
+                      <el-table-column label="创建时间" width="160">
+                        <template #default="{ row }">
+                          <span class="text-xs text-gray-500 font-mono">{{ formatDate(row.created_at) }}</span>
+                        </template>
+                      </el-table-column>
+  
+                      <el-table-column label="操作" width="130" fixed="right">
+                        <template #default="{ row }">
+                          <div class="action-btn-group" @click.stop>
+                            <el-button
+                              size="small"
+                              circle
+                              :icon="RefreshRight"
+                              :loading="operationLoading"
+                              :disabled="!row.gid && !row.source_url"
+                              @click.stop="handleRetry(row)"
+                              title="重试任务"
+                            />
+                            <el-button
+                              size="small"
+                              circle
+                              type="danger"
+                              :icon="Delete"
+                              :loading="operationLoading"
+                              @click.stop="handleDelete(row, true)"
+                              title="删除记录与本地文件"
+                            />
+                          </div>
+                        </template>
+                      </el-table-column>
+                    </el-table>
+                  </div>
                 </div>
               </el-collapse-item>
             </el-collapse>
@@ -2265,5 +2455,63 @@ function updateGroupStats(group: DownloadGroup) {
 
 .dialog-footer-actions {
   @apply flex items-center justify-between w-full;
+}
+
+/* ========== 移动端响应式布局优化 ========== */
+@media (max-width: 768px) {
+  .tasks-center-page {
+    padding: 0;
+  }
+
+  .tasks-header-card {
+    padding: 14px;
+    border-radius: 16px;
+  }
+
+  .tasks-header-main {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .tasks-header-actions {
+    flex-wrap: wrap;
+    width: 100%;
+    gap: 8px;
+  }
+
+  .tasks-header-actions > * {
+    flex: 1 1 calc(50% - 4px);
+    margin-left: 0 !important;
+  }
+
+  .tasks-limit-select {
+    width: 100%;
+  }
+
+  .stats-row {
+    margin-top: 10px;
+    margin-bottom: 12px;
+  }
+
+  .stat-card {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  .stat-icon-wrapper {
+    width: 38px;
+    height: 38px;
+  }
+
+  .stat-value {
+    font-size: 16px;
+  }
+
+  .mobile-task-card {
+    background: rgba(255, 255, 255, 0.94);
+    border: 1px solid rgba(255, 143, 171, 0.22);
+    box-shadow: 0 4px 14px rgba(255, 117, 151, 0.08);
+  }
 }
 </style>

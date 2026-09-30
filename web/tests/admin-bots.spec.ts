@@ -316,6 +316,9 @@ const MOCK_ACCOUNTS = {
       last_used_at: '2026-09-26 15:00:00',
       remark: '主力1号',
       created_at: '2026-09-26 10:00:00',
+      created_channels_count: 2,
+      tenant_usernames: ['tenant_alice'],
+      cluster_active_bots_count: 3,
     },
     {
       id: 2,
@@ -330,6 +333,9 @@ const MOCK_ACCOUNTS = {
       last_used_at: '2026-09-26 15:30:00',
       remark: '主力2号',
       created_at: '2026-09-26 11:00:00',
+      created_channels_count: 5,
+      tenant_usernames: ['tenant_bob', 'tenant_charlie'],
+      cluster_active_bots_count: 8,
     },
   ],
 }
@@ -498,6 +504,51 @@ async function setupBotsPageMocks(page: Page) {
           },
           user_info: { id: 10001, first_name: 'TestUser', username: 'test_user' },
           bots: [{ username: 'qianlong520f001_bot' }],
+          tenant_channels: [
+            {
+              user_id: 101,
+              username: 'tenant_alice',
+              bin_channel_id: -1004488231845,
+              bin_channel_username: 'mr_u9001_alice',
+              dc_id: 5,
+              role: 'user',
+              created_at: '2026-09-28T03:23:20Z',
+            },
+          ],
+        },
+      }),
+    })
+  })
+
+  await page.route(/.*\/api\/telegram\/botfather\/accounts\/\d+\/login-code.*/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          code: '12345',
+          received_at: '2026-09-26 16:00:00',
+          relative_time: '刚刚',
+          device: 'Telegram Desktop',
+          location: 'Singapore',
+          ip: '198.51.100.1',
+        },
+      }),
+    })
+  })
+
+  await page.route(/.*\/api\/telegram\/botfather\/accounts\/\d+\/2fa.*/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: {
+          has_password: true,
+          hint: 'test',
+          has_recovery: false,
+          pending_reset_date: null,
         },
       }),
     })
@@ -515,6 +566,28 @@ async function setupBotsPageMocks(page: Page) {
           phone: '+16813086196',
           ping_ms: 108,
           status: 'active',
+        },
+      }),
+    })
+  })
+
+    await page.route('**/api/telegram/botfather/accounts/sync', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: currentAccounts.map(a => ({
+          ...a,
+          last_keepalive_at: '2026-09-30 12:00:00',
+          cluster_active_bots_count: a.id === 1 ? 5 : 10,
+          created_channels_count: a.id === 1 ? 3 : 6,
+        })),
+        summary: {
+          total: currentAccounts.length,
+          success_count: currentAccounts.length,
+          failed_count: 0,
+          avg_ping_ms: 85,
         },
       }),
     })
@@ -1079,6 +1152,7 @@ test.describe('Admin Bots Cluster Management View', () => {
 
     const detailDialog = page.locator('.detail-dialog:visible')
     await expect(detailDialog).toBeVisible()
+    await detailDialog.locator('.el-tabs__item', { hasText: 'Session 凭证' }).click()
     await expect(detailDialog).toContainText('Telethon 1.x StringSession')
     await expect(detailDialog).toContainText('Pyrogram 2.x Session String')
     await expect(detailDialog).toContainText('一键复制 Telethon Session')
@@ -1132,5 +1206,127 @@ test.describe('Admin Bots Cluster Management View', () => {
         expect(deleteBtnBox.x + deleteBtnBox.width).toBeLessThanOrEqual(cardBox.x + cardBox.width + 1)
       }
     }
+  })
+  test('supports protocol account pool pagination, multi-dimensional search/filter, and cross-module sync', async ({ page }) => {
+    await setupBotsPageMocks(page)
+    await page.goto('/botfather')
+
+    // 1. 验证筛选工具栏及分页栏可见
+    const filterToolbar = page.locator('.pool-filter-toolbar')
+    await expect(filterToolbar).toBeVisible()
+    const searchInput = filterToolbar.locator('.filter-search-input input')
+    await expect(searchInput).toBeVisible()
+
+    const paginationBar = page.locator('.pool-pagination-bar')
+    await expect(paginationBar).toBeVisible()
+    await expect(paginationBar).toContainText('共 2 个账号')
+
+    // 2. 验证跨模块联动指标展示 (租户专属频道配额 + 集群在线活跃节点)
+    const firstAccCard = page.locator('.account-item-card').first()
+    await expect(firstAccCard.locator('.channel-item')).toContainText('2/10')
+    await expect(firstAccCard.locator('.bot-item')).toContainText('3 节点')
+
+    const secondAccCard = page.locator('.account-item-card').nth(1)
+    await expect(secondAccCard.locator('.channel-item')).toContainText('5/10')
+    await expect(secondAccCard.locator('.bot-item')).toContainText('8 节点')
+
+    // 3. 验证关键词搜索过滤
+    await searchInput.fill('+1804')
+    await expect(page.locator('.account-item-card')).toHaveCount(1)
+    await expect(page.locator('.account-item-card').first()).toContainText('+18048484620')
+
+    await searchInput.fill('主力1号')
+    await expect(page.locator('.account-item-card')).toHaveCount(1)
+    await expect(page.locator('.account-item-card').first()).toContainText('+16813086196')
+
+    await searchInput.clear()
+    await expect(page.locator('.account-item-card')).toHaveCount(2)
+
+    // 4. 验证搜索无结果的空状态提示与重置
+    await searchInput.fill('9999999999')
+    await expect(page.locator('.account-item-card')).toHaveCount(0)
+    const emptyBox = page.locator('.pool-empty-box')
+    await expect(emptyBox).toBeVisible()
+    await expect(emptyBox).toContainText('未找到符合筛选条件的 Telegram 协议号')
+
+    // 点击重置筛选按钮
+    await emptyBox.locator('.el-button', { hasText: '重置筛选条件' }).click()
+    await expect(page.locator('.account-item-card')).toHaveCount(2)
+    await expect(searchInput).toHaveValue('')
+
+    // 5. 验证协议号详情中的“租户专属存储频道托管列表”
+    await firstAccCard.locator('.detail-account-btn').click()
+    const detailDialog = page.locator('.detail-dialog:visible')
+    await expect(detailDialog).toBeVisible()
+    await detailDialog.locator('.el-tabs__item', { hasText: '租户存储' }).click()
+    const tenantChanSection = detailDialog.locator('.tenant-channels-section')
+    await expect(tenantChanSection).toBeVisible()
+    await expect(tenantChanSection).toContainText('租户专属存储频道托管中心')
+    await expect(tenantChanSection).toContainText('@tenant_alice')
+    await expect(tenantChanSection).toContainText('@mr_u9001_alice')
+    await expect(tenantChanSection).toContainText('-1004488231845')
+    await detailDialog.locator('.el-button', { hasText: '关闭' }).click()
+
+    // 6. 验证“⚡ 全池数据同步”按钮与联动更新
+    const syncBtn = page.locator('.sync-pool-btn')
+    await expect(syncBtn).toBeVisible()
+    await syncBtn.click()
+
+    // 验证成功提示
+    const toast = page.locator('.el-message--success')
+    await expect(toast).toBeVisible()
+    await expect(toast).toContainText('全池数据同步完成')
+  })
+
+  test('detail modal uses compact bounded height, tabs navigation, and pinned visible footer without screen overflow', async ({ page }) => {
+    await setupBotsPageMocks(page)
+    await page.setViewportSize({ width: 1024, height: 768 })
+    await page.goto('/botfather')
+
+    const firstAccCard = page.locator('.account-item-card').first()
+    await firstAccCard.locator('.detail-account-btn').click()
+
+    const detailDialog = page.locator('.detail-dialog:visible')
+    await expect(detailDialog).toBeVisible()
+
+    // 验证弹窗外框规格与视口限高
+    const dialogBox = await detailDialog.boundingBox()
+    expect(dialogBox).not.toBeNull()
+    if (dialogBox) {
+      // 弹窗总高严格限制在视口 85vh 以内，决不超出屏幕
+      expect(dialogBox.height).toBeLessThanOrEqual(768 * 0.9)
+      expect(dialogBox.y + dialogBox.height).toBeLessThanOrEqual(768)
+      expect(dialogBox.y).toBeGreaterThanOrEqual(20)
+    }
+
+    // 验证固定置顶指标条
+    await expect(detailDialog.locator('.detail-metrics-compact-row')).toBeVisible()
+    await expect(detailDialog.locator('.compact-metric-item')).toHaveCount(4)
+
+    // 默认展示 Tab 1: 🔐 安全加固与接码
+    await expect(detailDialog.locator('.twofa-section')).toBeVisible()
+    await expect(detailDialog.locator('.otp-center-section')).toBeVisible()
+
+    // 切换至 Tab 2: 🏠 租户存储与节点
+    await detailDialog.locator('.el-tabs__item', { hasText: '租户存储与节点' }).click()
+    await expect(detailDialog.locator('.tenant-channels-section')).toBeVisible()
+
+    // 切换至 Tab 3: 🔑 Session 凭证与 API
+    await detailDialog.locator('.el-tabs__item', { hasText: 'Session 凭证与 API' }).click()
+    await expect(detailDialog.locator('.api-credentials-section')).toBeVisible()
+    await expect(detailDialog.locator('.session-section')).toHaveCount(2)
+
+    // 验证底部关闭按钮吸底且完全位于视口内部
+    const closeBtn = detailDialog.locator('.el-dialog__footer .el-button', { hasText: '关闭' })
+    await expect(closeBtn).toBeVisible()
+    const closeBox = await closeBtn.boundingBox()
+    expect(closeBox).not.toBeNull()
+    if (closeBox) {
+      expect(closeBox.y + closeBox.height).toBeLessThanOrEqual(768)
+    }
+
+    // 点击关闭并验证弹窗正常销毁
+    await closeBtn.click()
+    await expect(detailDialog).toBeHidden()
   })
 })

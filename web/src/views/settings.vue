@@ -34,11 +34,29 @@
       </div>
     </div>
 
+    <!-- 核心配置变更需重启提示横幅 -->
+    <div v-if="pendingRestartWarning" class="cluster-banner banner-warning mb-4 flex items-center justify-between flex-wrap gap-3">
+      <div class="flex items-center gap-2">
+        <span class="banner-icon">⚠️</span>
+        <span class="banner-text">
+          <strong>核心配置变更已落库：</strong>{{ pendingRestartMessage || "部分核心参数需要重启容器以全面生效。" }}
+        </span>
+      </div>
+      <div class="flex items-center gap-2">
+        <el-button size="small" type="warning" :icon="RefreshRight" :loading="restarting" @click="handleRestart">
+          ⚡ 一键重启容器（热重载）
+        </el-button>
+        <el-button size="small" text @click="pendingRestartWarning = false">
+          稍后处理
+        </el-button>
+      </div>
+    </div>
+
     <!-- 现代 Segmented 毛玻璃设置标签页 -->
-    <div class="settings-tabs-wrapper glass-card">
+    <div class="settings-tabs-wrapper">
       <el-tabs v-model="activeTab" class="modern-settings-tabs" type="border-card">
         <!-- 1. 客户端连接 -->
-        <el-tab-pane name="client">
+        <el-tab-pane name="client" lazy>
           <template #label>
             <span class="tab-label-item">
               <el-icon><Link /></el-icon>
@@ -46,7 +64,7 @@
             </span>
           </template>
 
-          <div class="tab-pane-content">
+          <div v-if="activeTab === 'client'" class="tab-pane-content">
             <div class="pane-header-row">
               <div class="pane-title-group">
                 <h3 class="pane-title">客户端连接配置</h3>
@@ -101,7 +119,7 @@
         </el-tab-pane>
 
         <!-- 2. Telegram配置 -->
-        <el-tab-pane name="telegram">
+        <el-tab-pane name="telegram" lazy>
           <template #label>
             <span class="tab-label-item">
               <el-icon><Promotion /></el-icon>
@@ -109,7 +127,7 @@
             </span>
           </template>
 
-          <div class="tab-pane-content">
+          <div v-if="activeTab === 'telegram'" class="tab-pane-content">
             <div class="pane-header-row">
               <div class="pane-title-group">
                 <h3 class="pane-title">Telegram Bot 配置</h3>
@@ -174,11 +192,119 @@
                 <el-switch v-model="configs.telegram.UP_TELEGRAM" />
               </el-form-item>
             </el-form>
+
+            <!-- 多租户云盘与自助注册策略卡片 -->
+            <div class="bot-cluster-card mt-6">
+              <div class="cluster-card-header">
+                <div class="flex items-center gap-2">
+                  <div class="cluster-icon-pill">
+                    <el-icon><Promotion /></el-icon>
+                  </div>
+                  <div>
+                    <h4 class="cluster-title">多租户云盘与自助注册策略</h4>
+                    <p class="cluster-desc">
+                      管控用户通过 Telegram 私聊 /register 自助获取验证码注册、默认 DC 数据中心分配与专属存储频道 Handle 规则
+                    </p>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <el-button size="small" plain @click="router.push('/users')">
+                    前往用户管理 (/users)
+                  </el-button>
+                  <el-button size="small" type="primary" @click="saveConfig('telegram')" :loading="saving">
+                    保存多租户策略
+                  </el-button>
+                </div>
+              </div>
+
+              <el-form :model="configs.telegram" label-width="180px" class="modern-form mt-4">
+                <el-form-item label="开放自助注册">
+                  <el-switch
+                    v-model="configs.telegram.ALLOW_USER_REGISTRATION"
+                    active-text="允许用户私聊 /register 获取验证码自助注册"
+                    inactive-text="仅限管理员在后台手动开户"
+                  />
+                </el-form-item>
+                <el-form-item label="默认建频数据中心">
+                  <el-select v-model="configs.telegram.DEFAULT_TENANT_DC_ID" style="width: 100%">
+                    <el-option :value="1" label="DC1 - 美国/迈阿密 (低延迟欧美)" />
+                    <el-option :value="2" label="DC2 - 欧洲/阿姆斯特丹" />
+                    <el-option :value="3" label="DC3 - 美国/迈阿密" />
+                    <el-option :value="4" label="DC4 - 欧洲/阿姆斯特丹" />
+                    <el-option :value="5" label="DC5 - 亚太/新加坡 (推荐默认)" />
+                  </el-select>
+                  <div class="el-form-item__help">
+                    当注册用户未设置 Telegram 头像且无法通过语言判定时，默认调配该区域的协议号创建专属频道。
+                  </div>
+                </el-form-item>
+                <el-form-item label="专属频道 Handle 前缀">
+                  <el-input
+                    v-model="configs.telegram.TENANT_CHANNEL_PREFIX"
+                    placeholder="mr_u"
+                  />
+                  <div class="el-form-item__help">
+                    自动生成形如 @{{ configs.telegram.TENANT_CHANNEL_PREFIX || 'mr_u' }}9001_xxxx 的公开频道用户名，供 55+ Bot 集群免加群极速分流。
+                  </div>
+                </el-form-item>
+              </el-form>
+            </div>
+
+            <!-- 协议号资产池保活与家宽代理配置卡片 -->
+            <div class="bot-cluster-card mt-6">
+              <div class="cluster-card-header">
+                <div class="flex items-center gap-2">
+                  <div class="cluster-icon-pill">
+                    <el-icon><Cpu /></el-icon>
+                  </div>
+                  <div>
+                    <h4 class="cluster-title">协议号保活与家宽代理配置</h4>
+                    <p class="cluster-desc">
+                      配置协议号资产池后台定时自动保活巡检与 my.telegram.org 开发者凭证提取家宽代理接口
+                    </p>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <el-button size="small" plain @click="router.push('/botfather')">
+                    前往自动铸机 (/botfather)
+                  </el-button>
+                  <el-button size="small" type="primary" @click="saveConfig('telegram')" :loading="saving">
+                    保存保活与代理配置
+                  </el-button>
+                </div>
+              </div>
+
+              <el-form :model="configs.telegram" label-width="180px" class="modern-form mt-4">
+                <el-form-item label="定时自动保活">
+                  <el-switch
+                    v-model="configs.telegram.PROTOCOL_KEEPALIVE_ENABLED"
+                    active-text="启用后台定时 MTProto 握手保活与失效自动重登"
+                  />
+                </el-form-item>
+                <el-form-item label="保活巡检周期" v-if="configs.telegram.PROTOCOL_KEEPALIVE_ENABLED">
+                  <el-select v-model="configs.telegram.PROTOCOL_KEEPALIVE_INTERVAL_HOURS" style="width: 100%">
+                    <el-option :value="6" label="每 6 小时巡检一次" />
+                    <el-option :value="12" label="每 12 小时巡检一次 (推荐)" />
+                    <el-option :value="24" label="每 24 小时巡检一次" />
+                    <el-option :value="48" label="每 48 小时巡检一次" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="家宽代理 API 模板">
+                  <el-input
+                    v-model="configs.telegram.TELEGRAM_API_PROXY_URL"
+                    placeholder="https://white.novproxy.com/white/api?region=US&num=1&time=10&format=1&type=txt"
+                    clearable
+                  />
+                  <div class="el-form-item__help">
+                    提取协议号 api_id / api_hash 时，系统会自动根据手机号国际区号将 region=XX 动态替换为对应国家代码。
+                  </div>
+                </el-form-item>
+              </el-form>
+            </div>
           </div>
         </el-tab-pane>
 
         <!-- 3. 下载配置 -->
-        <el-tab-pane name="download">
+        <el-tab-pane name="download" lazy>
           <template #label>
             <span class="tab-label-item">
               <el-icon><Download /></el-icon>
@@ -186,7 +312,7 @@
             </span>
           </template>
 
-          <div class="tab-pane-content">
+          <div v-if="activeTab === 'download'" class="tab-pane-content">
             <div class="pane-header-row">
               <div class="pane-title-group">
                 <h3 class="pane-title">本地存储与下载策略</h3>
@@ -249,6 +375,25 @@
                   :disabled="isOfflineOnly('PROXY_PORT')"
                 />
               </el-form-item>
+              <el-form-item label="最大并发上传数">
+                <el-input-number
+                  v-model="configs.download.MAX_CONCURRENT_UPLOADS"
+                  :min="1"
+                  :max="32"
+                  style="width: 100%"
+                />
+                <div class="el-form-item__help">
+                  本地文件并发上传至 Telegram 频道的最大任务数（默认：10）
+                </div>
+              </el-form-item>
+              <el-form-item label="缩略图缓存保留天数">
+                <el-input-number
+                  v-model="configs.download.THUMBNAIL_CACHE_MAX_AGE_DAYS"
+                  :min="1"
+                  :max="365"
+                  style="width: 100%"
+                />
+              </el-form-item>
               <el-divider />
               <el-form-item label="跳过小文件">
                 <el-switch v-model="configs.download.SKIP_SMALL_FILES" />
@@ -275,7 +420,7 @@
         </el-tab-pane>
 
         <!-- 4. Aria2配置 -->
-        <el-tab-pane name="aria2">
+        <el-tab-pane name="aria2" lazy>
           <template #label>
             <span class="tab-label-item">
               <el-icon><Cpu /></el-icon>
@@ -283,17 +428,34 @@
             </span>
           </template>
 
-          <div class="tab-pane-content">
+          <div v-if="activeTab === 'aria2'" class="tab-pane-content">
             <div class="pane-header-row">
               <div class="pane-title-group">
                 <h3 class="pane-title">Aria2 RPC 引擎配置</h3>
-                <p class="pane-desc">配置 Aria2 RPC 秘钥与端点连接地址</p>
+                <p class="pane-desc">配置 Aria2 RPC 秘钥与端点连接地址，并支持一键连通性诊断</p>
               </div>
               <div class="pane-actions">
+                <el-button type="success" plain @click="handleTestAria2" :loading="testingAria2">
+                  🔌 测试 Aria2 连通性
+                </el-button>
                 <el-button type="primary" @click="saveConfig('aria2')" :loading="saving">
                   保存配置
                 </el-button>
               </div>
+            </div>
+
+            <div v-if="aria2TestResult" class="cluster-banner mb-4" :class="aria2TestResult.success ? 'banner-success' : 'banner-warning'">
+              <span class="banner-icon">{{ aria2TestResult.success ? '✅' : '❌' }}</span>
+              <span v-if="aria2TestResult.success && aria2TestResult.data" class="banner-text">
+                <strong>Aria2 RPC 握手成功：</strong>版本 <code>v{{ aria2TestResult.data.version }}</code> ·
+                下载目录 <code>{{ aria2TestResult.data.download_dir }}</code> ·
+                活跃任务 <strong>{{ aria2TestResult.data.num_active }}</strong> ·
+                等待中 <strong>{{ aria2TestResult.data.num_waiting }}</strong> ·
+                已停止/完成 <strong>{{ aria2TestResult.data.num_stopped }}</strong>
+              </span>
+              <span v-else class="banner-text">
+                <strong>连接失败：</strong>{{ aria2TestResult.error }}
+              </span>
             </div>
 
             <el-alert
@@ -326,7 +488,7 @@
         </el-tab-pane>
 
         <!-- 5. 直链功能 -->
-        <el-tab-pane name="stream">
+        <el-tab-pane name="stream" lazy>
           <template #label>
             <span class="tab-label-item">
               <el-icon><VideoPlay /></el-icon>
@@ -334,7 +496,7 @@
             </span>
           </template>
 
-          <div class="tab-pane-content">
+          <div v-if="activeTab === 'stream'" class="tab-pane-content">
             <div class="pane-header-row">
               <div class="pane-title-group">
                 <h3 class="pane-title">媒体直链与 WebStreamer 服务</h3>
@@ -397,6 +559,12 @@
               <el-form-item label="发送直链信息给用户">
                 <el-switch v-model="configs.stream.SEND_STREAM_LINK" />
               </el-form-item>
+              <el-form-item label="消息最大并发处理数">
+                <el-input-number v-model="configs.stream.MAX_CONCURRENT_MESSAGES" :min="1" :max="100" style="width: 100%" />
+              </el-form-item>
+              <el-form-item label="消息等待队列上限">
+                <el-input-number v-model="configs.stream.MAX_MESSAGE_QUEUE_SIZE" :min="10" :max="5000" style="width: 100%" />
+              </el-form-item>
               <el-form-item label="多机器人Token列表">
                 <el-input
                   v-model="multiBotTokensText"
@@ -411,7 +579,7 @@
             </el-form>
 
             <!-- 频道入库无痕洗白与智能归属改写面板 -->
-            <div class="bot-cluster-card rebrand-config-card glass-card mt-6">
+            <div class="bot-cluster-card rebrand-config-card mt-6">
               <div class="cluster-card-header">
                 <div class="flex items-center gap-2">
                   <div class="cluster-icon-pill">
@@ -520,7 +688,7 @@
             </div>
 
             <!-- 多 Bot 负载均衡与免加频道状态诊断卡片 -->
-            <div class="bot-cluster-card glass-card mt-6">
+            <div class="bot-cluster-card mt-6">
               <div class="cluster-card-header">
                 <div class="flex items-center gap-2">
                   <div class="cluster-icon-pill">
@@ -562,7 +730,7 @@
 
               <!-- 节点网格 -->
               <div v-if="serverStatus?.bot_details && serverStatus.bot_details.length > 0" class="bot-node-grid">
-                <div v-for="bot in serverStatus.bot_details" :key="bot.index" class="bot-node-card">
+                <div v-for="bot in displayedSettingsBots" :key="bot.index" class="bot-node-card">
                   <div class="node-card-top">
                     <div class="flex items-center gap-2 overflow-hidden">
                       <span class="node-name font-mono font-semibold">{{ bot.name }}</span>
@@ -611,12 +779,25 @@
                   </div>
                 </div>
               </div>
+              <div v-if="(serverStatus?.bot_details?.length || 0) > 12" class="flex items-center justify-between flex-wrap gap-2 mt-4 pt-3 border-t border-slate-200/60 text-xs text-slate-500">
+                <span>
+                  当前展示 {{ displayedSettingsBots.length }} / {{ serverStatus?.bot_details?.length }} 个集群节点
+                </span>
+                <div class="flex items-center gap-2">
+                  <el-button size="small" text type="primary" @click="showAllBotsInSettings = !showAllBotsInSettings">
+                    {{ showAllBotsInSettings ? '收起折叠节点' : `展开全部 ${serverStatus?.bot_details?.length} 个节点` }}
+                  </el-button>
+                  <el-button size="small" plain @click="router.push('/bots')">
+                    前往 Bot 集群监控专页 (/bots)
+                  </el-button>
+                </div>
+              </div>
             </div>
           </div>
         </el-tab-pane>
 
         <!-- 6. 容器管理 (兼容 admin-container-status.spec.ts) -->
-        <el-tab-pane name="container">
+        <el-tab-pane name="container" lazy>
           <template #label>
             <span class="tab-label-item">
               <el-icon><Box /></el-icon>
@@ -624,7 +805,7 @@
             </span>
           </template>
 
-          <div class="tab-pane-content">
+          <div v-if="activeTab === 'container'" class="tab-pane-content">
             <el-row :gutter="20">
               <!-- 左侧: 容器状态 -->
               <el-col :xs="24" :lg="12">
@@ -813,7 +994,7 @@
         </el-tab-pane>
 
         <!-- 7. 系统日志 -->
-        <el-tab-pane name="app-logs">
+        <el-tab-pane name="app-logs" lazy>
           <template #label>
             <span class="tab-label-item">
               <el-icon><Document /></el-icon>
@@ -821,7 +1002,7 @@
             </span>
           </template>
 
-          <div class="tab-pane-content">
+          <div v-if="activeTab === 'app-logs'" class="tab-pane-content">
             <!-- 工具栏卡片 -->
             <el-card shadow="hover" class="mb-4 app-logs-toolbar-card">
               <div class="toolbar">
@@ -922,18 +1103,36 @@
                 </div>
               </template>
               <div v-if="showFileList">
-                <el-table :data="logFiles" size="small" stripe class="custom-log-files-table">
-                  <el-table-column prop="name" label="文件名" />
-                  <el-table-column label="大小" width="120">
-                    <template #default="{ row }">{{ formatSize(row.size) }}</template>
-                  </el-table-column>
-                  <el-table-column prop="modified" label="最后修改" width="180" />
-                  <el-table-column label="操作" width="100">
-                    <template #default="{ row }">
-                      <el-button text size="small" type="primary" @click="viewFile(row.name)">查看</el-button>
-                    </template>
-                  </el-table-column>
-                </el-table>
+                <!-- 移动端日志文件卡片流 -->
+                <div class="mobile-log-files md:hidden flex flex-col gap-2">
+                  <div
+                    v-for="file in logFiles"
+                    :key="file.name"
+                    class="p-2.5 rounded-xl border border-pink-100/70 bg-white/80 shadow-sm flex items-center justify-between gap-2"
+                  >
+                    <div class="flex flex-col min-w-0">
+                      <span class="text-xs font-mono font-medium text-slate-800 truncate" :title="file.name">{{ file.name }}</span>
+                      <span class="text-[11px] text-slate-400 font-mono">{{ formatSize(file.size) }} · {{ file.modified }}</span>
+                    </div>
+                    <el-button text size="small" type="primary" class="shrink-0" @click="viewFile(file.name)">查看</el-button>
+                  </div>
+                </div>
+
+                <!-- 桌面端日志文件表格 -->
+                <div class="hidden md:block">
+                  <el-table :data="logFiles" size="small" stripe class="custom-log-files-table">
+                    <el-table-column prop="name" label="文件名" />
+                    <el-table-column label="大小" width="120">
+                      <template #default="{ row }">{{ formatSize(row.size) }}</template>
+                    </el-table-column>
+                    <el-table-column prop="modified" label="最后修改" width="180" />
+                    <el-table-column label="操作" width="100">
+                      <template #default="{ row }">
+                        <el-button text size="small" type="primary" @click="viewFile(row.name)">查看</el-button>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </div>
               </div>
             </el-card>
 
@@ -974,6 +1173,7 @@
     <!-- 快速热添加 Bot Token 弹窗 -->
     <el-dialog
       v-model="showHotAddDialog"
+      destroy-on-close
       title="快速热添加负载机器人 Token"
       width="520px"
       append-to-body
@@ -1003,6 +1203,7 @@
     <!-- API 协议号一键自动创机与入网向导弹窗 -->
     <el-dialog
       v-model="showBotFatherDialog"
+      destroy-on-close
       title="API 协议号一键批量创机与入网 (@BotFather 流水线)"
       width="600px"
       append-to-body
@@ -1090,7 +1291,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
+import { ref, shallowRef, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   downloadLogFile,
@@ -1106,6 +1307,8 @@ import {
   hotRemoveBot,
   botfatherAutoCreate,
   previewRebrand,
+  testAria2Rpc,
+  type Aria2TestResponse,
   type LogFile
 } from '@/api'
 import { useAuthStore } from '@/stores/auth'
@@ -1143,7 +1346,7 @@ const initialTab =
     ? (route.query.tab as SettingsTab)
     : 'client'
 const activeTab = ref<SettingsTab>(initialTab)
-const serverStatus = ref<ServerStatus | null>(null)
+const serverStatus = shallowRef<ServerStatus | null>(null)
 const loadingServerStatus = ref(false)
 
 async function fetchServerStatus() {
@@ -1354,6 +1557,39 @@ const connectionStatusDotClass = computed(() => {
   return 'connection-dot--idle'
 })
 
+const pendingRestartWarning = ref(false)
+const pendingRestartMessage = ref('')
+const showAllBotsInSettings = ref(false)
+const testingAria2 = ref(false)
+const aria2TestResult = ref<Aria2TestResponse | null>(null)
+
+const displayedSettingsBots = computed(() => {
+  const list = serverStatus.value?.bot_details || []
+  if (showAllBotsInSettings.value || list.length <= 12) {
+    return list
+  }
+  return list.slice(0, 12)
+})
+
+async function handleTestAria2() {
+  testingAria2.value = true
+  try {
+    const res = await testAria2Rpc()
+    aria2TestResult.value = res
+    if (res.success && res.data) {
+      ElMessage.success(`Aria2 RPC 连接正常 (v${res.data.version})`)
+    } else {
+      ElMessage.error(res.error || 'Aria2 RPC 连通测试失败')
+    }
+  } catch (e: any) {
+    const errMsg = e?.response?.data?.error || e?.message || 'Aria2 RPC 连接失败'
+    aria2TestResult.value = { success: false, error: errMsg }
+    ElMessage.error(errMsg)
+  } finally {
+    testingAria2.value = false
+  }
+}
+
 // 配置数据
 const configs = ref({
   telegram: {
@@ -1361,12 +1597,20 @@ const configs = ref({
     API_HASH: '',
     BOT_TOKEN: '',
     ADMIN_ID: 0,
-    UP_TELEGRAM: true
+    UP_TELEGRAM: true,
+    ALLOW_USER_REGISTRATION: true,
+    DEFAULT_TENANT_DC_ID: 5,
+    TENANT_CHANNEL_PREFIX: 'mr_u',
+    PROTOCOL_KEEPALIVE_ENABLED: true,
+    PROTOCOL_KEEPALIVE_INTERVAL_HOURS: 12,
+    TELEGRAM_API_PROXY_URL: ''
   },
   download: {
     SAVE_PATH: '/data/downloads',
     PROXY_IP: '',
     PROXY_PORT: '',
+    MAX_CONCURRENT_UPLOADS: 10,
+    THUMBNAIL_CACHE_MAX_AGE_DAYS: 30,
     SKIP_SMALL_FILES: false,
     MIN_FILE_SIZE_MB: 100,
     DOWNLOAD_CLEANUP_ENABLED: true,
@@ -1385,13 +1629,15 @@ const configs = ref({
     STREAM_HASH_LENGTH: 6,
     STREAM_HAS_SSL: false,
     STREAM_NO_PORT: false,
-    STREAM_FQDN: '23.94.9.54',
+    STREAM_FQDN: '127.0.0.1',
     STREAM_KEEP_ALIVE: false,
     STREAM_PING_INTERVAL: 1200,
     STREAM_USE_SESSION_FILE: false,
     STREAM_ALLOWED_USERS: '',
     STREAM_AUTO_DOWNLOAD: false,
     SEND_STREAM_LINK: false,
+    MAX_CONCURRENT_MESSAGES: 5,
+    MAX_MESSAGE_QUEUE_SIZE: 100,
     MULTI_BOT_TOKENS: [] as string[],
     FORWARD_REBRAND_ENABLED: true,
     FORWARD_TARGET_CHANNEL: '',
@@ -1529,15 +1775,18 @@ async function saveClientConnection() {
 
 async function fetchConfigs() {
   try {
-    for (const category of configCategories) {
-      const response = await getConfig(category)
-      if (response.success && response.data) {
-        redactedKeys.value = new Set([...redactedKeys.value, ...(response.redacted_keys || [])])
-        offlineOnlyKeys.value = new Set([...offlineOnlyKeys.value, ...(response.offline_only_keys || [])])
-        secretCounts.value = { ...secretCounts.value, ...(response.secret_counts || {}) }
-        ;(configs.value as Record<ConfigCategory, Record<string, any>>)[category] = {
-          ...(configs.value[category] as Record<string, any>),
-          ...response.data
+    const response = await getConfig()
+    if (response.success && response.data) {
+      redactedKeys.value = new Set(response.redacted_keys || [])
+      offlineOnlyKeys.value = new Set(response.offline_only_keys || [])
+      secretCounts.value = { ...(response.secret_counts || {}) }
+      const data = response.data
+      for (const category of configCategories) {
+        const target = configs.value[category] as Record<string, any>
+        for (const key of Object.keys(target)) {
+          if (key in data) {
+            target[key] = data[key]
+          }
         }
       }
     }
@@ -1555,6 +1804,8 @@ async function saveConfig(category: ConfigCategory) {
 
     if (response.success) {
       if (response.needs_restart) {
+        pendingRestartWarning.value = true
+        pendingRestartMessage.value = response.message || '配置已保存，需要重启容器后生效'
         ElMessage.warning({
           message: response.message || '配置已保存，但需要重启服务才能生效',
           duration: 5000
@@ -1587,7 +1838,7 @@ function reloadCurrentTab() {
   ElMessage.success('已刷新当前页面数据')
 }
 
-const dockerStatus = ref<DockerStatus | null>(null)
+const dockerStatus = shallowRef<DockerStatus | null>(null)
 const dockerLogs = ref<string>('')
 const loadingStatus = ref(false)
 const loadingDockerLogs = ref(false)
@@ -1600,8 +1851,8 @@ const connecting = ref(false)
 const ws = ref<WebSocket | null>(null)
 const dockerLogsContainerRef = ref<HTMLElement | null>(null)
 
-const logFiles = ref<LogFile[]>([])
-const appLogLines = ref<string[]>([])
+const logFiles = shallowRef<LogFile[]>([])
+const appLogLines = shallowRef<string[]>([])
 const loadingAppLogs = ref(false)
 const showFileList = ref(false)
 const autoScroll = ref(true)
@@ -1866,14 +2117,22 @@ function getStatusType(status?: string): 'success' | 'warning' | 'danger' | 'inf
 }
 
 function syncSettingsTabFromRoute() {
-  if (typeof route.query.tab === 'string' && validTabs.includes(route.query.tab as SettingsTab)) {
-    activeTab.value = route.query.tab as SettingsTab
-  } else if (!route.query.tab) {
+  const tabFromQuery = route.query.tab
+  if (typeof tabFromQuery === 'string' && validTabs.includes(tabFromQuery as SettingsTab)) {
+    if (activeTab.value !== tabFromQuery) {
+      activeTab.value = tabFromQuery as SettingsTab
+    }
+  } else if (!tabFromQuery && activeTab.value !== 'client') {
     activeTab.value = 'client'
   }
 }
 
 function updateSettingsTabQuery(tab: SettingsTab) {
+  const currentTabInQuery = route.query.tab
+  const targetTabInQuery = tab === 'client' ? undefined : tab
+  if (currentTabInQuery === targetTabInQuery) {
+    return
+  }
   const nextQuery = { ...route.query }
   if (tab === 'client') {
     delete nextQuery.tab
@@ -1884,10 +2143,10 @@ function updateSettingsTabQuery(tab: SettingsTab) {
 }
 
 function loadSystemTabData(tab: SettingsTab) {
-  if (tab === 'stream' && !loadingServerStatus.value) {
+  if (tab === 'stream' && !loadingServerStatus.value && !serverStatus.value) {
     fetchServerStatus()
   }
-  if (tab === 'container') {
+  if (tab === 'container' && !loadingStatus.value && !dockerStatus.value) {
     fetchDockerStatus()
     fetchDockerLogs()
   }
@@ -1898,6 +2157,9 @@ function loadSystemTabData(tab: SettingsTab) {
 
 watch(() => route.query.tab, syncSettingsTabFromRoute)
 watch(activeTab, (tab) => {
+  if (tab !== 'container' && ws.value) {
+    stopLogStream()
+  }
   updateSettingsTabQuery(tab)
   loadSystemTabData(tab)
 })
@@ -2043,7 +2305,10 @@ onUnmounted(() => {
 .settings-tabs-wrapper {
   border-radius: 20px;
   overflow: hidden;
-  padding: 10px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(255, 143, 171, 0.25);
+  box-shadow: 0 10px 30px 0 rgba(255, 117, 151, 0.08);
 }
 
 .modern-settings-tabs {
@@ -2080,7 +2345,7 @@ onUnmounted(() => {
   font-size: 13.5px !important;
   font-weight: 600 !important;
   color: #64748b !important;
-  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+  transition: background-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease !important;
 }
 
 .modern-settings-tabs :deep(.el-tabs__item:hover) {
@@ -2286,6 +2551,8 @@ onUnmounted(() => {
   padding: 2px 14px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
   transition: background-color 0.15s ease;
+  content-visibility: auto;
+  contain-intrinsic-size: 24px;
 }
 
 .log-line:hover {
@@ -2350,9 +2617,19 @@ onUnmounted(() => {
     font-size: 20px;
   }
 
+  .settings-page {
+    padding: 0 !important;
+  }
+
   .settings-header-actions {
-    width: 100%;
-    justify-content: flex-start;
+    flex-direction: column !important;
+    width: 100% !important;
+    gap: 8px !important;
+  }
+
+  .settings-header-actions > * {
+    width: 100% !important;
+    justify-content: center !important;
   }
 
   .tab-pane-content {
@@ -2383,9 +2660,9 @@ onUnmounted(() => {
   margin-top: 24px;
   padding: 20px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.75);
-  border: 1px solid rgba(226, 232, 240, 0.8);
-  backdrop-filter: blur(12px);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  box-shadow: 0 4px 16px rgba(255, 117, 151, 0.06);
 }
 
 .cluster-card-header {

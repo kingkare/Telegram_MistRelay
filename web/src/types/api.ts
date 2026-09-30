@@ -240,6 +240,7 @@ export interface TelegramBrowseParams {
   sort_by?: string
   sort_desc?: boolean
   media_group_id?: string
+  chat_id?: number | string
 }
 
 export interface TelegramBrowseResponse {
@@ -288,6 +289,64 @@ export function isTelegramDriveFolder(
   item?: TelegramDriveItem | null,
 ): item is TelegramDriveFolder {
   return item?.entry_type === 'folder'
+}
+
+// ==================== Telegram 用户文件分片上传 API 类型 ====================
+
+export interface TelegramUploadInitRequest {
+  filename: string
+  file_size: number
+  chunk_size?: number
+  mime_type?: string
+  chat_id?: number
+}
+
+export interface TelegramUploadInitResponse {
+  success: boolean
+  upload_id: string
+  chunk_size: number
+  total_chunks: number
+  target_channel_id: number
+  filename: string
+  error?: string
+}
+
+export interface TelegramUploadChunkResponse {
+  success: boolean
+  upload_id: string
+  chunk_index: number
+  received_count: number
+  total_chunks: number
+  error?: string
+}
+
+export interface TelegramUploadFinishResponse {
+  success: boolean
+  upload_id: string
+  status: string
+  tg_progress: number
+  media?: Record<string, any>
+  message?: string
+  error?: string
+}
+
+export interface TelegramUploadStatusResponse {
+  success: boolean
+  upload_id: string
+  status: 'pending' | 'uploading_chunks' | 'merging' | 'uploading_tg' | 'completed' | 'failed' | 'cancelled'
+  tg_progress: number
+  filename: string
+  file_size: number
+  received_chunks: number
+  total_chunks: number
+  media?: Record<string, any>
+  error?: string
+}
+
+export interface TelegramUploadCancelResponse {
+  success: boolean
+  message?: string
+  error?: string
 }
 
 // ==================== 缓存治理与管理 API 类型 ====================
@@ -470,10 +529,33 @@ export interface ProtocolAccount {
   last_used_at: string | null
   remark: string
   created_at: string
+  has_two_fa?: boolean
+  two_fa_hint?: string
+  masked_two_fa?: string
+  local_otp_token?: string
+  is_taken_over?: boolean
+  is_local_otp?: boolean
+  taken_over_at?: string
+  created_channels_count?: number
+  max_channels?: number
+  tenant_usernames?: string[]
+  bot_usernames?: string[]
+  cluster_active_bots_count?: number
+}
+
+export interface ProtocolTenantChannel {
+  user_id: number
+  username: string
+  bin_channel_id: number
+  bin_channel_username: string | null
+  dc_id: number | null
+  role: string
+  created_at: string
 }
 
 export interface ProtocolAccountDetail {
   account: ProtocolAccount
+  tenant_channels?: ProtocolTenantChannel[]
   metadata: {
     dc_id: number
     dc_name: string
@@ -507,6 +589,15 @@ export interface ProtocolAccountDetail {
     username: string
   } | null
   bots?: Array<{ username: string }> | null
+  two_fa?: {
+    has_two_fa: boolean
+    two_fa_password?: string
+    two_fa_hint?: string
+  }
+  otp?: {
+    local_otp_token: string
+    local_otp_path: string
+  }
 }
 
 export interface ProtocolAccountDetailResponse {
@@ -765,6 +856,7 @@ export interface BotReprobeResponse {
 export interface BotBenchmarkResult {
   index: number
   username: string
+  dc_id?: number
   mode: string
   can_read: boolean
   can_write: boolean
@@ -789,6 +881,7 @@ export interface BotClusterBenchmarkResponse {
     avg_ping_ms: number
     fastest_node?: { index: number; username: string; ping_ms: number } | null
     highest_speed_node?: { index: number; username: string; speed_mbps: number } | null
+    dc_distribution?: Record<string, number>
     nodes: BotBenchmarkResult[]
     tested_at: string
     summary: string
@@ -862,4 +955,273 @@ export interface StreamAndDownloadBenchmarkResponse {
   success: boolean
   data?: StreamAndDownloadBenchmarkResult
   error?: string
+}
+
+export interface ProtocolAccountLoginCodeData {
+  account_id: number
+  phone: string
+  latest_code: string | null
+  code_time: string | null
+  relative_time: string
+  age_seconds: number | null
+  is_recent: boolean
+  device: string
+  ip: string
+  location: string
+  raw_text: string
+  pass2fa?: string
+  has_two_fa: boolean
+  messages: Array<{
+    id: number
+    text: string
+    code: string | null
+    date: string
+    age_seconds: number
+    device?: string | null
+    ip?: string | null
+    location?: string | null
+  }>
+}
+
+export interface ProtocolAccountLoginCodeResponse {
+  success: boolean
+  data?: ProtocolAccountLoginCodeData
+  error?: string
+}
+
+export interface ProtocolAccount2FAStatusData {
+  account_id: number
+  phone: string
+  has_password: boolean
+  hint: string
+  has_recovery: boolean
+  login_email_pattern?: string
+  pending_reset_date?: number | null
+  has_pending_reset: boolean
+  saved_two_fa_password?: string
+}
+
+export interface ProtocolAccount2FAStatusResponse {
+  success: boolean
+  data?: ProtocolAccount2FAStatusData
+  error?: string
+}
+
+
+export interface EdgeNodeTenantMetric {
+  tenant_id: number
+  username: string
+  is_owner?: boolean
+  role?: string
+  active_streams: number
+  net_tx: number
+  total_bytes: number
+  last_active?: string
+  masked?: boolean
+  node_count?: number
+}
+
+export interface EdgeNodeMetrics {
+  cpu: number
+  mem: number
+  active_streams: number
+  net_rx: number
+  net_tx: number
+  total_bytes_served: number
+  tenants?: EdgeNodeTenantMetric[]
+}
+
+export interface EdgeDcResult {
+  dc_id: number
+  name: string
+  region: string
+  ip: string
+  port: number
+  min_rtt_ms: number
+  avg_rtt_ms: number
+  max_rtt_ms: number
+  packet_loss_pct: number
+  rating: "optimal" | "good" | "medium" | "poor" | "unreachable"
+  rating_label: string
+  reachable: boolean
+}
+
+export interface EdgeSpeedResult {
+  bytes_transferred: number
+  sample_size_mb: number
+  duration_s: number
+  speed_mb_s: number
+  peak_speed_mb_s?: number
+  relay_speed_mb_s?: number
+  relay_speed_mbps?: number
+  tg_pull_speed_mb_s?: number
+  tg_pull_speed_mbps?: number
+  speed_mbps: number
+  ttfb_ms: number
+  buffer_ms: number
+  chunks_count: number
+  target_dc: number
+  usable_bots_count?: number
+  per_bot_speed_mb_s?: number
+  bottleneck_diagnosis?: string
+  bottleneck_direction?: string
+  backpressure_detected?: boolean
+  is_fallback?: boolean
+  evaluation: string
+  grade: string
+}
+
+export interface EdgeLinkResult {
+  success: boolean
+  rtt_ms: number
+  down_speed_mb_s: number
+  down_speed_mbps: number
+  up_speed_mb_s: number
+  up_speed_mbps: number
+  error?: string
+}
+
+export interface EdgeDiagnosticsSystem {
+  os: string
+  kernel: string
+  arch: string
+  uptime: number
+  cpu_cores: number
+  cpu_percent: number
+  load_avg: [number, number, number]
+  mem_total_mb: number
+  mem_used_mb: number
+  mem_free_mb: number
+  mem_percent: number
+  disk_total_gb: number
+  disk_used_gb: number
+  disk_free_gb: number
+  disk_percent: number
+  nofile_limit: number
+  open_tcp_connections: number
+  has_ipv6: boolean
+}
+
+export interface EdgeDiagnosticsTelegram {
+  connected: boolean
+  bot_username: string
+  home_dc: number
+  target_dc?: number
+  dc_affinity_matched?: boolean
+  worker_bots_count?: number
+  cross_dc_count?: number
+  active_streams: number
+  total_bytes_served: number
+}
+
+export interface EdgeDiagnosticsResult {
+  success: boolean
+  health_score: number
+  health_grade: string
+  health_label: string
+  issues: string[]
+  system: EdgeDiagnosticsSystem
+  telegram: EdgeDiagnosticsTelegram
+}
+
+export interface EdgeBandwidthResult {
+  down_speed_mb_s: number
+  down_speed_mbps: number
+  up_speed_mb_s?: number
+  up_speed_mbps?: number
+  effective_bw_mb_s?: number
+  effective_bw_mbps?: number
+  bottleneck_direction?: 'ingress_down' | 'egress_up' | 'symmetric' | string
+  cdn_speed_mb_s?: number
+  cdn_up_speed_mb_s?: number
+  master_speed_mb_s?: number
+  master_up_speed_mb_s?: number
+  matched_bots?: number
+  rated_capacity_mb_s?: number
+  rated_capacity_mbps?: number
+  saturation_percent?: number
+  rtt_ms?: number
+  source?: string
+  recommended_bots?: number
+  evaluation?: string
+}
+
+export interface EdgeBenchmarkData {
+  bandwidth?: EdgeBandwidthResult
+  fastest_dc?: {
+    id: number
+    name: string
+    avg_rtt_ms: number
+    rating: string
+    rating_label: string
+  } | null
+  dcs?: EdgeDcResult[]
+  home_dc?: number
+  speed?: EdgeSpeedResult
+  link?: EdgeLinkResult
+  diagnostics?: EdgeDiagnosticsResult
+  health_score?: number
+  health_grade?: string
+  health_label?: string
+  last_benchmark_at?: string
+}
+
+export interface EdgeNode {
+  id: number
+  tenant_id: number
+  tenant_username?: string
+  node_name: string
+  ip: string
+  port: number
+  ssh_host: string
+  ssh_port: number
+  ssh_user: string
+  has_ssh_password?: boolean
+  domain: string
+  use_ssl: boolean
+  auth_secret_masked?: string
+  status: "offline" | "deploying" | "online" | "error"
+  deploy_log?: string
+  allow_shared_pool: boolean
+  allow_bot_pool?: boolean
+  target_dc_id?: number | null
+  assigned_bot_token?: string | null
+  assigned_bot_username?: string | null
+  target_bot_count?: number | null
+  metrics: EdgeNodeMetrics
+  benchmark_data?: EdgeBenchmarkData
+  last_seen_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface EdgeNodeSummary {
+  total_nodes: number
+  online_nodes: number
+  deploying_nodes: number
+  shared_pool_nodes: number
+  active_streams: number
+  total_tx_speed: number
+  total_bytes_served: number
+  tenants?: EdgeNodeTenantMetric[]
+}
+
+export interface EdgeNodesListResponse {
+  success: boolean
+  nodes: EdgeNode[]
+  summary: EdgeNodeSummary
+  error?: string
+}
+
+export interface EdgeNodeTokenInfo {
+  token: string
+  tenant_id: number
+  node_name: string
+  domain: string
+  port: number
+  use_ssl: boolean
+  allow_shared_pool: boolean
+  expires_at: string
+  used: boolean
+  node_id?: number | null
 }

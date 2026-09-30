@@ -1,0 +1,18 @@
+{
+  "name": "MistRelay 云盘与离线下载",
+  "short_name": "MistRelay",
+  "description": "Telegram 频道无限网盘与离线下载中继系统",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fcf6f8",
+  "theme_color": "#ff7597",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/vite.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

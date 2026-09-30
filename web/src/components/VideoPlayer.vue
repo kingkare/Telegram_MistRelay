@@ -26,6 +26,7 @@ const props = defineProps({
 
 const emit = defineEmits<{
   (e: 'ended'): void
+  (e: 'error', error: any): void
 }>();
 
 const videoPlayer = ref<HTMLVideoElement | null>(null);
@@ -41,16 +42,19 @@ onMounted(() => {
       fill: true,
       responsive: true,
       playbackRates: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
-      sources: [{
+      sources: props.src ? [{
         src: props.src,
         type: props.type
-      }]
+      }] : []
     };
 
     player = videojs(videoPlayer.value, { ...defaultOptions, ...props.options }, () => {
       if (player) {
         player.on('ended', () => {
           emit('ended');
+        });
+        player.on('error', () => {
+          emit('error', player.error());
         });
       }
     });
@@ -69,8 +73,35 @@ onBeforeUnmount(() => {
 
 watch(() => props.src, (newSrc) => {
   if (player && newSrc) {
+    let savedTime = 0;
+    try {
+      savedTime = player.currentTime() || 0;
+    } catch {
+      savedTime = 0;
+    }
     player.src({ src: newSrc, type: props.type });
-    player.play();
+    const safePlay = () => {
+      try {
+        const p = player.play();
+        if (p && typeof p.catch === "function") {
+          p.catch(() => {});
+        }
+      } catch {
+        // ignore
+      }
+    };
+    if (savedTime > 1) {
+      player.one('loadedmetadata', () => {
+        try {
+          player.currentTime(savedTime);
+          safePlay();
+        } catch {
+          safePlay();
+        }
+      });
+    } else {
+      safePlay();
+    }
   }
 });
 

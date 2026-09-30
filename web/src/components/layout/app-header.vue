@@ -1,9 +1,22 @@
 <template>
   <el-header class="header">
     <div class="header-content">
-      <!-- 左侧:面包屑导航 -->
+      <!-- 左侧:面包屑导航 (桌面端) 或 汉堡包+Logo (移动端) -->
       <div class="header-left">
-        <el-breadcrumb separator="/" class="breadcrumb">
+        <div class="mobile-brand-group md:hidden">
+          <el-button
+            circle
+            text
+            class="mobile-hamburger-btn"
+            @click="emit('toggleDrawer')"
+            title="展开全功能导航抽屉"
+          >
+            <el-icon :size="20"><Expand /></el-icon>
+          </el-button>
+          <span class="mobile-logo-text">MistRelay</span>
+        </div>
+
+        <el-breadcrumb separator="/" class="breadcrumb hidden md:flex">
           <el-breadcrumb-item :to="{ path: '/dashboard' }" class="breadcrumb-item">
             <el-icon class="breadcrumb-icon"><HomeFilled /></el-icon>
             <span>首页</span>
@@ -16,11 +29,42 @@
       
       <!-- 右侧:用户信息 -->
       <div class="header-right">
-        <div class="connection-pill" @click="router.push('/settings')">
+        <div
+          v-if="authStore.user?.bin_channel_username || authStore.user?.bin_channel_id"
+          class="connection-pill channel-pill"
+          style="border-color: rgba(16, 185, 129, 0.35); background: rgba(236, 253, 245, 0.75);"
+          @click="router.push('/drive')"
+        >
+          <span class="connection-dot connection-dot--success" style="background: #10b981;"></span>
+          <div class="connection-copy">
+            <span class="connection-title">📡 专属频道 · DC{{ authStore.user?.dc_id || 5 }}</span>
+            <span class="connection-subtitle">@{{ authStore.user?.bin_channel_username || authStore.user?.bin_channel_id }}</span>
+          </div>
+        </div>
+        <div
+          class="connection-pill server-pill"
+          :class="{ 'hidden md:flex': authStore.user?.bin_channel_username || authStore.user?.bin_channel_id }"
+          @click="authStore.isAdmin ? router.push('/settings') : undefined"
+        >
           <span class="connection-dot" :class="connectionStatusClass"></span>
           <div class="connection-copy">
             <span class="connection-title">{{ connectionTitle }}</span>
             <span class="connection-subtitle">{{ connectionSubtitle }}</span>
+          </div>
+        </div>
+
+        <!-- 新手全景教程与操作手册胶囊 -->
+        <div
+          class="guide-pill"
+          @click="openGuide('quickstart')"
+          title="点击查阅 MistRelay 新手全景使用手册与 FAQ"
+        >
+          <div class="guide-pill-icon-wrap">
+            <el-icon><Reading /></el-icon>
+          </div>
+          <div class="guide-pill-text-wrap">
+            <span class="guide-pill-title">新手教程</span>
+            <span class="guide-pill-sub">使用指南 & FAQ</span>
           </div>
         </div>
 
@@ -69,6 +113,8 @@
         <el-button type="primary" :loading="pwdLoading" @click="submitPassword">确认修改</el-button>
       </template>
     </el-dialog>
+    <!-- 全局新手全景使用手册抽屉 -->
+    <UserGuideDrawer ref="guideDrawerRef" />
   </el-header>
 </template>
 
@@ -76,20 +122,44 @@
 import { computed, ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance } from 'element-plus'
-import { User, ArrowDown, SwitchButton, HomeFilled, Lock } from '@element-plus/icons-vue'
+import { User, ArrowDown, SwitchButton, HomeFilled, Lock, Reading, Expand } from '@element-plus/icons-vue'
+import UserGuideDrawer from '@/components/UserGuideDrawer.vue'
 import { useAuthStore } from '@/stores/auth'
 import { changePassword } from '@/api'
 import { checkServerConnection } from '@/utils/connection'
 import { getServerBaseUrl } from '@/utils/runtime'
 
+defineProps<{
+  isMobile?: boolean
+}>()
+
+const emit = defineEmits<{
+  toggleDrawer: []
+  openGuide: []
+}>()
+
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+const guideDrawerRef = ref<InstanceType<typeof UserGuideDrawer> | null>(null)
+
+function openGuide(tab = 'quickstart') {
+  if (guideDrawerRef.value) {
+    guideDrawerRef.value.open(tab)
+  }
+  window.dispatchEvent(new CustomEvent('open-user-guide', { detail: { tab } }))
+}
 const connectionState = ref<'idle' | 'success' | 'error'>('idle')
 const connectionMessage = ref('正在检查连接')
 let connectionTimer: number | null = null
 
+function onCustomOpenGuide(e: Event) {
+  const detail = (e as CustomEvent).detail || 'quickstart'
+  openGuide(detail)
+}
+
 onMounted(() => {
+  window.addEventListener('mistrelay:open-guide', onCustomOpenGuide)
   if (!authStore.user) {
     authStore.fetchUser()
   }
@@ -101,6 +171,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('mistrelay:open-guide', onCustomOpenGuide)
   if (connectionTimer !== null) {
     window.clearInterval(connectionTimer)
   }
@@ -118,6 +189,7 @@ const breadcrumb = computed(() => {
     '/cache': '缓存管理',
     '/bots': '集群管理',
     '/botfather': '自动铸机',
+    '/users': '用户管理',
   }
   return routeMap[route.path]
 })
@@ -215,9 +287,7 @@ function handleCommand(command: string) {
 
 <style scoped>
 .header {
-  background: rgba(255, 255, 255, 0.78) !important;
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: rgba(255, 255, 255, 0.95) !important;
   border-bottom: 1px solid rgba(255, 143, 171, 0.2);
   height: 64px !important;
   width: 100% !important;
@@ -229,11 +299,31 @@ function handleCommand(command: string) {
   padding: 0;
   flex-shrink: 0;
   box-shadow: 0 4px 20px -6px rgba(255, 143, 171, 0.08), 0 2px 8px -2px rgba(56, 189, 248, 0.06);
-  transition: all 0.3s ease;
 }
 
-.header:hover {
-  box-shadow: 0 8px 24px -6px rgba(255, 143, 171, 0.14), 0 4px 12px -2px rgba(56, 189, 248, 0.1);
+.mobile-brand-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobile-hamburger-btn {
+  color: #ff7597;
+  padding: 6px;
+  font-size: 18px;
+}
+
+.mobile-hamburger-btn:hover {
+  background: rgba(255, 143, 171, 0.15);
+}
+
+.mobile-logo-text {
+  font-size: 16px;
+  font-weight: 800;
+  background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  user-select: none;
 }
 
 .header-content {
@@ -285,6 +375,59 @@ function handleCommand(command: string) {
   transform: scale(1.1);
 }
 
+.guide-pill {
+  @apply flex items-center gap-2;
+  padding: 6px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 143, 171, 0.3);
+  background: linear-gradient(135deg, rgba(255, 117, 151, 0.1) 0%, rgba(56, 189, 248, 0.08) 100%);
+  cursor: pointer;
+  transition: all 0.25s ease;
+  user-select: none;
+}
+
+.guide-pill:hover {
+  border-color: rgba(255, 117, 151, 0.55);
+  background: linear-gradient(135deg, rgba(255, 117, 151, 0.18) 0%, rgba(56, 189, 248, 0.14) 100%);
+  box-shadow: 0 4px 14px rgba(255, 117, 151, 0.2);
+  transform: translateY(-1px);
+}
+
+.guide-pill-icon-wrap {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  box-shadow: 0 2px 8px rgba(255, 117, 151, 0.3);
+  flex-shrink: 0;
+}
+
+.guide-pill-text-wrap {
+  @apply flex flex-col;
+  min-width: 0;
+}
+
+.guide-pill-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #ff7597;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.guide-pill-sub {
+  font-size: 10px;
+  color: #6b7280;
+  line-height: 1.2;
+  margin-top: 1px;
+  white-space: nowrap;
+}
+
 .header-right {
   @apply flex items-center gap-3;
   flex-shrink: 0;
@@ -297,9 +440,8 @@ function handleCommand(command: string) {
   border-radius: 14px;
   border: 1px solid rgba(255, 143, 171, 0.22);
   background: rgba(255, 255, 255, 0.72);
-  backdrop-filter: blur(8px);
   cursor: pointer;
-  transition: all 0.25s ease;
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .connection-pill:hover {
@@ -465,19 +607,74 @@ function handleCommand(command: string) {
 }
 
 @media (max-width: 768px) {
-  .header-content {
-    padding: 0 12px;
-    gap: 8px;
+  .header {
+    height: 56px !important;
   }
 
-  .breadcrumb {
-    display: none;
+  .header-content {
+    padding: 0 10px;
+    gap: 6px;
+    height: 56px;
+  }
+
+  .header-left {
+    flex-shrink: 0;
+    min-width: max-content;
+  }
+
+  .mobile-brand-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .mobile-hamburger-btn {
+    padding: 4px;
+  }
+
+  .mobile-logo-text {
+    font-size: 15px;
+    font-weight: 800;
+  }
+
+  .guide-pill {
+    display: none !important;
+  }
+
+  .channel-pill + .server-pill {
+    display: none !important;
+  }
+
+  .header-right {
+    gap: 6px;
+    min-width: 0;
+    flex-shrink: 1;
+    justify-content: flex-end;
   }
 
   .connection-pill {
     min-width: 0;
-    max-width: 44vw;
-    padding: 8px 10px;
+    max-width: 140px;
+    padding: 4px 8px;
+    height: 32px;
+    border-radius: 10px;
+  }
+
+  .connection-subtitle {
+    display: none !important;
+  }
+
+  .connection-title {
+    font-size: 11px;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .breadcrumb {
+    display: none;
   }
 
   .user-details,
@@ -486,7 +683,12 @@ function handleCommand(command: string) {
   }
 
   .user-info {
-    padding: 6px;
+    padding: 2px;
+  }
+
+  .user-info .avatar {
+    width: 32px !important;
+    height: 32px !important;
   }
 }
 </style>

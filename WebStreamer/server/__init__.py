@@ -81,10 +81,21 @@ _AUTH_WHITELIST = frozenset({
     "/api/auth/login",
     "/api/auth/logout",
     "/api/auth/refresh",
+    "/api/auth/register",
+    "/api/auth/tma",
+    "/api/auth/bot-info",
     "/api/health",
 })
 
-_AUTH_WHITELIST_PREFIXES = ()
+_AUTH_WHITELIST_PREFIXES = (
+    "/api/telegram/botfather/otp/",
+    "/api/edge/install.sh",
+    "/api/edge/worker-script",
+    "/api/edge/config",
+    "/api/edge/nodes/register-with-token",
+    "/api/edge/nodes/heartbeat",
+    "/api/edge/tokens/",
+)
 
 _RESOURCE_TICKET_PREFIXES = (
     "/api/telegram/thumbnail/",
@@ -140,8 +151,8 @@ def _apply_security_headers(request: web.Request, response: web.StreamResponse) 
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; "
         "script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: blob:; media-src 'self' blob:; "
-        "font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:"
+        "img-src 'self' data: blob: http: https:; media-src 'self' blob: http: https:; "
+        "font-src 'self' data:; connect-src 'self' http: https: ws: wss:; worker-src 'self' blob:"
     )
     response.headers["Strict-Transport-Security"] = "max-age=31536000"
     if request.path.startswith("/api/auth/") or request.path.startswith("/api/config"):
@@ -204,7 +215,9 @@ async def auth_middleware(request, handler):
     if not token and any(path.startswith(prefix) for prefix in _RESOURCE_TICKET_PREFIXES):
         from auth import verify_resource_ticket
         ticket = request.query.get("ticket", "")
-        if ticket and verify_resource_ticket(ticket, path):
+        chat_id_q = request.query.get("chat_id", "").strip()
+        expected_resource = f"{path}?chat_id={chat_id_q}" if chat_id_q else path
+        if ticket and (verify_resource_ticket(ticket, expected_resource) or (not chat_id_q and verify_resource_ticket(ticket, path))):
             request["resource_ticket"] = True
             return await handler(request)
 
@@ -215,6 +228,37 @@ async def auth_middleware(request, handler):
     payload = verify_token(token)
     if payload is None:
         return web.json_response({"success": False, "error": "登录已过期，请重新登录"}, status=401)
+
+    # 补充 role 并执行多租户 RBAC 角色隔离
+    user_role = payload.get("role")
+    if not user_role:
+        try:
+            import db
+            db_u = db.get_user_by_id(payload.get("uid"))
+            user_role = db_u.get("role") if db_u else ("admin" if payload.get("sub") == "admin" else "user")
+            payload["role"] = user_role
+        except Exception:
+            user_role = "admin" if payload.get("sub") == "admin" else "user"
+
+    if user_role != "admin":
+        admin_only_prefixes = (
+            "/api/telegram/botfather",
+            "/api/telegram/bots",
+            "/api/telegram/rebrand",
+            "/api/telegram/benchmark",
+            "/api/telegram/thumbnails/warmup",
+            "/api/cache",
+            "/api/settings",
+            "/api/config",
+            "/api/users",
+            "/api/system",
+            "/api/monitor/trend",
+            "/api/logs",
+            "/api/files",
+            "/api/aria2",
+        )
+        if any(path.startswith(p) for p in admin_only_prefixes):
+            return web.json_response({"success": False, "error": "权限不足：仅系统管理员可访问此功能"}, status=403)
 
     request["user"] = payload
     return await handler(request)

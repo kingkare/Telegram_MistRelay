@@ -5,11 +5,19 @@
       <div class="dashboard-header-main">
         <div class="dashboard-title-group">
           <div class="dashboard-title-row">
-            <h2 class="dashboard-title text-gradient-sakura">系统监控仪表板</h2>
-            <span class="dashboard-badge">System Overview</span>
+            <h2 class="dashboard-title text-gradient-sakura">
+              {{ authStore.isAdmin ? '系统监控仪表板' : '个人云盘工作台' }}
+            </h2>
+            <span class="dashboard-badge">
+              {{ authStore.isAdmin ? 'System Overview' : 'Personal Workspace' }}
+            </span>
           </div>
           <p class="dashboard-subtitle">
-            实时监测系统硬件负荷、Aria2 传输流量趋势与各 Bot 节点吞吐分流状态。
+            {{
+              authStore.isAdmin
+                ? '实时监测系统硬件负荷、Aria2 传输流量趋势与各 Bot 节点吞吐分流状态。'
+                : '管理您的专属 Telegram 物理隔离存储频道、云盘媒体资产与个人传输任务动态。'
+            }}
           </p>
         </div>
 
@@ -20,6 +28,7 @@
           </div>
 
           <el-button
+            v-if="authStore.isAdmin"
             class="header-btn auto-refresh-btn"
             :type="autoRefresh ? 'primary' : ''"
             :plain="autoRefresh"
@@ -42,6 +51,16 @@
           </el-button>
 
           <el-button
+            v-if="!authStore.isAdmin"
+            class="header-btn jump-btn"
+            :icon="Folder"
+            @click="$router.push('/drive')"
+            size="default"
+          >
+            TG网盘
+          </el-button>
+
+          <el-button
             type="primary"
             class="header-btn jump-btn"
             :icon="Download"
@@ -53,8 +72,8 @@
         </div>
       </div>
 
-      <!-- 4 大流光指标卡片 -->
-      <el-row :gutter="14" class="stats-row">
+      <!-- 4 大流光指标卡片（管理员视图） -->
+      <el-row v-if="authStore.isAdmin" :gutter="14" class="stats-row">
         <el-col :xs="12" :sm="6" v-for="stat in stats" :key="stat.key">
           <div
             class="stat-card glass-card"
@@ -82,10 +101,173 @@
           </div>
         </el-col>
       </el-row>
+
+      <!-- 4 大流光指标卡片（租户专属视图） -->
+      <el-row v-else :gutter="14" class="stats-row">
+        <el-col :xs="12" :sm="6" v-for="card in tenantStatCards" :key="card.key">
+          <div
+            class="stat-card glass-card"
+            :class="`stat-card--${card.key}`"
+            @click="$router.push(card.route)"
+            :title="card.desc"
+          >
+            <div class="stat-card-glow"></div>
+            <div class="stat-card-inner">
+              <div class="stat-card-top">
+                <span class="stat-label">{{ card.label }}</span>
+                <div class="stat-icon-wrap" :style="{ background: card.color }">
+                  <el-icon :size="18"><component :is="card.icon" /></el-icon>
+                </div>
+              </div>
+              <div class="stat-value-group">
+                <span class="stat-value">{{ card.displayValue }}</span>
+                <span class="stat-unit">{{ card.unit }}</span>
+              </div>
+              <div class="stat-desc">
+                <span>{{ card.desc }}</span>
+                <el-icon class="stat-arrow"><ArrowRight /></el-icon>
+              </div>
+            </div>
+          </div>
+        </el-col>
+      </el-row>
     </div>
 
-    <!-- 实时图表与硬件资源监控 -->
-    <el-row :gutter="16" class="charts-row">
+    <!-- 租户专属：新人快速起航向导看板 (非管理员专属) -->
+    <div v-if="!authStore.isAdmin" class="tenant-onboarding-wrapper">
+      <div v-if="!isOnboardingCollapsed" class="tenant-onboarding-card glass-card">
+        <div class="onboarding-card-header">
+          <div class="onboarding-title-wrap">
+            <span class="onboarding-star-badge">🌟 新人快速起航向导</span>
+            <span class="onboarding-sub">跟随 4 步任务快速掌握专属云盘、机器人极速存取与 4K 秒播</span>
+          </div>
+          <div class="onboarding-actions-wrap">
+            <span class="onboarding-progress-badge">
+              通关进度 {{ onboardingCompletedCount }}/4
+            </span>
+            <el-button size="small" class="onboarding-btn-guide" :icon="Reading" @click="openUserGuide('quickstart')">
+              完整新手教程
+            </el-button>
+            <el-button size="small" class="onboarding-btn-collapse" :icon="Fold" @click="toggleOnboardingCollapse">
+              收起向导
+            </el-button>
+          </div>
+        </div>
+
+        <div class="onboarding-progress-bar-wrap">
+          <el-progress
+            :percentage="Math.round((onboardingCompletedCount / 4) * 100)"
+            :stroke-width="8"
+            :show-text="false"
+            color="linear-gradient(135deg, #ff7597 0%, #38bdf8 100%)"
+          />
+        </div>
+
+        <div class="onboarding-steps-grid">
+          <!-- Step 1 -->
+          <div class="onboarding-step-box is-completed">
+            <div class="step-box-header">
+              <span class="step-num-pill">1</span>
+              <span class="step-title">专属存储空间绑定</span>
+              <el-tag size="small" type="success" effect="plain" class="step-status-tag">
+                <el-icon><CircleCheck /></el-icon> 已就绪
+              </el-tag>
+            </div>
+            <p class="step-desc">
+              已自动分配同区 Telegram DC{{ authStore.user?.dc_id || 5 }} 物理隔离独立频道，零泄漏风险。
+            </p>
+            <div class="step-footer">
+              <span class="step-meta">已绑定专属频道</span>
+            </div>
+          </div>
+
+          <!-- Step 2 -->
+          <div class="onboarding-step-box" :class="{ 'is-completed': tenantFilesCount > 0 }">
+            <div class="step-box-header">
+              <span class="step-num-pill">2</span>
+              <span class="step-title">首份媒体资产入库</span>
+              <el-tag v-if="tenantFilesCount > 0" size="small" type="success" effect="plain" class="step-status-tag">
+                <el-icon><CircleCheck /></el-icon> 已存入 {{ tenantFilesCount }} 项
+              </el-tag>
+              <el-tag v-else size="small" type="warning" effect="plain" class="step-status-tag">
+                待入库
+              </el-tag>
+            </div>
+            <p class="step-desc">
+              在手机/桌面端 TG 将视频发给机器人，或向机器人发送磁力链接 (magnet:) 自动下载。
+            </p>
+            <div class="step-footer">
+              <el-button size="small" type="primary" plain :icon="Promotion" @click="openTelegramBot">
+                私聊机器人
+              </el-button>
+              <el-button size="small" text @click="openUserGuide('upload')">
+                查看入库方式
+              </el-button>
+            </div>
+          </div>
+
+          <!-- Step 3 -->
+          <div class="onboarding-step-box">
+            <div class="step-box-header">
+              <span class="step-num-pill">3</span>
+              <span class="step-title">体验云盘与 M3U 串流</span>
+              <el-tag size="small" type="primary" effect="plain" class="step-status-tag">
+                即点即播
+              </el-tag>
+            </div>
+            <p class="step-desc">
+              在 TG 网盘中享受 4K 在线播放，或一键导出 M3U 导入 PotPlayer / Infuse 原画硬解。
+            </p>
+            <div class="step-footer">
+              <el-button size="small" type="primary" :icon="Folder" @click="$router.push('/drive')">
+                前往 TG 网盘
+              </el-button>
+              <el-button size="small" text @click="openUserGuide('streaming')">
+                播放器指南
+              </el-button>
+            </div>
+          </div>
+
+          <!-- Step 4 -->
+          <div class="onboarding-step-box">
+            <div class="step-box-header">
+              <span class="step-num-pill">4</span>
+              <span class="step-title">挂载私有 VPS 边缘分流</span>
+              <el-tag size="small" type="info" effect="plain" class="step-status-tag">
+                0ms 极速
+              </el-tag>
+            </div>
+            <p class="step-desc">
+              一键 SSH 部署私有 VPS 边缘中继，就近缓存加速，彻底告别 Telegram 跨国限速。
+            </p>
+            <div class="step-footer">
+              <el-button size="small" :icon="Share" @click="$router.push('/edge-nodes')">
+                探索边缘节点
+              </el-button>
+              <el-button size="small" text @click="openUserGuide('edge')">
+                纳管教程
+              </el-button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 折叠态轻量展开卡片 -->
+      <div v-else class="onboarding-collapsed-card glass-card" @click="toggleOnboardingCollapse">
+        <div class="collapsed-left">
+          <span class="collapsed-star">🌟</span>
+          <span class="collapsed-title">新人快速起航向导</span>
+          <span class="collapsed-progress">已完成 {{ onboardingCompletedCount }}/4 步</span>
+        </div>
+        <div class="collapsed-right">
+          <span class="collapsed-hint">点击展开向导任务</span>
+          <el-icon><Expand /></el-icon>
+        </div>
+      </div>
+    </div>
+
+    <!-- 管理员：实时图表与硬件资源监控 -->
+    <el-row v-if="authStore.isAdmin" :gutter="16" class="charts-row">
       <!-- 实时传输图表 -->
       <el-col :xs="24" :lg="16">
         <div class="chart-card glass-card">
@@ -129,7 +311,7 @@
             </div>
           </div>
 
-          <div v-if="systemResources" class="system-resources">
+          <div v-if="systemResources && systemResources.cpu && systemResources.memory && systemResources.disk" class="system-resources">
             <!-- CPU -->
             <div class="resource-item">
               <div class="resource-top">
@@ -208,10 +390,117 @@
       </el-col>
     </el-row>
 
+    <!-- 租户：个人云盘存储结构分析与专属空间档案 -->
+    <el-row v-else :gutter="16" class="charts-row">
+      <el-col :xs="24" :lg="14">
+        <div class="system-load-card glass-card">
+          <div class="panel-header">
+            <div class="panel-title-wrap">
+              <div class="panel-icon-pill icon-pill-primary">
+                <el-icon><Files /></el-icon>
+              </div>
+              <div>
+                <h3 class="panel-title">云盘存储结构分析</h3>
+                <p class="panel-subtitle">专属频道内各类媒体资产数量与占比分布</p>
+              </div>
+            </div>
+            <el-button size="small" round class="more-link-btn" @click="$router.push('/drive')">
+              进入云盘 <el-icon class="ml-1"><ArrowRight /></el-icon>
+            </el-button>
+          </div>
+
+          <div class="system-resources">
+            <div v-for="item in tenantStorageBreakdown" :key="item.key" class="resource-item">
+              <div class="resource-top">
+                <div class="resource-label-group">
+                  <span class="resource-icon-badge" :class="item.badgeClass">
+                    <el-icon><component :is="item.icon" /></el-icon>
+                  </span>
+                  <span class="resource-name">{{ item.label }}</span>
+                </div>
+                <span class="resource-val-tag tag-normal">
+                  {{ item.count }} 项 ({{ item.percent.toFixed(1) }}%)
+                </span>
+              </div>
+              <div class="resource-progress-wrap">
+                <el-progress
+                  :percentage="item.percent"
+                  :stroke-width="8"
+                  :show-text="false"
+                  :color="item.color"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-col>
+
+      <el-col :xs="24" :lg="10">
+        <div class="activity-card glass-card">
+          <div class="panel-header">
+            <div class="panel-title-wrap">
+              <div class="panel-icon-pill icon-pill-sky">
+                <el-icon><InfoFilled /></el-icon>
+              </div>
+              <div>
+                <h3 class="panel-title">专属存储频道与账户档案</h3>
+                <p class="panel-subtitle">物理隔离存储频道、归属 DC 与账号绑定状态</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="system-info-body">
+            <div class="info-grid">
+              <div class="info-box">
+                <span class="info-label">当前租户账号</span>
+                <span class="info-val-text">{{ authStore.user?.username || '-' }}</span>
+              </div>
+
+              <div class="info-box">
+                <span class="info-label">绑定 Telegram</span>
+                <span class="info-val-text">
+                  {{
+                    authStore.user?.tg_username
+                      ? `@${authStore.user.tg_username}`
+                      : authStore.user?.tg_user_id || '未绑定'
+                  }}
+                </span>
+              </div>
+
+              <div class="info-box">
+                <span class="info-label">归属数据中心</span>
+                <span class="info-val-badge">DC{{ authStore.user?.dc_id || 5 }}</span>
+              </div>
+
+              <div class="info-box">
+                <span class="info-label">服务网关状态</span>
+                <div class="info-value-wrap">
+                  <span class="online-pill">
+                    <span class="online-dot"></span>
+                    {{ status?.server_status === 'running' ? '在线运行' : '连接正常' }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="info-box col-span-full">
+                <span class="info-label">专属隔离存储频道</span>
+                <span class="info-val-highlight">{{ tenantChannelDisplay }}</span>
+              </div>
+
+              <div class="info-box col-span-full">
+                <span class="info-label">Telegram 服务机器人</span>
+                <span class="version-tag">{{ status?.telegram_bot || '@MistRelayBot' }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-col>
+    </el-row>
+
     <!-- 最近活动与系统环境信息 -->
     <el-row :gutter="16" class="activity-row">
       <!-- 最近下载任务 -->
-      <el-col :xs="24" :lg="12">
+      <el-col :xs="24" :lg="authStore.isAdmin ? 12 : 24">
         <div class="activity-card glass-card">
           <div class="panel-header">
             <div class="panel-title-wrap">
@@ -219,7 +508,7 @@
                 <el-icon><Download /></el-icon>
               </div>
               <div>
-                <h3 class="panel-title">最近任务动态</h3>
+                <h3 class="panel-title">{{ authStore.isAdmin ? '最近任务动态' : '最近个人任务动态' }}</h3>
                 <p class="panel-subtitle">最近 10 项下载与转存任务最新流转</p>
               </div>
             </div>
@@ -229,43 +518,72 @@
           </div>
 
           <div class="table-wrap">
-            <el-table
-              :data="recentDownloads"
-              style="width: 100%"
-              size="default"
-              :show-header="recentDownloads.length > 0"
-              empty-text="暂无下载记录"
-              class="custom-table"
-            >
-              <el-table-column prop="file_name" label="文件名" min-width="160">
-                <template #default="{ row }">
-                  <div class="file-name-cell">
-                    <el-icon class="file-type-icon" :class="getFileIconClass(row.file_name)">
-                      <component :is="getFileIcon(row.file_name)" />
-                    </el-icon>
-                    <span class="file-name-text" :title="row.file_name">{{ row.file_name }}</span>
+            <!-- 移动端流式卡片 -->
+            <div v-if="recentDownloads.length > 0" class="mobile-recent-downloads md:hidden flex flex-col gap-2">
+              <div
+                v-for="row in recentDownloads"
+                :key="row.id || row.file_name"
+                class="p-2.5 rounded-xl border border-pink-100/60 bg-white/80 shadow-sm flex items-center justify-between gap-2 cursor-pointer hover:bg-white transition-all"
+                @click="$router.push('/downloads')"
+              >
+                <div class="flex items-center gap-2 min-w-0">
+                  <el-icon class="file-type-icon shrink-0" :class="getFileIconClass(row.file_name || '')">
+                    <component :is="getFileIcon(row.file_name || '')" />
+                  </el-icon>
+                  <div class="flex flex-col min-w-0">
+                    <span class="text-xs font-semibold text-gray-800 truncate" :title="row.file_name">{{ row.file_name }}</span>
+                    <span class="text-[10px] text-gray-400 font-mono">{{ formatDate(row.created_at) }}</span>
                   </div>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="100" align="center">
-                <template #default="{ row }">
-                  <span class="custom-status-badge" :class="`badge-status-${row.status}`">
-                    {{ getStatusText(row.status) }}
-                  </span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="created_at" label="时间" width="140" align="right">
-                <template #default="{ row }">
-                  <span class="time-cell">{{ formatDate(row.created_at) }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
+                </div>
+                <span class="custom-status-badge shrink-0 scale-90" :class="`badge-status-${row.status}`">
+                  {{ getStatusText(row.status) }}
+                </span>
+              </div>
+            </div>
+            <div v-else class="md:hidden text-center py-6 text-xs text-gray-400">
+              暂无下载记录
+            </div>
+
+            <!-- 桌面端表格 -->
+            <div class="hidden md:block">
+              <el-table
+                :data="recentDownloads"
+                style="width: 100%"
+                size="default"
+                :show-header="recentDownloads.length > 0"
+                empty-text="暂无下载记录"
+                class="custom-table"
+              >
+                <el-table-column prop="file_name" label="文件名" min-width="160">
+                  <template #default="{ row }">
+                    <div class="file-name-cell">
+                      <el-icon class="file-type-icon" :class="getFileIconClass(row.file_name || '')">
+                        <component :is="getFileIcon(row.file_name || '')" />
+                      </el-icon>
+                      <span class="file-name-text" :title="row.file_name">{{ row.file_name }}</span>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" width="100" align="center">
+                  <template #default="{ row }">
+                    <span class="custom-status-badge" :class="`badge-status-${row.status}`">
+                      {{ getStatusText(row.status) }}
+                    </span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="created_at" label="时间" width="140" align="right">
+                  <template #default="{ row }">
+                    <span class="time-cell">{{ formatDate(row.created_at) }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
           </div>
         </div>
       </el-col>
 
-      <!-- 系统与节点信息 -->
-      <el-col :xs="24" :lg="12">
+      <!-- 系统与节点信息（仅管理员展示） -->
+      <el-col v-if="authStore.isAdmin" :xs="24" :lg="12">
         <div class="activity-card glass-card">
           <div class="panel-header">
             <div class="panel-title-wrap">
@@ -308,33 +626,125 @@
 
               <div class="info-box col-span-full">
                 <span class="info-label">核心版本</span>
-                <span class="version-tag">{{ status.version || 'v2.2.5' }}</span>
+                <span class="version-tag">{{ status.version || 'v3.0.0' }}</span>
               </div>
             </div>
 
             <!-- 机器人负载 -->
             <div v-if="status.loads && Object.keys(status.loads).length > 0" class="bot-loads">
               <div class="bot-loads-header">
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 flex-wrap">
                   <span class="bot-loads-title">分流机器人节点负荷</span>
                   <span v-if="status.channel_info?.no_join_balancing_active" class="no-join-indicator" title="免加群自动负载均衡已激活">
                     ✨ 免加频道分流就绪
                   </span>
                 </div>
-                <span class="bot-loads-count">共 {{ Object.keys(status.loads).length }} 个活跃 Worker</span>
+                <div class="bot-loads-header-right">
+                  <span class="bot-loads-count">
+                    共 {{ totalBotLoadsCount }} 个活跃 Worker
+                    <span v-if="busyBotLoadsCount > 0" class="busy-pill-hint">· {{ busyBotLoadsCount }} 忙碌</span>
+                  </span>
+                </div>
               </div>
-              <div class="bot-loads-grid">
-                <div v-for="(load, bot) in status.loads" :key="bot" class="bot-load-chip">
+
+              <!-- 节点较多时提供快捷筛选与检索，避免过度占用垂直高度 -->
+              <div v-if="totalBotLoadsCount > 6" class="bot-loads-toolbar">
+                <div class="bot-filter-pills">
+                  <button
+                    type="button"
+                    class="filter-pill"
+                    :class="{ 'is-active': botLoadFilter === 'all' }"
+                    @click="botLoadFilter = 'all'"
+                  >
+                    全部 ({{ totalBotLoadsCount }})
+                  </button>
+                  <button
+                    type="button"
+                    class="filter-pill pill-busy"
+                    :class="{ 'is-active': botLoadFilter === 'busy' }"
+                    @click="botLoadFilter = 'busy'"
+                  >
+                    忙碌 ({{ busyBotLoadsCount }})
+                  </button>
+                  <button
+                    type="button"
+                    class="filter-pill"
+                    :class="{ 'is-active': botLoadFilter === 'idle' }"
+                    @click="botLoadFilter = 'idle'"
+                  >
+                    空闲 ({{ idleBotLoadsCount }})
+                  </button>
+                </div>
+                <div v-if="totalBotLoadsCount > 8" class="bot-search-wrap">
+                  <el-input
+                    v-model="botLoadSearch"
+                    size="small"
+                    placeholder="过滤节点..."
+                    clearable
+                    class="bot-search-input"
+                  >
+                    <template #prefix>
+                      <el-icon><Search /></el-icon>
+                    </template>
+                  </el-input>
+                </div>
+              </div>
+
+              <div
+                v-if="filteredBotLoadItems.length > 0"
+                class="bot-loads-grid"
+                :class="{ 'is-expanded': isBotLoadsExpanded }"
+              >
+                <div
+                  v-for="item in filteredBotLoadItems"
+                  :key="item.key"
+                  class="bot-load-chip"
+                  :class="{ 'is-busy': item.load > 0 }"
+                >
                   <div class="bot-chip-top">
-                    <span class="bot-chip-name" :title="getBotDisplayName(bot)">{{ getBotDisplayName(bot) }}</span>
-                    <span class="bot-chip-tag" :class="getLoadChipClass(load)">{{ load }} 项</span>
+                    <span class="bot-chip-name" :title="item.displayName">{{ item.displayName }}</span>
+                    <span class="bot-chip-tag" :class="getLoadChipClass(item.load)">{{ item.load }} 项</span>
                   </div>
                   <div class="bot-chip-bar">
                     <div
                       class="bot-chip-fill"
-                      :style="{ width: `${getLoadPercentage(load)}%`, background: getLoadColor(load) }"
+                      :style="{ width: `${getLoadPercentage(item.load)}%`, background: getLoadColor(item.load) }"
                     ></div>
                   </div>
+                </div>
+              </div>
+              <div v-else class="bot-loads-empty">
+                <el-icon class="empty-icon"><InfoFilled /></el-icon>
+                <span>未找到匹配的分流节点</span>
+              </div>
+
+              <!-- 节点过多时的折叠与跳转栏 -->
+              <div v-if="totalBotLoadsCount > 6" class="bot-loads-footer">
+                <span class="bot-footer-summary">
+                  显示 {{ filteredBotLoadItems.length }} / {{ totalBotLoadsCount }} 节点
+                </span>
+                <div class="bot-footer-actions">
+                  <el-button
+                    size="small"
+                    text
+                    class="bot-expand-btn"
+                    @click="isBotLoadsExpanded = !isBotLoadsExpanded"
+                  >
+                    {{ isBotLoadsExpanded ? '收起紧凑视图' : '展开更多' }}
+                    <el-icon class="ml-1">
+                      <component :is="isBotLoadsExpanded ? ArrowUp : ArrowDown" />
+                    </el-icon>
+                  </el-button>
+                  <el-button
+                    size="small"
+                    text
+                    type="primary"
+                    class="bot-jump-btn"
+                    @click="$router.push('/bots')"
+                  >
+                    集群专页
+                    <el-icon class="ml-1"><ArrowRight /></el-icon>
+                  </el-button>
                 </div>
               </div>
             </div>
@@ -343,11 +753,14 @@
         </div>
       </el-col>
     </el-row>
+    <!-- 首次登录欢迎引导弹窗 (非管理员租户) -->
+    <FirstLoginWelcomeDialog v-if="!authStore.isAdmin" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { api } from '@/api'
 import { useIntervalFn, useResizeObserver } from '@vueuse/core'
 import * as echarts from 'echarts'
 import {
@@ -358,6 +771,7 @@ import {
   Cpu,
   DataBoard,
   Files,
+  Folder,
   RefreshRight,
   Download,
   TrendCharts,
@@ -366,8 +780,18 @@ import {
   Headset,
   Picture,
   Box,
-  InfoFilled
+  InfoFilled,
+  Search,
+  ArrowDown,
+  ArrowUp,
+  Reading,
+  Promotion,
+  Share,
+  Fold,
+  Expand,
+  CircleCheck
 } from '@element-plus/icons-vue'
+import FirstLoginWelcomeDialog from '@/components/FirstLoginWelcomeDialog.vue'
 import {
   getStatus,
   getDownloads,
@@ -375,13 +799,23 @@ import {
   getDownloadStatistics,
   getUploadStatistics,
   getSystemResources,
+  getTelegramUsage,
   type TrendPoint
 } from '@/api'
-import type { ServerStatus, DownloadRecord, SystemResources } from '@/types/api'
+import type { ServerStatus, DownloadRecord, SystemResources, TelegramUsageStats } from '@/types/api'
+import { useAuthStore } from '@/stores/auth'
 import { formatDate, getStatusText } from '@/utils/formatters'
 
+const authStore = useAuthStore()
 const status = ref<ServerStatus | null>(null)
 const systemResources = ref<SystemResources | null>(null)
+const usageStats = ref<TelegramUsageStats | null>(null)
+const tenantTaskSummary = ref({
+  total: 0,
+  completed: 0,
+  active: 0,
+  failed: 0,
+})
 const recentDownloads = ref<DownloadRecord[]>([])
 const chartRef = ref<HTMLElement | null>(null)
 let chartInstance: echarts.ECharts | null = null
@@ -426,12 +860,159 @@ const stats = ref([
   }
 ])
 
+const tenantChannelDisplay = computed(() => {
+  const uname = authStore.user?.bin_channel_username || status.value?.channel_info?.public_handle
+  const cid = authStore.user?.bin_channel_id || status.value?.channel_info?.channel_id
+  if (uname && !String(uname).startsWith('channel_')) {
+    return `@${uname}${cid ? ` (${cid})` : ''}`
+  }
+  if (cid) {
+    return `私有频道 (${cid})`
+  }
+  return '待分配专属存储频道'
+})
+
+const isOnboardingCollapsed = ref(localStorage.getItem('mistrelay_onboarding_collapsed') === 'true')
+
+function toggleOnboardingCollapse() {
+  isOnboardingCollapsed.value = !isOnboardingCollapsed.value
+  localStorage.setItem('mistrelay_onboarding_collapsed', String(isOnboardingCollapsed.value))
+}
+
+const tenantFilesCount = computed(() => usageStats.value?.total_count || 0)
+
+const onboardingCompletedCount = computed(() => {
+  let count = 1
+  if (tenantFilesCount.value > 0) count += 1
+  return count
+})
+
+const botUsername = ref('')
+async function fetchBotInfo() {
+  try {
+    const { data } = await api.get('/auth/bot-info')
+    if (data?.success) {
+      botUsername.value = data.bot_username || data.data?.bot_username || ''
+    }
+  } catch {
+    // 忽略异常
+  }
+}
+
+function openTelegramBot() {
+  const url = botUsername.value ? `https://t.me/${botUsername.value}` : 'https://t.me'
+  window.open(url, '_blank')
+}
+
+function openUserGuide(tab = 'quickstart') {
+  window.dispatchEvent(new CustomEvent('open-user-guide', { detail: { tab } }))
+}
+
+const tenantStatCards = computed(() => [
+  {
+    key: 'files',
+    label: '云盘文件总数',
+    displayValue: (usageStats.value?.total_count || 0).toLocaleString(),
+    unit: '个文件',
+    desc: '点击进入个人 TG 网盘',
+    route: '/drive',
+    icon: Files,
+    color: 'linear-gradient(135deg, #38bdf8 0%, #0284c7 100%)',
+  },
+  {
+    key: 'storage',
+    label: '云盘累计占用',
+    displayValue: formatBytes(usageStats.value?.total_size || 0),
+    unit: '云端存储',
+    desc: '专属隔离频道媒体总容量',
+    route: '/drive',
+    icon: DataBoard,
+    color: 'linear-gradient(135deg, #ff7597 0%, #e11d48 100%)',
+  },
+  {
+    key: 'completed',
+    label: '传输完成任务',
+    displayValue: tenantTaskSummary.value.completed.toLocaleString(),
+    unit: '条任务',
+    desc: '个人已成功下载并转存',
+    route: '/downloads',
+    icon: Check,
+    color: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+  },
+  {
+    key: 'active_or_failed',
+    label: '进行中 / 待查',
+    displayValue: (tenantTaskSummary.value.active + tenantTaskSummary.value.failed).toLocaleString(),
+    unit: '条任务',
+    desc: `进行中 ${tenantTaskSummary.value.active} · 失败 ${tenantTaskSummary.value.failed}`,
+    route: '/downloads',
+    icon: Warning,
+    color: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+  },
+])
+
+const tenantStorageBreakdown = computed(() => {
+  const total = usageStats.value?.total_count || 0
+  const calcPercent = (count: number) => (total > 0 ? Math.min(100, (count / total) * 100) : 0)
+  const videos = usageStats.value?.videos || 0
+  const images = usageStats.value?.images || 0
+  const audios = usageStats.value?.audios || 0
+  const documents = usageStats.value?.documents || 0
+
+  return [
+    {
+      key: 'videos',
+      label: '视频媒体 Video',
+      count: videos,
+      percent: calcPercent(videos),
+      icon: VideoCamera,
+      badgeClass: 'badge-cpu',
+      color: '#38bdf8',
+    },
+    {
+      key: 'images',
+      label: '高清图片 Image',
+      count: images,
+      percent: calcPercent(images),
+      icon: Picture,
+      badgeClass: 'badge-mem',
+      color: '#ff7597',
+    },
+    {
+      key: 'audios',
+      label: '音频曲目 Audio',
+      count: audios,
+      percent: calcPercent(audios),
+      icon: Headset,
+      badgeClass: 'badge-disk',
+      color: '#a855f7',
+    },
+    {
+      key: 'documents',
+      label: '文档与其他 Document',
+      count: documents,
+      percent: calcPercent(documents),
+      icon: Document,
+      badgeClass: 'badge-cpu',
+      color: '#10b981',
+    },
+  ]
+})
+
 const serverStatusLabel = computed(() => {
+  if (!authStore.isAdmin) {
+    const hasChannel = Boolean(authStore.user?.bin_channel_id || status.value?.channel_info?.channel_id)
+    return hasChannel ? '专属频道已就绪' : '待分配专属频道'
+  }
   if (!status.value) return '检测中...'
   return status.value.server_status === 'running' ? '服务运行良好' : (status.value.server_status || '在线')
 })
 
 const statusDotClass = computed(() => {
+  if (!authStore.isAdmin) {
+    const hasChannel = Boolean(authStore.user?.bin_channel_id || status.value?.channel_info?.channel_id)
+    return hasChannel ? 'status-dot--success' : 'status-dot--warning'
+  }
   if (!status.value) return 'status-dot--warning'
   return status.value.server_status === 'running' ? 'status-dot--success' : 'status-dot--warning'
 })
@@ -642,6 +1223,7 @@ function updateChart(data: TrendPoint[]) {
 }
 
 function fetchTrend() {
+  if (!authStore.isAdmin) return
   getSystemTrend()
     .then(response => {
       if (response.success && response.data) {
@@ -652,6 +1234,7 @@ function fetchTrend() {
 }
 
 function fetchSystemResources() {
+  if (!authStore.isAdmin) return
   getSystemResources()
     .then(response => {
       if (response.success && response.data) {
@@ -659,6 +1242,17 @@ function fetchSystemResources() {
       }
     })
     .catch(err => console.error('获取系统资源失败:', err))
+}
+
+function fetchTenantUsage() {
+  if (authStore.isAdmin) return
+  getTelegramUsage()
+    .then(response => {
+      if (response.success && response.data) {
+        usageStats.value = response.data
+      }
+    })
+    .catch(err => console.error('获取个人云盘容量失败:', err))
 }
 
 function fetchData() {
@@ -678,6 +1272,13 @@ function fetchData() {
 
       if (downloadData || uploadData) {
         const totalTasks = downloadData?.total || 0
+        const activeCount = (downloadData?.downloading || 0) + (downloadData?.pending || 0) + (downloadData?.waiting || 0)
+        tenantTaskSummary.value = {
+          total: totalTasks,
+          completed: downloadData?.completed || 0,
+          active: activeCount,
+          failed: downloadData?.failed || 0,
+        }
         updateStats({
           completed: downloadData?.completed || 0,
           cleaned: uploadData?.cleaned || 0,
@@ -707,7 +1308,11 @@ function fetchData() {
     })
     .catch(err => console.error('获取下载记录失败:', err))
 
-  fetchTrend()
+  if (authStore.isAdmin) {
+    fetchTrend()
+  } else {
+    fetchTenantUsage()
+  }
 }
 
 function updateStats(statistics: { completed: number; cleaned: number; failed: number; total: number }) {
@@ -735,8 +1340,12 @@ async function handleManualRefresh() {
   isRefreshing.value = true
   try {
     fetchData()
-    fetchSystemResources()
-    fetchTrend()
+    if (authStore.isAdmin) {
+      fetchSystemResources()
+      fetchTrend()
+    } else {
+      fetchTenantUsage()
+    }
   } finally {
     setTimeout(() => {
       isRefreshing.value = false
@@ -744,14 +1353,14 @@ async function handleManualRefresh() {
   }
 }
 
-// 定时轮询
-const { pause: pauseTrend, resume: resumeTrend } = useIntervalFn(fetchTrend, 2000)
-const { pause: pauseResources, resume: resumeResources } = useIntervalFn(fetchSystemResources, 2000)
+// 定时轮询（仅管理员开启 2 秒硬件与趋势采样）
+const { pause: pauseTrend, resume: resumeTrend } = useIntervalFn(fetchTrend, 2000, { immediate: false })
+const { pause: pauseResources, resume: resumeResources } = useIntervalFn(fetchSystemResources, 2000, { immediate: false })
 const { pause: pauseData, resume: resumeData } = useIntervalFn(fetchData, 30000)
 
 function toggleAutoRefresh() {
   autoRefresh.value = !autoRefresh.value
-  if (autoRefresh.value) {
+  if (autoRefresh.value && authStore.isAdmin) {
     resumeTrend()
     resumeResources()
     resumeData()
@@ -818,6 +1427,54 @@ function getLoadChipClass(load: number): string {
   return 'chip-red'
 }
 
+const botLoadFilter = ref<'all' | 'busy' | 'idle'>('all')
+const botLoadSearch = ref('')
+const isBotLoadsExpanded = ref(false)
+
+interface BotLoadItem {
+  key: string
+  displayName: string
+  load: number
+}
+
+const allBotLoadItems = computed<BotLoadItem[]>(() => {
+  const loads = status.value?.loads
+  if (!loads) return []
+  return Object.entries(loads)
+    .map(([bot, load]) => ({
+      key: bot,
+      displayName: getBotDisplayName(bot),
+      load: Number(load) || 0,
+    }))
+    .sort((a, b) => {
+      // 忙碌/有负载节点优先排在最前，保证管理员一眼能看到执行中的Worker
+      if (b.load !== a.load) return b.load - a.load
+      return a.key.localeCompare(b.key, undefined, { numeric: true })
+    })
+})
+
+const totalBotLoadsCount = computed(() => allBotLoadItems.value.length)
+const busyBotLoadsCount = computed(() => allBotLoadItems.value.filter(item => item.load > 0).length)
+const idleBotLoadsCount = computed(() => totalBotLoadsCount.value - busyBotLoadsCount.value)
+
+const filteredBotLoadItems = computed<BotLoadItem[]>(() => {
+  let list = allBotLoadItems.value
+  if (botLoadFilter.value === 'busy') {
+    list = list.filter(item => item.load > 0)
+  } else if (botLoadFilter.value === 'idle') {
+    list = list.filter(item => item.load === 0)
+  }
+  const kw = botLoadSearch.value.trim().toLowerCase()
+  if (kw) {
+    list = list.filter(
+      item =>
+        item.displayName.toLowerCase().includes(kw) ||
+        item.key.toLowerCase().includes(kw)
+    )
+  }
+  return list
+})
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B'
   const k = 1024
@@ -827,12 +1484,20 @@ function formatBytes(bytes: number): string {
 }
 
 onMounted(() => {
+  void fetchBotInfo()
   fetchData()
-  fetchSystemResources()
-  nextTick(() => {
-    initChart()
-    fetchTrend()
-  })
+  if (authStore.isAdmin) {
+    fetchSystemResources()
+    resumeTrend()
+    resumeResources()
+    nextTick(() => {
+      initChart()
+      fetchTrend()
+    })
+  } else {
+    pauseTrend()
+    pauseResources()
+  }
 
   useResizeObserver(document.body, () => {
     chartInstance?.resize()
@@ -855,6 +1520,219 @@ onUnmounted(() => {
 }
 
 /* 头部品牌横幅 */
+.tenant-onboarding-wrapper {
+  margin-bottom: 16px;
+}
+
+.tenant-onboarding-card {
+  padding: 20px 24px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 143, 171, 0.28);
+  box-shadow: 0 8px 30px rgba(255, 117, 151, 0.08);
+}
+
+.onboarding-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.onboarding-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.onboarding-star-badge {
+  font-size: 15px;
+  font-weight: 800;
+  color: #111827;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.onboarding-sub {
+  font-size: 12.5px;
+  color: #6b7280;
+}
+
+.onboarding-actions-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.onboarding-progress-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ff7597;
+  background: rgba(255, 117, 151, 0.12);
+  border: 1px solid rgba(255, 117, 151, 0.3);
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+.onboarding-btn-guide {
+  border-radius: 10px;
+  border-color: rgba(255, 143, 171, 0.35);
+  color: #ff7597;
+}
+
+.onboarding-btn-collapse {
+  border-radius: 10px;
+  color: #6b7280;
+}
+
+.onboarding-progress-bar-wrap {
+  margin-bottom: 18px;
+}
+
+.onboarding-steps-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+
+.onboarding-step-box {
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(255, 143, 171, 0.2);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: all 0.25s ease;
+}
+
+.onboarding-step-box:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 117, 151, 0.45);
+  box-shadow: 0 6px 20px rgba(255, 117, 151, 0.12);
+}
+
+.onboarding-step-box.is-completed {
+  border-color: rgba(16, 185, 129, 0.3);
+  background: linear-gradient(135deg, rgba(236, 253, 245, 0.6) 0%, rgba(255, 255, 255, 0.8) 100%);
+}
+
+.step-box-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.step-num-pill {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%);
+  color: white;
+  font-size: 11px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.step-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #111827;
+  flex: 1;
+  margin-left: 8px;
+}
+
+.step-desc {
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.45;
+  margin: 0 0 14px 0;
+  flex: 1;
+}
+
+.step-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-meta {
+  font-size: 11px;
+  color: #10b981;
+  font-weight: 600;
+}
+
+/* 折叠卡片 */
+.onboarding-collapsed-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 143, 171, 0.28);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.onboarding-collapsed-card:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 117, 151, 0.45);
+  box-shadow: 0 4px 16px rgba(255, 117, 151, 0.12);
+  transform: translateY(-1px);
+}
+
+.collapsed-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.collapsed-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.collapsed-progress {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #ff7597;
+  background: rgba(255, 117, 151, 0.1);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.collapsed-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+@media (max-width: 992px) {
+  .onboarding-steps-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .onboarding-steps-grid {
+    grid-template-columns: 1fr;
+  }
+  .onboarding-card-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
 .dashboard-header-card {
   padding: 24px 28px 20px;
   position: relative;
@@ -1506,6 +2384,8 @@ onUnmounted(() => {
 .bot-loads {
   padding-top: 14px;
   border-top: 1px dashed rgba(226, 232, 240, 0.9);
+  display: flex;
+  flex-direction: column;
 }
 
 .bot-loads-header {
@@ -1513,6 +2393,8 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .bot-loads-title {
@@ -1536,10 +2418,103 @@ onUnmounted(() => {
   color: #94a3b8;
 }
 
+.busy-pill-hint {
+  color: #ff7597;
+  font-weight: 600;
+}
+
+.bot-loads-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.bot-filter-pills {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.filter-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  background: rgba(248, 250, 252, 0.7);
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 18px;
+}
+
+.filter-pill:hover {
+  color: #0f172a;
+  background: #ffffff;
+  border-color: #cbd5e1;
+}
+
+.filter-pill.is-active {
+  background: #38bdf8;
+  border-color: #38bdf8;
+  color: #ffffff;
+  box-shadow: 0 1px 4px rgba(56, 189, 248, 0.35);
+}
+
+.filter-pill.pill-busy.is-active {
+  background: #ff7597;
+  border-color: #ff7597;
+  box-shadow: 0 1px 4px rgba(255, 117, 151, 0.35);
+}
+
+.bot-search-wrap {
+  width: 120px;
+}
+
+.bot-search-input :deep(.el-input__wrapper) {
+  border-radius: 8px;
+  font-size: 11px;
+  padding: 0 8px;
+  height: 24px;
+}
+
 .bot-loads-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   gap: 8px;
+  max-height: 196px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(203, 213, 225, 0.8) transparent;
+  transition: max-height 0.25s ease-in-out;
+}
+
+.bot-loads-grid.is-expanded {
+  max-height: 380px;
+}
+
+.bot-loads-grid::-webkit-scrollbar {
+  width: 4px;
+}
+
+.bot-loads-grid::-webkit-scrollbar-track {
+  background: rgba(241, 245, 249, 0.6);
+  border-radius: 999px;
+}
+
+.bot-loads-grid::-webkit-scrollbar-thumb {
+  background: rgba(203, 213, 225, 0.9);
+  border-radius: 999px;
+}
+
+.bot-loads-grid::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.9);
 }
 
 .bot-load-chip {
@@ -1547,6 +2522,13 @@ onUnmounted(() => {
   border-radius: 10px;
   background: rgba(248, 250, 252, 0.85);
   border: 1px solid rgba(226, 232, 240, 0.8);
+  transition: all 0.2s ease;
+}
+
+.bot-load-chip.is-busy {
+  background: rgba(255, 241, 242, 0.7);
+  border-color: rgba(255, 117, 151, 0.4);
+  box-shadow: 0 1px 4px rgba(255, 117, 151, 0.1);
 }
 
 .bot-chip-top {
@@ -1602,9 +2584,256 @@ onUnmounted(() => {
   transition: width 0.3s ease;
 }
 
+.bot-loads-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px 0;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.bot-loads-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(226, 232, 240, 0.7);
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.bot-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bot-expand-btn,
+.bot-jump-btn {
+  font-size: 11px !important;
+  padding: 2px 4px !important;
+  height: auto !important;
+}
+
 /* 响应式调整 */
 @media (max-width: 768px) {
-  .dashboard-header-card {
+  .tenant-onboarding-wrapper {
+  margin-bottom: 16px;
+}
+
+.tenant-onboarding-card {
+  padding: 20px 24px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 143, 171, 0.28);
+  box-shadow: 0 8px 30px rgba(255, 117, 151, 0.08);
+}
+
+.onboarding-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.onboarding-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.onboarding-star-badge {
+  font-size: 15px;
+  font-weight: 800;
+  color: #111827;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.onboarding-sub {
+  font-size: 12.5px;
+  color: #6b7280;
+}
+
+.onboarding-actions-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.onboarding-progress-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ff7597;
+  background: rgba(255, 117, 151, 0.12);
+  border: 1px solid rgba(255, 117, 151, 0.3);
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+.onboarding-btn-guide {
+  border-radius: 10px;
+  border-color: rgba(255, 143, 171, 0.35);
+  color: #ff7597;
+}
+
+.onboarding-btn-collapse {
+  border-radius: 10px;
+  color: #6b7280;
+}
+
+.onboarding-progress-bar-wrap {
+  margin-bottom: 18px;
+}
+
+.onboarding-steps-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+
+.onboarding-step-box {
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(255, 143, 171, 0.2);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: all 0.25s ease;
+}
+
+.onboarding-step-box:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 117, 151, 0.45);
+  box-shadow: 0 6px 20px rgba(255, 117, 151, 0.12);
+}
+
+.onboarding-step-box.is-completed {
+  border-color: rgba(16, 185, 129, 0.3);
+  background: linear-gradient(135deg, rgba(236, 253, 245, 0.6) 0%, rgba(255, 255, 255, 0.8) 100%);
+}
+
+.step-box-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.step-num-pill {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%);
+  color: white;
+  font-size: 11px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.step-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #111827;
+  flex: 1;
+  margin-left: 8px;
+}
+
+.step-desc {
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.45;
+  margin: 0 0 14px 0;
+  flex: 1;
+}
+
+.step-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.step-meta {
+  font-size: 11px;
+  color: #10b981;
+  font-weight: 600;
+}
+
+/* 折叠卡片 */
+.onboarding-collapsed-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 143, 171, 0.28);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.onboarding-collapsed-card:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 117, 151, 0.45);
+  box-shadow: 0 4px 16px rgba(255, 117, 151, 0.12);
+  transform: translateY(-1px);
+}
+
+.collapsed-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.collapsed-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.collapsed-progress {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #ff7597;
+  background: rgba(255, 117, 151, 0.1);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.collapsed-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+@media (max-width: 992px) {
+  .onboarding-steps-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .onboarding-steps-grid {
+    grid-template-columns: 1fr;
+  }
+  .onboarding-card-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+.dashboard-header-card {
     padding: 16px;
   }
 

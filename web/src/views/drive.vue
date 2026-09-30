@@ -1,5 +1,24 @@
 <template>
-  <div class="drive-page animate-fade-in">
+  <div
+    class="drive-page animate-fade-in"
+    @dragenter.prevent="handleDragEnter"
+    @dragover.prevent="handleDragOver"
+    @dragleave.prevent="handleDragLeave"
+    @drop.prevent="handleDrop"
+  >
+    <!-- 拖拽上传全屏半透明毛玻璃蒙层 -->
+    <transition name="fade">
+      <div
+        v-if="isDragOver"
+        class="drive-drag-overlay animate-fade-in"
+      >
+        <div class="drag-overlay-content glass-card">
+          <el-icon class="drag-icon"><UploadFilled /></el-icon>
+          <h3 class="drag-title text-gradient-sakura">松开鼠标即可极速上传至 Telegram 网盘</h3>
+          <p class="drag-desc">支持任意视频、音乐、图片与文档，5MB 切片并发直传，最高支持 2GB 大文件</p>
+        </div>
+      </div>
+    </transition>
     <!-- 头部品牌与统计区 -->
     <div class="drive-header-card glass-card">
       <div class="drive-header-main">
@@ -39,6 +58,73 @@
             </span>
           </div>
 
+          <!-- 边缘加速选路状态胶囊 -->
+          <el-dropdown
+            v-if="availableEdgeNodes.length > 0"
+            trigger="click"
+            @command="handleEdgeNodeChange"
+          >
+            <div
+              class="edge-status-pill"
+              :class="{ 'is-direct': selectedEdgeNodeId === 'direct' }"
+              :title="`当前加速模式: ${currentEdgeNodeLabel}`"
+            >
+              <el-icon class="edge-icon"><Lightning /></el-icon>
+              <span>{{ currentEdgeNodeLabel }}</span>
+              <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </div>
+            <template #dropdown>
+              <el-dropdown-menu class="edge-node-menu">
+                <el-dropdown-item command="auto">
+                  <div class="edge-menu-item">
+                    <div class="edge-menu-title">
+                      <el-icon><Compass /></el-icon>
+                      <span>智能自动优选 (推荐)</span>
+                    </div>
+                    <span class="edge-menu-tag">{{ bestEdgeNodeInfo }}</span>
+                  </div>
+                </el-dropdown-item>
+                <el-dropdown-item
+                  v-for="node in availableEdgeNodes"
+                  :key="node.id"
+                  :command="String(node.id)"
+                >
+                  <div class="edge-menu-item">
+                    <div class="edge-menu-title">
+                      <span class="node-status-dot" :class="node.status" />
+                      <span>{{ node.node_name }}</span>
+                      <el-tag v-if="node.is_dedicated" size="small" type="success" effect="dark" style="margin-left: 4px; font-size: 10px; height: 18px; padding: 0 4px;">专属</el-tag>
+                      <el-tag v-else size="small" type="info" style="margin-left: 4px; font-size: 10px; height: 18px; padding: 0 4px;">共享</el-tag>
+                    </div>
+                    <span class="edge-menu-latency" v-if="edgeNodeLatencies[node.id]">
+                      {{ Math.round(edgeNodeLatencies[node.id]) }} ms
+                    </span>
+                    <span class="edge-menu-dc" v-else-if="node.fastest_dc?.name && node.fastest_dc?.avg_rtt_ms !== undefined">
+                      {{ (node.fastest_dc.name || '').split(' ')[0] }} {{ Math.round(node.fastest_dc.avg_rtt_ms) }}ms
+                    </span>
+                  </div>
+                </el-dropdown-item>
+                <el-dropdown-item divided command="direct">
+                  <div class="edge-menu-item">
+                    <div class="edge-menu-title">
+                      <el-icon><OfficeBuilding /></el-icon>
+                      <span>主控直连回源 (不走分流)</span>
+                    </div>
+                    <span class="edge-menu-hint">Master 直出</span>
+                  </div>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
+          <el-button
+            type="primary"
+            class="header-btn upload-btn"
+            :icon="UploadFilled"
+            @click="triggerUpload"
+          >
+            上传文件
+          </el-button>
           <el-button
             type="primary"
             class="header-btn harvest-btn"
@@ -54,6 +140,15 @@
             :loading="loading"
           >
             刷新
+          </el-button>
+          <el-button
+            class="header-btn"
+            :icon="Download"
+            @click="handleExportMyBackup"
+            :loading="exportingMyBackup"
+            title="导出当前租户全部关联频道的资产元数据备份 (JSON)"
+          >
+            备份资产
           </el-button>
           <el-button
             type="danger"
@@ -249,7 +344,7 @@
           </el-checkbox>
           <span class="selection-count">已选 {{ selectedItems.length }} 项</span>
         </div>
-        <div class="selection-actions">
+        <div v-if="selectedItems.length > 0" class="selection-actions">
           <el-button
             :icon="Download"
             class="batch-btn batch-download-btn"
@@ -296,8 +391,8 @@
         </div>
       </div>
 
-      <!-- 列表模式视图 -->
-      <div v-if="viewMode === 'list'" class="table-container">
+      <!-- 列表模式视图 (桌面端显示宽表格) -->
+      <div v-if="viewMode === 'list'" class="table-container hidden md:block">
         <el-table
           :data="items"
           v-loading="loading"
@@ -440,8 +535,8 @@
         </el-table>
       </div>
 
-      <!-- 网格模式视图 -->
-      <div v-else v-loading="loading" class="grid-view">
+      <!-- 网格模式视图 (网格模式下常驻，列表模式下移动端自适应降级为触控卡片流) -->
+      <div v-if="viewMode === 'grid' || true" v-loading="loading" class="grid-view" :class="{ 'md:hidden': viewMode === 'list' }">
         <div
           v-for="item in items"
           :key="getItemKey(item)"
@@ -593,24 +688,164 @@
 
       <!-- 空状态 -->
       <div v-if="!loading && items.length === 0" class="empty-state-box">
-        <div class="empty-icon-halo">
-          <el-icon :size="54"><FolderOpened /></el-icon>
-        </div>
-        <div class="empty-title">{{ isInsideGroup ? '此媒体组暂无文件' : 'TG 频道网盘暂无文件' }}</div>
-        <p class="empty-hint">
-          {{ isInsideGroup ? '可点击上方返回根目录查看其他资源' : '频道内暂无可展示的媒体内容，或已被当前筛选条件过滤。' }}
-        </p>
-        <div class="empty-actions">
-          <el-button v-if="isInsideGroup" type="primary" :icon="ArrowLeft" @click="goRoot">
-            返回根目录
-          </el-button>
-          <el-button v-else-if="typeFilter || searchKeyword" :icon="RefreshRight" @click="resetFilters">
-            重置筛选条件
-          </el-button>
-          <el-button v-else :icon="RefreshRight" @click="refreshAll">
-            刷新同步
-          </el-button>
-        </div>
+        <!-- 场景 1: 在媒体组内 -->
+        <template v-if="isInsideGroup">
+          <div class="empty-icon-halo">
+            <el-icon :size="54"><FolderOpened /></el-icon>
+          </div>
+          <div class="empty-title">此媒体组暂无文件</div>
+          <p class="empty-hint">可点击上方返回根目录查看其他资源</p>
+          <div class="empty-actions">
+            <el-button type="primary" :icon="ArrowLeft" @click="goRoot">
+              返回根目录
+            </el-button>
+          </div>
+        </template>
+
+        <!-- 场景 2: 搜索或类型过滤无结果 -->
+        <template v-else-if="typeFilter || searchKeyword">
+          <div class="empty-icon-halo">
+            <el-icon :size="54"><FolderOpened /></el-icon>
+          </div>
+          <div class="empty-title">未找到匹配的媒体文件</div>
+          <p class="empty-hint">当前筛选条件未匹配到任何资产，请尝试重置筛选</p>
+          <div class="empty-actions">
+            <el-button :icon="RefreshRight" @click="resetFilters">
+              重置筛选条件
+            </el-button>
+          </div>
+        </template>
+
+        <!-- 场景 3: 初始 0 资产状态（新人起航指引态） -->
+        <template v-else>
+          <div class="empty-onboarding-container glass-card">
+            <div class="empty-icon-halo">
+              <el-icon :size="48"><FolderOpened /></el-icon>
+            </div>
+            <div class="empty-title text-gradient-sakura">专属云盘虚位以待 · 开启首份资产入库</div>
+            <p class="empty-hint">
+              MistRelay 已为您配置同区 Telegram 独立物理隔离存储空间，媒体资产永久保存。即刻通过以下方式入库：
+            </p>
+
+            <div class="empty-methods-grid">
+              <!-- 方式 0: 本地文件直接上传 -->
+              <div class="empty-method-card">
+                <div class="method-card-top">
+                  <div class="method-icon-wrap icon-wrap--sakura">
+                    <el-icon><UploadFilled /></el-icon>
+                  </div>
+                  <span class="method-card-badge method-card-badge--sakura">Web 直传</span>
+                </div>
+                <h4 class="method-card-title">本地文件直接上传</h4>
+                <p class="method-card-desc">
+                  从电脑或手机直接拖拽或批量选择文件，5MB 分片并发直传，全自动转存入库并生成流播预览。
+                </p>
+                <el-button
+                  size="small"
+                  type="primary"
+                  class="method-card-btn upload-btn"
+                  :icon="UploadFilled"
+                  @click="triggerUpload"
+                >
+                  🚀 立即上传文件
+                </el-button>
+              </div>
+
+              <!-- 方式 1: 机器人私聊 -->
+              <div class="empty-method-card">
+                <div class="method-card-top">
+                  <div class="method-icon-wrap icon-wrap--primary">
+                    <el-icon><Promotion /></el-icon>
+                  </div>
+                  <span class="method-card-badge">极速推荐</span>
+                </div>
+                <h4 class="method-card-title">Telegram 私聊直投</h4>
+                <p class="method-card-desc">
+                  向主控 Bot 发送或转发视频、图片、音频或文档，秒级存入专属频道并生成多 Bot 串流直链。
+                </p>
+                <el-button
+                  size="small"
+                  type="primary"
+                  class="method-card-btn"
+                  :icon="Promotion"
+                  @click="openTelegramBot"
+                >
+                  🚀 私聊机器人
+                </el-button>
+              </div>
+
+              <!-- 方式 2: Aria2 离线 -->
+              <div class="empty-method-card">
+                <div class="method-card-top">
+                  <div class="method-icon-wrap icon-wrap--sky">
+                    <el-icon><Download /></el-icon>
+                  </div>
+                  <span class="method-card-badge method-card-badge--sky">全速离线</span>
+                </div>
+                <h4 class="method-card-title">Aria2 磁力全速转存</h4>
+                <p class="method-card-desc">
+                  直接将磁力链接 (magnet:) 或直链发给机器人，千兆集群全天候离线下载完成后自动打包入库。
+                </p>
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  class="method-card-btn"
+                  :icon="CopyDocument"
+                  @click="copySampleMagnet"
+                >
+                  📋 复制磁力格式
+                </el-button>
+              </div>
+
+              <!-- 方式 3: 私密采集 -->
+              <div class="empty-method-card">
+                <div class="method-card-top">
+                  <div class="method-icon-wrap icon-wrap--purple">
+                    <el-icon><MagicStick /></el-icon>
+                  </div>
+                  <span class="method-card-badge method-card-badge--purple">破除限制</span>
+                </div>
+                <h4 class="method-card-title">受限频道破除采集</h4>
+                <p class="method-card-desc">
+                  针对禁止保存或转发的群组/频道，全自动调动协议号阵列无痕洗白提取并转存至此。
+                </p>
+                <el-button
+                  size="small"
+                  type="success"
+                  plain
+                  class="method-card-btn"
+                  :icon="MagicStick"
+                  @click="openHarvesterDialog"
+                >
+                  🎯 打开采集器
+                </el-button>
+              </div>
+            </div>
+
+            <div class="empty-bottom-bar">
+              <span class="empty-tip-text">💡 提示：在 Telegram 投递成功后，点击右侧按钮即可刷新呈现</span>
+              <div class="empty-bottom-actions">
+                <el-button
+                  size="small"
+                  class="guide-text-btn"
+                  @click="openUserGuide('upload')"
+                >
+                  📖 查阅完整入库教程
+                </el-button>
+                <el-button
+                  size="small"
+                  type="primary"
+                  :icon="RefreshRight"
+                  @click="refreshAll"
+                  :loading="loading"
+                >
+                  刷新同步
+                </el-button>
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
 
       <!-- 分页栏 -->
@@ -704,13 +939,14 @@
         </div>
       </template>
 
-      <div class="video-container" :class="{ 'fullscreen-container': isWebFullscreen }">
+      <div class="video-container" :class="{ 'fullscreen-container': isWebFullscreen }" v-loading="!previewUrl" element-loading-text="正在优选边缘链路..." element-loading-background="rgba(0, 0, 0, 0.7)">
         <VideoPlayer
           ref="videoPlayerRef"
           v-if="previewUrl"
           :src="previewUrl"
           :type="getVideoType(previewItem)"
           @ended="handleMediaEnded"
+          @error="handlePlayerError"
         />
       </div>
 
@@ -724,6 +960,60 @@
             <span v-if="previewItem && previewItem.mime_type" class="file-mime-tag">
               {{ previewItem.mime_type }}
             </span>
+            <!-- 播放器内边缘加速胶囊 -->
+            <el-dropdown
+              v-if="availableEdgeNodes.length > 0"
+              trigger="click"
+              @command="handleEdgeNodeChange"
+            >
+              <span class="edge-routing-badge" :class="{ 'is-direct': selectedEdgeNodeId === 'direct' }">
+                <el-icon><Lightning /></el-icon>
+                <span>{{ currentEdgeNodeLabel }}</span>
+                <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </span>
+              <template #dropdown>
+                <el-dropdown-menu class="edge-node-menu">
+                  <el-dropdown-item command="auto">
+                    <div class="edge-menu-item">
+                      <div class="edge-menu-title">
+                        <el-icon><Compass /></el-icon>
+                        <span>智能自动优选 (推荐)</span>
+                      </div>
+                      <span class="edge-menu-tag">{{ bestEdgeNodeInfo }}</span>
+                    </div>
+                  </el-dropdown-item>
+                  <el-dropdown-item
+                    v-for="node in availableEdgeNodes"
+                    :key="node.id"
+                    :command="String(node.id)"
+                  >
+                    <div class="edge-menu-item">
+                      <div class="edge-menu-title">
+                        <span class="node-status-dot" :class="node.status" />
+                        <span>{{ node.node_name }}</span>
+                        <el-tag v-if="node.is_dedicated" size="small" type="success" effect="dark" style="margin-left: 4px; font-size: 10px; height: 18px; padding: 0 4px;">专属</el-tag>
+                        <el-tag v-else size="small" type="info" style="margin-left: 4px; font-size: 10px; height: 18px; padding: 0 4px;">共享</el-tag>
+                      </div>
+                      <span class="edge-menu-latency" v-if="edgeNodeLatencies[node.id]">
+                        {{ Math.round(edgeNodeLatencies[node.id]) }} ms
+                      </span>
+                      <span class="edge-menu-dc" v-else-if="node.fastest_dc?.name && node.fastest_dc?.avg_rtt_ms !== undefined">
+                        {{ (node.fastest_dc.name || '').split(' ')[0] }} {{ Math.round(node.fastest_dc.avg_rtt_ms) }}ms
+                      </span>
+                    </div>
+                  </el-dropdown-item>
+                  <el-dropdown-item divided command="direct">
+                    <div class="edge-menu-item">
+                      <div class="edge-menu-title">
+                        <el-icon><OfficeBuilding /></el-icon>
+                        <span>主控直连回源 (不走分流)</span>
+                      </div>
+                      <span class="edge-menu-hint">Master 直出</span>
+                    </div>
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
             <el-tooltip content="播放完毕自动起播下一个视频" placement="top">
               <el-switch
                 v-model="autoplayNext"
@@ -1053,6 +1343,12 @@
         </div>
       </template>
     </el-dialog>
+
+    <!-- 用户本地文件分片上传管理抽屉 -->
+    <DriveUploadDrawer
+      ref="uploadDrawerRef"
+      @upload-success="handleUploadSuccess"
+    />
   </div>
 </template>
 
@@ -1065,7 +1361,9 @@ import {
   ArrowRight,
   Close,
   Coin,
+  CopyDocument,
   Delete,
+  MagicStick,
   Document,
   Download,
   Files,
@@ -1079,6 +1377,9 @@ import {
   Loading,
   Monitor,
   Picture,
+  Lightning,
+  Compass,
+  OfficeBuilding,
   Promotion,
   RefreshRight,
   ScaleToOriginal,
@@ -1086,9 +1387,13 @@ import {
   VideoCamera,
   VideoPlay,
   View,
+  UploadFilled,
 } from '@element-plus/icons-vue'
+import DriveUploadDrawer from '@/components/DriveUploadDrawer.vue'
 import {
+  api,
   browseTelegramDrive,
+  exportMyTenantBackup,
   clearTelegramDrive,
   deleteTelegramBatch,
   deleteTelegramGroup,
@@ -1102,6 +1407,10 @@ import {
   isTelegramDriveFile,
   isTelegramDriveFolder,
   warmupTelegramThumbnails,
+  getAvailableEdgeNodes,
+  reportClientLatency,
+  resolveEdgeStreamUrl,
+  type AvailableEdgeNode,
   type HarvesterTaskStatus,
   type ProtocolAccount,
   type TelegramDriveFile,
@@ -1112,9 +1421,62 @@ import {
 } from '@/api'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import { resolveServerUrl, toAbsoluteServerUrl } from '@/utils/runtime'
+import { useAuthStore } from '@/stores/auth'
+
+const authStore = useAuthStore()
+
+const exportingMyBackup = ref(false)
+async function handleExportMyBackup() {
+  exportingMyBackup.value = true
+  try {
+    ElMessage.info("正在导出当前租户资产元数据备份...")
+    const res = await exportMyTenantBackup()
+    const blob = new Blob([res.data], { type: "application/json" })
+    const downloadUrl = URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = downloadUrl
+    const tenantName = authStore.user?.username || "tenant"
+    link.download = `tenant_backup_${tenantName}_${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(downloadUrl)
+    ElMessage.success("资产元数据备份已成功导出")
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.error || e.message || "导出备份失败")
+  } finally {
+    exportingMyBackup.value = false
+  }
+}
 
 const items = ref<TelegramDriveItem[]>([])
 const usageStats = ref<TelegramUsageStats | null>(null)
+const botUsername = ref('')
+
+async function fetchBotInfo() {
+  try {
+    const { data } = await api.get('/auth/bot-info')
+    if (data?.success) {
+      botUsername.value = data.bot_username || data.data?.bot_username || ''
+    }
+  } catch {
+    // 忽略异常
+  }
+}
+
+function openTelegramBot() {
+  const url = botUsername.value ? `https://t.me/${botUsername.value}` : 'https://t.me'
+  window.open(url, '_blank')
+}
+
+function copySampleMagnet() {
+  const sample = 'magnet:?xt=urn:btih:d6b6e4e5e7fa9b2c8a1e3f5b7c9d0e1f2a3b4c5d&dn=SampleVideo_4K'
+  copyToClipboard(sample, '磁力链接示例已复制，发给机器人即可全自动离线下载')
+}
+
+function openUserGuide(tab = 'upload') {
+  window.dispatchEvent(new CustomEvent('open-user-guide', { detail: { tab } }))
+}
 const loading = ref(false)
 const searchKeyword = ref('')
 const typeFilter = ref('')
@@ -1129,7 +1491,8 @@ const pageSize = ref(Number(localStorage.getItem('mistrelay.drive.pageSize')) ||
 watch(pageSize, val => localStorage.setItem('mistrelay.drive.pageSize', String(val)))
 
 const total = ref(0)
-const viewMode = ref<'list' | 'grid'>((localStorage.getItem('mistrelay.drive.viewMode') as any) === 'grid' ? 'grid' : 'list')
+const defaultViewMode = typeof window !== 'undefined' && window.innerWidth < 768 ? 'grid' : 'list'
+const viewMode = ref<'list' | 'grid'>((localStorage.getItem('mistrelay.drive.viewMode') as any) || defaultViewMode)
 watch(viewMode, val => localStorage.setItem('mistrelay.drive.viewMode', val))
 
 const lastSelectedKey = ref<string | null>(null)
@@ -1149,6 +1512,186 @@ const thumbVersion = ref(0)
 const pollTimer = ref<any>(null)
 const isWebFullscreen = ref(false)
 const videoPlayerRef = ref<any>(null)
+
+// ---------------------------------------------------------------------------
+// 边缘 VPS 智能低延迟分流调度与节点管理
+// ---------------------------------------------------------------------------
+const availableEdgeNodes = ref<AvailableEdgeNode[]>([])
+const selectedEdgeNodeId = ref<string>(localStorage.getItem('mistrelay.drive.edgeNodePref_v2') || 'auto')
+const edgeNodeLatencies = ref<Record<number, number>>({})
+const isProbingEdgeNodes = ref<boolean>(false)
+
+async function resolvePlayUrl(item: TelegramDriveItem, preferredNode?: string): Promise<string> {
+  if (!isFile(item) || !item.message_id) return getStreamUrl(item)
+  const nodePref = preferredNode !== undefined ? preferredNode : selectedEdgeNodeId.value
+  if (nodePref === 'direct') {
+    return getStreamUrl(item)
+  }
+  try {
+    const res = await resolveEdgeStreamUrl({
+      message_id: item.message_id,
+      hash: item.hash,
+      preferred_node: nodePref,
+    })
+    if (res && res.success && res.url) {
+      return res.url
+    }
+  } catch (err) {
+    console.warn('解析边缘流播直链失败，回退主控直出:', err)
+  }
+  return getStreamUrl(item)
+}
+
+function handlePlayerError() {
+  if (previewItem.value && previewUrl.value && !previewUrl.value.includes('direct=1')) {
+    console.warn('边缘节点流播异常，自动降级回源主控直出...')
+    ElMessage.warning('边缘节点网络波动，已自动切换为主控直出保底')
+    const masterFallback = getStreamUrl(previewItem.value)
+    if (masterFallback && masterFallback !== previewUrl.value) {
+      previewUrl.value = masterFallback
+    }
+  }
+}
+
+watch(selectedEdgeNodeId, async (val) => {
+  localStorage.setItem('mistrelay.drive.edgeNodePref_v2', val)
+  if (showPreview.value && previewItem.value) {
+    if (val === 'direct') {
+      previewUrl.value = getStreamUrl(previewItem.value)
+    } else {
+      const edgeUrl = await resolvePlayUrl(previewItem.value, val)
+      if (showPreview.value && previewItem.value) {
+        previewUrl.value = edgeUrl
+      }
+    }
+  }
+})
+
+const bestEdgeNodeInfo = computed(() => {
+  if (!availableEdgeNodes.value.length) return '暂无节点'
+  let bestWithLatency: { node: AvailableEdgeNode; latency: number } | null = null
+  for (const node of availableEdgeNodes.value) {
+    const lat = edgeNodeLatencies.value[node.id]
+    if (lat !== undefined && lat > 0) {
+      if (!bestWithLatency || lat < bestWithLatency.latency) {
+        bestWithLatency = { node, latency: lat }
+      }
+    }
+  }
+  if (bestWithLatency) {
+    return `${bestWithLatency.node.node_name} (${Math.round(bestWithLatency.latency)}ms)`
+  }
+  let bestDcNode: { node: AvailableEdgeNode; rtt: number } | null = null
+  for (const node of availableEdgeNodes.value) {
+    if (node.fastest_dc?.avg_rtt_ms) {
+      if (!bestDcNode || node.fastest_dc.avg_rtt_ms < bestDcNode.rtt) {
+        bestDcNode = { node, rtt: node.fastest_dc.avg_rtt_ms }
+      }
+    }
+  }
+  if (bestDcNode) {
+    return `${bestDcNode.node.node_name} (~${Math.round(bestDcNode.rtt)}ms)`
+  }
+  return '自动分配'
+})
+
+const currentEdgeNodeLabel = computed(() => {
+  if (selectedEdgeNodeId.value === 'direct') {
+    return '主控直出'
+  }
+  if (selectedEdgeNodeId.value === 'auto' || !selectedEdgeNodeId.value) {
+    return `自动 (${bestEdgeNodeInfo.value})`
+  }
+  const targetId = Number(selectedEdgeNodeId.value)
+  const node = availableEdgeNodes.value.find(n => n.id === targetId)
+  if (node) {
+    const lat = edgeNodeLatencies.value[node.id]
+    if (lat !== undefined && lat > 0) {
+      return `${node.node_name} · ${Math.round(lat)}ms`
+    }
+    return node.node_name
+  }
+  return `自动 (${bestEdgeNodeInfo.value})`
+})
+
+function handleEdgeNodeChange(command: string) {
+  selectedEdgeNodeId.value = command
+  ElMessage.success(
+    command === 'direct'
+      ? '已切换为主控直连回源'
+      : command === 'auto'
+      ? `已切换为智能自动优选: ${bestEdgeNodeInfo.value}`
+      : '已切换至指定加速节点'
+  )
+}
+
+async function probeSingleNode(node: AvailableEdgeNode): Promise<number | null> {
+  if (!node.ping_url) return null
+  // 若主站通过 HTTPS 访问且边缘节点尚未启用 SSL（http://），跳过浏览器端直连 Fetch 以免产生 Mixed Content 拦截
+  if (window.location.protocol === 'https:' && (!node.use_ssl || node.ping_url.startsWith('http:'))) {
+    return null
+  }
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 3500)
+  const start = performance.now()
+  try {
+    const resp = await fetch(node.ping_url, {
+      method: 'GET',
+      mode: 'cors',
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+    clearTimeout(timeoutId)
+    if (resp.ok) {
+      const end = performance.now()
+      return Math.round(end - start)
+    }
+  } catch {
+    clearTimeout(timeoutId)
+  }
+  return null
+}
+
+async function loadAndProbeEdgeNodes() {
+  try {
+    const res = await getAvailableEdgeNodes()
+    if (res && res.success && Array.isArray(res.nodes)) {
+      availableEdgeNodes.value = res.nodes
+      for (const node of res.nodes) {
+        if (node.rtt_ms && node.rtt_ms > 0 && !edgeNodeLatencies.value[node.id]) {
+          edgeNodeLatencies.value[node.id] = node.rtt_ms
+        }
+      }
+      if (selectedEdgeNodeId.value !== 'auto' && selectedEdgeNodeId.value !== 'direct') {
+        const exists = res.nodes.some(n => String(n.id) === selectedEdgeNodeId.value)
+        if (!exists) {
+          selectedEdgeNodeId.value = 'auto'
+        }
+      }
+      if (res.nodes.length > 0 && !isProbingEdgeNodes.value) {
+        isProbingEdgeNodes.value = true
+        const latencyReports: Array<{ node_id: number; rtt_ms: number }> = []
+
+        await Promise.all(
+          res.nodes.map(async (node) => {
+            const rtt = await probeSingleNode(node)
+            if (rtt !== null && rtt > 0) {
+              edgeNodeLatencies.value[node.id] = rtt
+              latencyReports.push({ node_id: node.id, rtt_ms: rtt })
+            }
+          })
+        )
+        isProbingEdgeNodes.value = false
+
+        if (latencyReports.length > 0) {
+          reportClientLatency(latencyReports).catch(() => {})
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('加载边缘节点失败:', err)
+  }
+}
 
 function triggerPlayerFullscreen() {
   if (videoPlayerRef.value && typeof videoPlayerRef.value.toggleFullscreen === 'function') {
@@ -1281,7 +1824,18 @@ function toggleSelectPage(selected: boolean) {
 }
 
 function getStreamUrl(item: TelegramDriveItem): string {
-  return isFile(item) && item.stream_url ? resolveServerUrl(item.stream_url) : ''
+  if (!isFile(item) || !item.stream_url) return ''
+  const base = resolveServerUrl(item.stream_url)
+  const urlObj = new URL(base, window.location.origin)
+  if (authStore.user?.id) {
+    urlObj.searchParams.set('uid', String(authStore.user.id))
+  }
+  if (selectedEdgeNodeId.value === 'direct') {
+    urlObj.searchParams.set('direct', '1')
+  } else if (selectedEdgeNodeId.value && selectedEdgeNodeId.value !== 'auto') {
+    urlObj.searchParams.set('preferred_node', selectedEdgeNodeId.value)
+  }
+  return urlObj.toString()
 }
 
 function getDownloadUrl(item: TelegramDriveItem): string {
@@ -1518,15 +2072,37 @@ async function fetchThumbStatus() {
   }
 }
 
+let thumbPollingActive = false
+
 function startThumbPolling() {
+  thumbPollingActive = true
   if (pollTimer.value) return
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    return
+  }
   pollTimer.value = setInterval(fetchThumbStatus, 3000)
 }
 
 function stopThumbPolling() {
+  thumbPollingActive = false
   if (pollTimer.value) {
     clearInterval(pollTimer.value)
     pollTimer.value = null
+  }
+}
+
+function handleVisibilityChange() {
+  if (typeof document === 'undefined') return
+  if (document.visibilityState === 'hidden') {
+    if (pollTimer.value) {
+      clearInterval(pollTimer.value)
+      pollTimer.value = null
+    }
+  } else if (document.visibilityState === 'visible' && thumbPollingActive) {
+    fetchThumbStatus().catch(() => {})
+    if (!pollTimer.value) {
+      pollTimer.value = setInterval(fetchThumbStatus, 3000)
+    }
   }
 }
 
@@ -1551,6 +2127,7 @@ async function handleTriggerWarmup() {
 
 async function refreshAll() {
   fetchThumbStatus().catch(() => {})
+  loadAndProbeEdgeNodes().catch(() => {})
   await Promise.all([loadUsage(), loadItems()])
 }
 
@@ -1582,7 +2159,17 @@ function handlePageSizeChange() {
 
 function getAbsoluteStreamUrl(item?: TelegramDriveItem | null): string {
   if (!item || !isFile(item) || !item.stream_url) return ''
-  return toAbsoluteServerUrl(item.stream_url)
+  const base = toAbsoluteServerUrl(item.stream_url)
+  const urlObj = new URL(base)
+  if (authStore.user?.id) {
+    urlObj.searchParams.set('uid', String(authStore.user.id))
+  }
+  if (selectedEdgeNodeId.value === 'direct') {
+    urlObj.searchParams.set('direct', '1')
+  } else if (selectedEdgeNodeId.value && selectedEdgeNodeId.value !== 'auto') {
+    urlObj.searchParams.set('preferred_node', selectedEdgeNodeId.value)
+  }
+  return urlObj.toString()
 }
 
 async function copyToClipboard(text: string, successMsg = '已复制到剪贴板') {
@@ -1607,17 +2194,38 @@ async function copyToClipboard(text: string, successMsg = '已复制到剪贴板
   }
 }
 
-function handleCopyStreamUrl(item: TelegramDriveItem) {
+async function handleCopyStreamUrl(item: TelegramDriveItem) {
   if (isFolder(item)) {
     ElMessage.info('文件夹无法获取单文件直链')
     return
   }
-  const absUrl = getAbsoluteStreamUrl(item)
-  if (!absUrl) {
+  let targetUrl = ''
+  let nodeTag = ''
+  if (selectedEdgeNodeId.value !== 'direct') {
+    try {
+      const res = await resolveEdgeStreamUrl({
+        message_id: item.message_id,
+        hash: item.hash,
+        preferred_node: selectedEdgeNodeId.value,
+      })
+      if (res && res.success && res.url) {
+        targetUrl = res.url
+        if (res.is_edge && res.node_name) {
+          nodeTag = ` (${res.node_name}直连)`
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!targetUrl) {
+    targetUrl = getAbsoluteStreamUrl(item)
+  }
+  if (!targetUrl) {
     ElMessage.warning('该文件暂无可用直链')
     return
   }
-  copyToClipboard(absUrl, `已复制「${getFileName(item)}」直链`)
+  copyToClipboard(targetUrl, `已复制「${getFileName(item)}」直链${nodeTag}`)
 }
 
 function handleBatchCopyStreamUrls() {
@@ -1663,10 +2271,29 @@ function handleExportM3U() {
   ElMessage.success(`已导出包含 ${mediaFiles.length} 项的 M3U 播放列表`)
 }
 
-function openExternalPlayer(playerType: string, item?: TelegramDriveItem | null) {
+async function openExternalPlayer(playerType: string, item?: TelegramDriveItem | null) {
   const target = item || previewItem.value
   if (!target) return
-  const absUrl = getAbsoluteStreamUrl(target)
+  if (isFolder(target)) return
+
+  let absUrl = ''
+  if (selectedEdgeNodeId.value !== 'direct') {
+    try {
+      const res = await resolveEdgeStreamUrl({
+        message_id: target.message_id,
+        hash: target.hash,
+        preferred_node: selectedEdgeNodeId.value,
+      })
+      if (res && res.success && res.url) {
+        absUrl = res.url
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!absUrl) {
+    absUrl = getAbsoluteStreamUrl(target)
+  }
   if (!absUrl) {
     ElMessage.warning('该文件暂无可用直链')
     return
@@ -1744,13 +2371,31 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-function handleDownload(item: TelegramDriveItem) {
+async function handleDownload(item: TelegramDriveItem) {
   if (isFolder(item)) {
     ElMessage.info('请进入媒体组后下载组内文件')
     return
   }
 
-  const url = getDownloadUrl(item)
+  let url = ''
+  if (selectedEdgeNodeId.value !== 'direct') {
+    try {
+      const res = await resolveEdgeStreamUrl({
+        message_id: item.message_id,
+        hash: item.hash,
+        preferred_node: selectedEdgeNodeId.value,
+        download: true,
+      })
+      if (res && res.success && res.url) {
+        url = res.url
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!url) {
+    url = getDownloadUrl(item)
+  }
   if (!url) {
     ElMessage.warning('此文件暂无可用直链')
     return
@@ -1803,27 +2448,40 @@ function handleOpen(item: TelegramDriveItem) {
   handlePreview(item)
 }
 
-function handlePreview(item: TelegramDriveItem) {
-  const url = getStreamUrl(item)
-  if (!url) {
-    ElMessage.warning('此文件暂无可用直链')
+async function handlePreview(item: TelegramDriveItem) {
+  if (isImage(item)) {
+    const url = getStreamUrl(item)
+    if (!url) {
+      ElMessage.warning('此文件暂无可用直链')
+      return
+    }
+    previewType.value = 'image'
+    previewItem.value = item
+    previewUrl.value = url
+    showPreview.value = true
     return
   }
 
-  if (isImage(item)) {
-    previewType.value = 'image'
-  } else if (isVideo(item)) {
-    previewType.value = 'video'
-  } else if (isAudio(item)) {
-    previewType.value = 'audio'
-  } else {
+  if (!isVideo(item) && !isAudio(item)) {
     handleDownload(item)
     return
   }
 
+  previewType.value = isVideo(item) ? 'video' : 'audio'
   previewItem.value = item
-  previewUrl.value = url
+  // 若显式锁定为主控直连，直接赋主控直链；否则先置空，待解析出边缘节点后直连拉流，主控出网流量为0
+  if (selectedEdgeNodeId.value === 'direct') {
+    previewUrl.value = getStreamUrl(item)
+  } else {
+    previewUrl.value = ''
+  }
   showPreview.value = true
+
+  // 异步快速换取 Edge 直链（若命中香港等边缘节点，无缝直连拉流）
+  const directEdgeUrl = await resolvePlayUrl(item)
+  if (showPreview.value && previewItem.value?.message_id === item.message_id) {
+    previewUrl.value = directEdgeUrl || getStreamUrl(item)
+  }
 }
 
 function closePreview() {
@@ -1942,8 +2600,13 @@ function handleKeyup(e: KeyboardEvent) {
 }
 
 onMounted(() => {
+  void fetchBotInfo()
+  window.addEventListener('open-drive-harvester', openHarvesterDialog)
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('keyup', handleKeyup)
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+  }
   refreshAll()
 })
 
@@ -1951,6 +2614,52 @@ onMounted(() => {
 // =========================================================================
 // 私密/受限频道采集与无痕转存状态与控制
 // =========================================================================
+const uploadDrawerRef = ref<InstanceType<typeof DriveUploadDrawer> | null>(null)
+const isDragOver = ref(false)
+let dragCounter = 0
+
+function triggerUpload() {
+  uploadDrawerRef.value?.triggerFileInput()
+}
+
+function handleUploadSuccess() {
+  refreshAll()
+}
+
+function handleDragEnter(e: DragEvent) {
+  e.preventDefault()
+  dragCounter++
+  if (e.dataTransfer?.types?.includes("Files")) {
+    isDragOver.value = true
+  }
+}
+
+function handleDragOver(e: DragEvent) {
+  e.preventDefault()
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = "copy"
+  }
+  isDragOver.value = true
+}
+
+function handleDragLeave(e: DragEvent) {
+  e.preventDefault()
+  dragCounter--
+  if (dragCounter <= 0) {
+    isDragOver.value = false
+    dragCounter = 0
+  }
+}
+
+function handleDrop(e: DragEvent) {
+  e.preventDefault()
+  isDragOver.value = false
+  dragCounter = 0
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+    uploadDrawerRef.value?.addFiles(e.dataTransfer.files)
+  }
+}
+
 const harvesterVisible = ref(false)
 const harvesterInviteLink = ref('')
 const harvesterLinksText = ref('')
@@ -2075,14 +2784,138 @@ async function handleFinishAndRefresh() {
 }
 
 onUnmounted(() => {
+  window.removeEventListener('open-drive-harvester', openHarvesterDialog)
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('keyup', handleKeyup)
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }
   stopThumbPolling()
   stopHarvesterPolling()
 })
 </script>
 
 <style scoped>
+
+/* 边缘加速状态胶囊与选路组件样式 */
+.edge-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #0369a1;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  user-select: none;
+}
+
+.edge-status-pill:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(56, 189, 248, 0.65);
+  box-shadow: 0 4px 14px rgba(56, 189, 248, 0.2);
+  transform: translateY(-1px);
+}
+
+.edge-status-pill.is-direct {
+  border-color: rgba(156, 163, 175, 0.35);
+  color: #6b7280;
+}
+
+.edge-icon {
+  font-size: 14px;
+  color: #0ea5e9;
+}
+
+.edge-routing-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #0284c7;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.edge-routing-badge:hover {
+  background: rgba(56, 189, 248, 0.22);
+  border-color: rgba(56, 189, 248, 0.6);
+}
+
+.edge-routing-badge.is-direct {
+  background: rgba(156, 163, 175, 0.12);
+  border-color: rgba(156, 163, 175, 0.35);
+  color: #4b5563;
+}
+
+.node-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  background: #9ca3af;
+}
+
+.node-status-dot.online {
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+}
+
+.edge-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  min-width: 240px;
+}
+
+.edge-menu-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.edge-menu-latency {
+  font-size: 12px;
+  font-weight: 600;
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.edge-menu-dc {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.edge-menu-tag {
+  font-size: 11px;
+  color: #0ea5e9;
+  background: rgba(14, 165, 233, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.edge-menu-hint {
+  font-size: 11px;
+  color: #9ca3af;
+}
+
 /* 缩略图预热胶囊组件 */
 .thumb-warmup-pill {
   display: inline-flex;
@@ -3043,6 +3876,161 @@ onUnmounted(() => {
 }
 
 /* 空状态卡片 */
+.empty-onboarding-container {
+  width: 100%;
+  max-width: 860px;
+  padding: 32px 28px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(255, 143, 171, 0.3);
+  box-shadow: 0 10px 36px rgba(255, 117, 151, 0.1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.empty-methods-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  width: 100%;
+  margin: 20px 0;
+}
+
+.empty-method-card {
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(255, 143, 171, 0.22);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  text-align: left;
+  transition: all 0.25s ease;
+}
+
+.empty-method-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 117, 151, 0.45);
+  box-shadow: 0 6px 20px rgba(255, 117, 151, 0.12);
+}
+
+.method-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.method-icon-wrap {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.icon-wrap--primary {
+  background: rgba(255, 117, 151, 0.15);
+  color: #ff7597;
+}
+
+.icon-wrap--sky {
+  background: rgba(56, 189, 248, 0.15);
+  color: #0284c7;
+}
+
+.icon-wrap--purple {
+  background: rgba(168, 85, 247, 0.15);
+  color: #9333ea;
+}
+
+.method-card-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: rgba(255, 117, 151, 0.12);
+  color: #ff7597;
+  border: 1px solid rgba(255, 117, 151, 0.25);
+}
+
+.method-card-badge--sky {
+  background: rgba(56, 189, 248, 0.12);
+  color: #0284c7;
+  border-color: rgba(56, 189, 248, 0.25);
+}
+
+.method-card-badge--purple {
+  background: rgba(168, 85, 247, 0.12);
+  color: #9333ea;
+  border-color: rgba(168, 85, 247, 0.25);
+}
+
+.method-card-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: #111827;
+  margin: 0 0 6px 0;
+}
+
+.method-card-desc {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.45;
+  margin: 0 0 14px 0;
+  flex: 1;
+}
+
+.method-card-btn {
+  width: 100%;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+.empty-bottom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 143, 171, 0.2);
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.empty-tip-text {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.empty-bottom-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.guide-text-btn {
+  border-radius: 8px;
+  border-color: rgba(255, 143, 171, 0.35);
+  color: #ff7597;
+}
+
+@media (max-width: 768px) {
+  .empty-methods-grid {
+    grid-template-columns: 1fr;
+  }
+  .empty-bottom-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .empty-bottom-actions {
+    justify-content: flex-end;
+  }
+}
+
 .empty-state-box {
   padding: 60px 20px;
   text-align: center;
@@ -3303,6 +4291,65 @@ onUnmounted(() => {
 
 /* 响应式适配 */
 @media (max-width: 768px) {
+  .stats-row {
+    margin-top: 8px;
+    margin-bottom: 10px;
+  }
+
+  .stat-card {
+    padding: 10px 12px !important;
+    gap: 8px !important;
+    border-radius: 12px !important;
+  }
+
+  .stat-icon-wrapper {
+    width: 36px !important;
+    height: 36px !important;
+    border-radius: 10px !important;
+  }
+
+  .stat-value {
+    font-size: 16px !important;
+  }
+
+  .stat-label {
+    font-size: 11px !important;
+  }
+
+  .toolbar-left .type-select {
+    display: none !important;
+  }
+
+  .grid-view {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+    margin-top: 12px !important;
+  }
+
+  .grid-item {
+    border-radius: 12px !important;
+  }
+
+  .grid-item-title {
+    font-size: 12px !important;
+    line-height: 1.3 !important;
+  }
+
+  .grid-item-info {
+    padding: 8px 10px !important;
+  }
+
+  .quick-filter-pills {
+    overflow-x: auto !important;
+    flex-wrap: nowrap !important;
+    padding-bottom: 6px !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .quick-filter-pills::-webkit-scrollbar {
+    display: none;
+  }
+
   .drive-page {
     padding: 0;
   }
@@ -3357,11 +4404,11 @@ onUnmounted(() => {
   }
 
   .selection-actions {
-    flex-direction: column;
-    align-items: stretch;
+    display: grid !important;
+    grid-template-columns: 1fr 1fr;
     width: 100%;
     margin-left: 0;
-    gap: 6px;
+    gap: 8px;
   }
 
   .selection-actions :deep(.el-button) {
@@ -3744,5 +4791,82 @@ onUnmounted(() => {
   background: linear-gradient(135deg, #ff7597 0%, #38bdf8 100%) !important;
   border: none !important;
   font-weight: 600;
+}
+.upload-btn {
+  background: linear-gradient(135deg, #ff4081 0%, #7c4dff 100%) !important;
+  border: none !important;
+  color: #ffffff !important;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(255, 64, 129, 0.3);
+  transition: all 0.25s ease;
+}
+
+.upload-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(124, 77, 255, 0.4);
+  opacity: 0.95;
+}
+
+.drive-drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.drag-overlay-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 48px 64px;
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 2px dashed #ff4081;
+  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.25), 0 0 30px rgba(255, 64, 129, 0.3);
+}
+
+html.dark .drag-overlay-content {
+  background: rgba(30, 41, 59, 0.95);
+  border-color: #ff4081;
+}
+
+.drag-icon {
+  font-size: 56px;
+  color: #ff4081;
+  animation: bounce-icon 1s infinite alternate ease-in-out;
+}
+
+.drag-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.drag-desc {
+  margin: 0;
+  font-size: 14px;
+  color: #64748b;
+}
+
+@keyframes bounce-icon {
+  from { transform: translateY(0); }
+  to { transform: translateY(-8px); }
+}
+
+.icon-wrap--sakura {
+  background: linear-gradient(135deg, rgba(255, 64, 129, 0.15), rgba(124, 77, 255, 0.15)) !important;
+  color: #ff4081 !important;
+}
+
+.method-card-badge--sakura {
+  background: rgba(255, 64, 129, 0.12) !important;
+  color: #ff4081 !important;
 }
 </style>

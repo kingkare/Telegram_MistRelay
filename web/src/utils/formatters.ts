@@ -106,3 +106,5 @@ export function getStatusTagType(status?: string): 'success' | 'warning' | 'dang
   }
   return typeMap[status || ''] || 'info'
 }
+
+export const formatBytes = formatSize

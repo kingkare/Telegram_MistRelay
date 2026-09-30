@@ -243,7 +243,7 @@ test('supports stream link copy, M3U export, shift selection, and view preferenc
 test('private and restricted channel harvester modal and workflow', async ({ page }) => {
   await mockAdminDrive(page)
 
-  await page.route('**/api/telegram/botfather/accounts', async route => {
+  await page.route('**/api/telegram/botfather/accounts**', async route => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',

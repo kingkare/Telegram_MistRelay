@@ -26,6 +26,11 @@ export type WSMessageType =
   | 'upload_update' 
   | 'cleanup_update' 
   | 'statistics_update'
+  | 'edge_node_update'
+  | 'edge_nodes_update'
+  | 'edge_deploy_log'
+  | 'edge_node_deleted'
+  | 'edge_token_used'
   | 'pong'
   | 'error'
 
@@ -285,6 +290,14 @@ class WebSocketClient {
       clearInterval(this.pingInterval)
       this.pingInterval = null
     }
+  }
+
+  send(data: any): boolean {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(typeof data === 'string' ? data : JSON.stringify(data))
+      return true
+    }
+    return false
   }
 
   isConnected(): boolean {
