@@ -13,11 +13,18 @@ def load_server_module():
     web = types.ModuleType("aiohttp.web")
 
     class StreamResponse:
-        def __init__(self, *, status=200, body=None, text=None, headers=None):
+        def __init__(self, *, status=200, body=None, text=None, headers=None, content_type=None, **kwargs):
+            self.content_type = content_type or "text/plain"
             self.status = status
-            self.body = body
-            self.text = text
+            self.text = text if text is not None else (body if isinstance(body, str) else None)
+            self.body = body if body is not None else text
             self.headers = headers or {}
+
+        async def prepare(self, request):
+            return self
+
+        async def write(self, data):
+            pass
 
     class Response(StreamResponse):
         pass
@@ -50,13 +57,15 @@ def load_server_module():
     web.Application = object
     web.RouteTableDef = RouteTableDef
     web.middleware = lambda function: function
-    def _mock_json_resp(body, status=200):
+    def _mock_json_resp(body, status=200, headers=None, **kwargs):
         import json
         text_val = json.dumps(body, ensure_ascii=False) if isinstance(body, (dict, list)) else (str(body) if body is not None else None)
-        return Response(status=status, body=body, text=text_val)
+        return Response(status=status, body=body, text=text_val, headers=headers)
 
     web.json_response = _mock_json_resp
     aiohttp_module.web = web
+    aiohttp_module.ClientSession = SimpleNamespace
+    aiohttp_module.ClientTimeout = SimpleNamespace
     http_exceptions = types.ModuleType("aiohttp.http_exceptions")
     http_exceptions.BadStatusLine = HTTPException
     http_exceptions.BadHttpMessage = HTTPException

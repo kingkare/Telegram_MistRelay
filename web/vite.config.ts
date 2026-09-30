@@ -14,10 +14,9 @@ export default defineConfig({
     host: '0.0.0.0', // 监听所有网络接口，允许外部访问
     port: 5173,
     allowedHosts: [
-      'oracle-us-1.jiuyue520.com',
-      '23.94.9.54',
       'localhost',
-      '.jiuyue520.com' // 允许所有 jiuyue520.com 的子域名
+      '127.0.0.1',
+      '.local'
     ],
     // HMR配置：增加超时时间，避免热重载超时
     hmr: {
@@ -59,6 +58,9 @@ export default defineConfig({
         manualChunks: {
           'vue-vendor': ['vue', 'vue-router', 'pinia'],
           'ui-vendor': ['element-plus'],
+          'icons-vendor': ['@element-plus/icons-vue'],
+          'echarts-vendor': ['echarts'],
+          'player-vendor': ['video.js'],
           'utils-vendor': ['@vueuse/core', 'axios']
         }
       }

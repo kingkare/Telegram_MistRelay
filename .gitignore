@@ -144,3 +144,7 @@ Thumbs.db
 .DS_Store
 cache/
 rclone/
+
+# 测试产物与截图缓存
+test-results/
+mobile-screenshots/
