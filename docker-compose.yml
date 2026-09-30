@@ -35,6 +35,26 @@ services:
         target: /app/web/dist
         bind:
           create_host_path: false
+      - type: bind
+        source: ./vps_deployer.py
+        target: /app/vps_deployer.py
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./edge_node_manager.py
+        target: /app/edge_node_manager.py
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./edge_worker
+        target: /app/edge_worker
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./WebStreamer
+        target: /app/WebStreamer
+        bind:
+          create_host_path: false
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,mode=1777,size=64m
       - /run:rw,noexec,nosuid,nodev,mode=0755,size=16m

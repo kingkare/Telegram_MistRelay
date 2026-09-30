@@ -723,7 +723,7 @@ async def run_edge_relay_stream_benchmark(
     sample_mb: float = 25.0,
     chat_id: int = 0,
     message_id: int = 0,
-    timeout: float = 50.0,
+    timeout: float = 60.0,
 ) -> Dict[str, Any]:
     """
     发起端到端真实全双工中继流播压测：
@@ -823,9 +823,16 @@ async def run_edge_relay_stream_benchmark(
                         tg_spd = float(lp_data.get("tg_pull_speed_mb_s") or lp_data.get("speed_mb_s") or 0.0)
 
                         # 若本地回环受单核/NAT单进程 TLS 争抢影响测速偏低，结合纯上游多Bot直测吞吐校验真实流水线供给
-                        if tg_spd < up_bw * 0.60:
+                        if tg_spd < up_bw * 0.80:
                             try:
-                                tg_direct = await run_edge_tg_speed_benchmark(node_id, sample_mb=sample_mb, timeout=timeout)
+                                tg_direct = await run_edge_tg_speed_benchmark(
+                                    node_id,
+                                    sample_mb=sample_mb,
+                                    chat_id=chat_id,
+                                    message_id=message_id,
+                                    channel_username=channel_username,
+                                    timeout=timeout,
+                                )
                                 if tg_direct.get("success"):
                                     direct_spd = float(tg_direct.get("tg_pull_speed_mb_s") or tg_direct.get("speed_mb_s") or 0.0)
                                     if direct_spd > tg_spd:
@@ -1280,6 +1287,9 @@ async def run_edge_full_benchmark(node_id: int, sample_mb: float = 10.0) -> Dict
     fastest_dc_id = fastest_dc.get("id") if fastest_dc else (node.get("target_dc_id") or 5)
     fastest_rtt = float(fastest_dc.get("avg_rtt_ms") or 0.0) if fastest_dc else 0.0
 
+    # 基于实测 5 大 DC 往返延迟矩阵，动态对齐到最低延迟最优 DC
+    target_dc_id = fastest_dc_id if fastest_dc_id in (1, 2, 3, 4, 5) else (node.get("target_dc_id") or 5)
+
     # Phase 2: 基于木桶短板有效带宽与 DC 往返延迟动态匹配算力
     auto_matched_bots = edge_node_manager.calculate_recommended_bots(
         down_speed_mb_s=down_speed_mb_s,
@@ -1306,7 +1316,7 @@ async def run_edge_full_benchmark(node_id: int, sample_mb: float = 10.0) -> Dict
     rated_capacity_mb_s = round(matched_bots * rated_per_bot, 1)
 
     node_update = {
-        "target_dc_id": fastest_dc_id,
+        "target_dc_id": target_dc_id,
         "target_bot_count": matched_bots,
     }
     fresh_bench = dict(node.get("benchmark_data") or {})
@@ -1336,10 +1346,10 @@ async def run_edge_full_benchmark(node_id: int, sample_mb: float = 10.0) -> Dict
 
     # Phase 3: 端到端真实全双工中继流播压测（边拉边推测量真实体感流速）
     sample_to_use = max(sample_mb, 25.0)
-    relay_res = await run_edge_relay_stream_benchmark(node_id, sample_mb=sample_to_use, timeout=50.0)
+    relay_res = await run_edge_relay_stream_benchmark(node_id, sample_mb=sample_to_use, timeout=60.0)
     if not relay_res.get("success"):
         # 若中继压测失败，保底回退到直接 TG 拉流测速
-        relay_res = await run_edge_tg_speed_benchmark(node_id, sample_mb=sample_to_use, timeout=45.0)
+        relay_res = await run_edge_tg_speed_benchmark(node_id, sample_mb=sample_to_use, timeout=50.0)
 
     relay_speed = float(relay_res.get("relay_speed_mb_s") or relay_res.get("speed_mb_s") or 0.0)
     tg_pull_speed = float(relay_res.get("tg_pull_speed_mb_s") or relay_speed)

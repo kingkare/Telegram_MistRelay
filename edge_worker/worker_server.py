@@ -45,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("edge_worker")
 
-VERSION = "1.7.0"
+VERSION = "1.7.3"
 MEDIA_SESSIONS_PER_BOT = 3
 
 MEDIA_SOCKET_RCVBUF_SIZE = 4 * 1024 * 1024
@@ -384,12 +384,13 @@ class SystemHardwareGuardrail:
         else:
             return int(min(256 * 1024 * 1024, max(24 * 1024 * 1024, self._free_mb * 0.45 * 1024 * 1024)))
 
-    def clamp_window(self, requested_window: int, chunk_size: int = 524288) -> int:
-        max_chunks_by_mem = max(2, self.max_queue_bytes // max(1, chunk_size))
+    def clamp_window(self, requested_window: int, chunk_size: int = 524288, is_download: bool = False) -> int:
+        mem_limit_bytes = min(48 * 1024 * 1024, max(8 * 1024 * 1024, int(self._free_mb * 0.35 * 1024 * 1024))) if is_download else self.max_queue_bytes
+        max_chunks_by_mem = max(2, mem_limit_bytes // max(1, chunk_size))
         if self.tier == "ULTRA_LOW_NAT":
-            upper = min(12, max_chunks_by_mem)
+            upper = min(48 if is_download else 12, max_chunks_by_mem)
         elif self.tier == "BUDGET_VPS":
-            upper = min(32, max_chunks_by_mem)
+            upper = min(64 if is_download else 32, max_chunks_by_mem)
         else:
             upper = min(96, max_chunks_by_mem)
         return max(2, min(requested_window, upper))
@@ -516,39 +517,47 @@ class PIDWindowController:
             bdp_target = path_tracker.get_target_bdp_chunks(chunk_size=chunk_bytes, active_lanes=max(2, self.current_window // 2))
             self.current_window = int(0.75 * self.current_window + 0.25 * bdp_target)
 
-        self.current_window = self.hw_guard.clamp_window(self.current_window, chunk_size=chunk_bytes)
+        self.current_window = self.hw_guard.clamp_window(self.current_window, chunk_size=chunk_bytes, is_download=self.is_download)
 
 
 class MultiBotLaneMatrix:
     """
     多 Bot 阵列高维会话复用矩阵
-    将集群内 N 个可用 Bot 与每个 Bot 的 M 个独立长连接映射为 (N * M) 条无竞态并行管道。
+    按可用 Bot 数量自适应决定每个 Bot 的长连接数:
+    - 针对小内存 NAT VPS 与普通 VPS，自适应维持每个 Bot 2 条长连接 (slot=0, slot=1)；
+    - 动态持有 usable_sources 引用，在后台动态扩容探测完成时自动平滑吸纳新 Bot，绝不被静态浅拷贝锁死为单 Bot！
     """
-    def __init__(self, usable_sources: List[Any], sessions_per_bot: int = 2):
-        self.usable_sources = usable_sources
-        self.sessions_per_bot = sessions_per_bot
+    def __init__(self, usable_sources: List[Any], sessions_per_bot: Optional[int] = None):
+        self._usable_sources = usable_sources
+        self.sessions_per_bot = sessions_per_bot or 2
+
+    @property
+    def usable_sources(self) -> List[Any]:
+        return (self._usable_sources or [])[:36]
 
     @property
     def total_lanes(self) -> int:
         return max(1, len(self.usable_sources) * self.sessions_per_bot)
 
     def get_lane(self, chunk_idx: int) -> Tuple[Any, int]:
-        n_src = max(1, len(self.usable_sources))
+        srcs = self.usable_sources
+        n_src = max(1, len(srcs))
         lane_idx = chunk_idx % self.total_lanes
-        src_ctx = self.usable_sources[lane_idx % n_src] if self.usable_sources else None
+        src_ctx = srcs[lane_idx % n_src] if srcs else None
         slot = (lane_idx // n_src) % self.sessions_per_bot
         return src_ctx, slot
 
     def get_backup_lane(self, chunk_idx: int) -> Tuple[Any, int]:
-        n_src = max(1, len(self.usable_sources))
+        srcs = self.usable_sources
+        n_src = max(1, len(srcs))
         if n_src <= 1:
             lane_idx = (chunk_idx + 1) % self.total_lanes
-            src_ctx = self.usable_sources[0] if self.usable_sources else None
+            src_ctx = srcs[0] if srcs else None
             slot = lane_idx % self.sessions_per_bot
             return src_ctx, slot
-        lane_idx = (chunk_idx + 1 + (chunk_idx // n_src)) % self.total_lanes
-        src_ctx = self.usable_sources[lane_idx % n_src] if self.usable_sources else None
-        slot = (lane_idx // n_src) % self.sessions_per_bot
+        alt_bot_idx = (chunk_idx + 1) % n_src
+        src_ctx = srcs[alt_bot_idx] if srcs else None
+        slot = (chunk_idx // n_src) % self.sessions_per_bot
         return src_ctx, slot
 
 
@@ -860,6 +869,7 @@ class EdgeStreamingWorker:
             me = await self.tg_client.get_me()
             self.bot_username = (getattr(me, "username", "") or self.bot_username or "").lstrip("@")
             self.tg_client.username = self.bot_username
+            self.tg_client._bot_token = self.bot_token
             self.home_dc = getattr(me, "dc_id", None) or self.target_dc or 5
             logger.info(f"Telegram MTProto Primary Client started: @{self.bot_username} (DC{self.home_dc}, auth={'session_string' if self.primary_session_string else 'token'})")
 
@@ -892,24 +902,28 @@ class EdgeStreamingWorker:
                     logger.warning(f"Failed to start master fallback client: {me}")
 
             # 启动同 DC 额外 Worker Bot 阵列（支持依据实测物理宽带动态扩容至最多 100 个 Bot，并发拉起）
+            token_to_session = {}
+            if getattr(self, "bot_session_strings", None):
+                for i, t in enumerate(self.bot_tokens):
+                    if i < len(self.bot_session_strings):
+                        token_to_session[t] = self.bot_session_strings[i]
+
             extra_tokens = [t for t in self.bot_tokens if t and t != self.bot_token][:99]
             if extra_tokens:
-                start_sem = asyncio.Semaphore(12)
+                start_sem = asyncio.Semaphore(16)
                 async def _start_extra(idx, tok):
                     async with start_sem:
                         try:
                             try:
                                 import psutil
                                 free_mb = psutil.virtual_memory().available / (1024 * 1024)
-                                if free_mb < 120.0:
-                                    logger.warning(f"系统剩余可用内存仅 {free_mb:.1f} MB (< 120MB)，已停止启动更多 Bot 客户端以防止 OOM 崩溃")
+                                if free_mb < 60.0:
+                                    logger.warning(f"系统剩余可用内存仅 {free_mb:.1f} MB (< 60MB)，已停止启动更多 Bot 客户端以防止 OOM 崩溃")
                                     return None
                             except Exception:
                                 pass
                             pfx = tok.split(":", 1)[0]
-                            s_str = ""
-                            if getattr(self, "bot_session_strings", None) and idx < len(self.bot_session_strings):
-                                s_str = self.bot_session_strings[idx]
+                            s_str = token_to_session.get(tok, "")
 
                             w_kwargs = {"in_memory": True, "no_updates": True}
                             if s_str:
@@ -1053,25 +1067,24 @@ class EdgeStreamingWorker:
             msg_obj = None
             last_err = None
             clean_uname = str(channel_username or "").strip().lstrip("@")
+            target_chat = f"@{clean_uname}" if (clean_uname and not clean_uname.startswith("channel_")) else chat_id
 
-            # 1. 优先尝试直接读取消息（零等待直取内存/本地 Peer 缓存）
+            msg_obj = None
+            last_err = None
             try:
-                msg_obj = await client.get_messages(chat_id, message_id)
-                last_err = None
+                msg_obj = await client.get_messages(target_chat, message_id)
             except Exception as e:
                 last_err = e
-                # 若初次读取失败且尚未尝试过用户名预热
-                if clean_uname and not clean_uname.startswith("channel_") and msg_obj is None:
+                if target_chat != chat_id:
                     try:
-                        await client.get_chat(f"@{clean_uname}")
                         msg_obj = await client.get_messages(chat_id, message_id)
                         last_err = None
                     except Exception as e2:
                         last_err = e2
                 if msg_obj is None:
                     try:
-                        await client.get_chat(chat_id)
-                        msg_obj = await client.get_messages(chat_id, message_id)
+                        await client.get_chat(target_chat)
+                        msg_obj = await client.get_messages(target_chat, message_id)
                         last_err = None
                     except Exception as e3:
                         last_err = e3
@@ -1170,11 +1183,22 @@ class EdgeStreamingWorker:
                 )
                 self._background_probe_tasks.add(bg_task)
                 bg_task.add_done_callback(lambda t: self._background_probe_tasks.discard(t))
-                if fast_start or len(usable) >= 16:
-                    return usable
+                if fast_start and len(usable) >= 1:
+                    pass
                 else:
-                    await bg_task
-                    return usable
+                    try:
+                        await asyncio.wait_for(bg_task, timeout=8.0)
+                    except Exception:
+                        pass
+                if usable and len(usable) > 1:
+                    req_dc = target_dc
+                    def _dc_affinity(u):
+                        cli, f_id, _, _ = u
+                        b_sess = getattr(cli, "session", None)
+                        cli_dc = getattr(b_sess, "dc_id", None) or getattr(cli, "_home_dc", None) or self.home_dc or 5
+                        return 0 if cli_dc == req_dc else 1
+                    usable.sort(key=_dc_affinity)
+                return usable
 
         # 兜底：若初始未命中任何 Bot，执行轻量限时并发探测
         if not usable:
@@ -1208,20 +1232,20 @@ class EdgeStreamingWorker:
         message_id: int,
         channel_username: str = "",
     ):
-        """后台异步预热并在可用时平滑扩展 Bot 阵列池 (上限 32，防止洪泛)"""
-        probe_sem = asyncio.Semaphore(16)
-        active_candidates = candidate_bots[:32]
+        """后台异步预热并在可用时平滑扩展 Bot 阵列池 (上限 36，防止洪泛)"""
+        probe_sem = asyncio.Semaphore(48)
+        active_candidates = candidate_bots[:64]
         async def _probe(b):
             async with probe_sem:
                 try:
                     ctx = await asyncio.wait_for(
                         self._get_client_media_context(b, chat_id, message_id, channel_username),
-                        timeout=1.5,
+                        timeout=6.0,
                     )
                     if ctx is not None and not any(id(u[0]) == id(ctx[0]) for u in target_usable_list):
                         target_usable_list.append(ctx)
                 except Exception:
-                    self.unusable_bots_cache.add((id(b), int(chat_id)))
+                    pass
         await asyncio.gather(*[_probe(b) for b in active_candidates], return_exceptions=True)
 
     @staticmethod
@@ -1440,9 +1464,10 @@ class EdgeStreamingWorker:
                     self._media_sessions.pop((id(cli), int(target_dc), int(slot_idx)), None)
                 if "FILE_REFERENCE" in err_str:
                     self.bot_ctx_cache.pop((id(cli), int(chat_id), int(message_id)), None)
-                if "AUTH_KEY_UNREGISTERED" in err_str or "AUTH_BYTES_INVALID" in err_str:
+                if "AUTH_KEY_UNREGISTERED" in err_str or "AUTH_BYTES_INVALID" in err_str or "ACCESS_TOKEN" in err_str:
                     self._foreign_auth_keys.pop((id(cli), int(target_dc)), None)
                     self._media_sessions.pop((id(cli), int(target_dc), int(slot_idx)), None)
+                    self.unusable_bots_cache.add((id(cli), int(chat_id)))
                 if attempt >= 2:
                     raise
                 await asyncio.sleep(0.15 * (attempt + 1))
@@ -1657,21 +1682,21 @@ class EdgeStreamingWorker:
                     base_cli, file_id, _, msg = usable_sources[0]
                     target_dc = getattr(file_id, "dc_id", target_dc)
                     num_src = len(usable_sources)
-                    chunk_size = 1024 * 1024 if (target_bytes >= 8 * 1024 * 1024 and num_src <= 12) else 512 * 1024
+                    chunk_size = 1024 * 1024 if target_bytes >= 8 * 1024 * 1024 else 512 * 1024
                     chunks_needed = max(1, math.ceil(target_bytes / chunk_size))
 
-                    lane_matrix = MultiBotLaneMatrix(usable_sources, sessions_per_bot=MEDIA_SESSIONS_PER_BOT)
+                    lane_matrix = MultiBotLaneMatrix(usable_sources)
                     total_lanes = lane_matrix.total_lanes
 
                     # 1. 精确预热本次分片传输所需使用的槽位 (按需预热，绝不大水漫灌)
-                    lanes_needed = min(chunks_needed, total_lanes, 32)
+                    lanes_needed = min(chunks_needed, total_lanes)
                     warm_slots = {}
                     for l_i in range(lanes_needed):
                         s_c, sl = lane_matrix.get_lane(l_i)
                         if s_c:
                             warm_slots[(id(s_c[0]), sl)] = (s_c, sl)
 
-                    warm_sem = asyncio.Semaphore(min(16, max(4, len(warm_slots))))
+                    warm_sem = asyncio.Semaphore(min(24, max(4, len(warm_slots))))
                     async def warm_one_slot(s_ctx, slot_i):
                         cli, f_id, _, _ = s_ctx
                         t_dc = getattr(f_id, "dc_id", target_dc)
@@ -1687,7 +1712,7 @@ class EdgeStreamingWorker:
                     t0 = time.perf_counter()
                     t_first_byte = 0.0
 
-                    sem = asyncio.Semaphore(min(chunks_needed, max(24, total_lanes)))
+                    sem = asyncio.Semaphore(min(chunks_needed, max(36, total_lanes)))
                     async def fetch_one(idx):
                         nonlocal ttfb_ms, buffer_ms, t_first_byte
                         async with sem:
@@ -1763,18 +1788,22 @@ class EdgeStreamingWorker:
             evaluation = f"单链跑满宿主机物理上行 ({single_speed} MB/s / 上行 {round(egress_cap, 1)} MB/s，达标率 {round(ratio*100, 1)}%)"
             grade = "S+"
             pareto_opt = True
+            bottleneck_diag = f"🟢 单链跑满宿主机物理上行 (实测 {single_speed} MB/s / 物理上行 {round(egress_cap, 1)} MB/s，达标率 {round(ratio*100, 1)}%，误差 ≤ 20%)"
         elif ratio >= 0.60 or speed_mb_s >= 20.0:
             evaluation = f"接近物理上行极速 ({single_speed} MB/s / 上行 {round(egress_cap, 1)} MB/s)"
             grade = "A"
             pareto_opt = True
+            bottleneck_diag = f"🟢 接近宿主机物理上行极速 (实测 {single_speed} MB/s / 物理上行 {round(egress_cap, 1)} MB/s，达标率 {round(ratio*100, 1)}%)"
         elif speed_mb_s >= 4.0:
             evaluation = f"1080P 高清流畅播放 ({speed_mb_s} MB/s)"
             grade = "B"
             pareto_opt = False
+            bottleneck_diag = f"🟡 Telegram 上游 Bot 供给受限 (TG拉流 {round(speed_mb_s, 1)} MB/s < 物理上行 {round(egress_cap, 1)} MB/s)"
         else:
             evaluation = f"速度偏慢，建议检查网络 ({speed_mb_s} MB/s)"
             grade = "C"
             pareto_opt = False
+            bottleneck_diag = f"🔴 速度偏慢，建议检查网络与上游链路 ({speed_mb_s} MB/s)" 
 
         usable_cnt = len(usable_sources) if (not self.mock_stream and 'usable_sources' in locals() and usable_sources) else len(self.worker_clients)
         per_bot_speed = round(speed_mb_s / max(1, usable_cnt), 2)
@@ -1801,6 +1830,7 @@ class EdgeStreamingWorker:
             "total_bots_in_array": len(self.worker_clients),
             "hardware_tier": self._hw_guard.tier,
             "per_bot_speed_mb_s": per_bot_speed,
+            "bottleneck_diagnosis": bottleneck_diag,
             "pareto_optimal": pareto_opt,
             "evaluation": evaluation,
             "grade": grade,
@@ -1815,6 +1845,15 @@ class EdgeStreamingWorker:
         """
         if self.mock_stream:
             return
+
+        if self.tg_client is not None:
+            cur_tok = getattr(self.tg_client, "_bot_token", None) or ""
+            if (self.bot_token and cur_tok and cur_tok != self.bot_token) or not getattr(self.tg_client, "is_connected", False):
+                try:
+                    await self.tg_client.stop()
+                except Exception:
+                    pass
+                self.tg_client = None
 
         if self.tg_client is None:
             await self.start_tg_client()
@@ -1847,6 +1886,12 @@ class EdgeStreamingWorker:
                     pass
                 existing_workers_by_token.pop(tok, None)
 
+        token_to_session = {}
+        if getattr(self, "bot_session_strings", None):
+            for i, t in enumerate(self.bot_tokens):
+                if i < len(self.bot_session_strings):
+                    token_to_session[t] = self.bot_session_strings[i]
+
         new_workers = []
         tokens_to_start = []
         for idx, tok in enumerate(extra_tokens, start=1):
@@ -1856,22 +1901,20 @@ class EdgeStreamingWorker:
                 tokens_to_start.append((idx, tok))
 
         if tokens_to_start:
-            sem = asyncio.Semaphore(12)
+            sem = asyncio.Semaphore(16)
             async def start_one(idx, tok):
                 async with sem:
                     try:
                         try:
                             import psutil
                             free_mb = psutil.virtual_memory().available / (1024 * 1024)
-                            if free_mb < 120.0:
-                                logger.warning(f"系统剩余可用内存仅 {free_mb:.1f} MB (< 120MB)，已停止启动更多 Bot 客户端以防止 OOM 崩溃")
+                            if free_mb < 60.0:
+                                logger.warning(f"系统剩余可用内存仅 {free_mb:.1f} MB (< 60MB)，已停止启动更多 Bot 客户端以防止 OOM 崩溃")
                                 return None
                         except Exception:
                             pass
                         pfx = tok.split(":", 1)[0]
-                        s_str = ""
-                        if getattr(self, "bot_session_strings", None) and idx < len(self.bot_session_strings):
-                            s_str = self.bot_session_strings[idx]
+                        s_str = token_to_session.get(tok, "")
 
                         w_kwargs = {"in_memory": True, "no_updates": True}
                         if s_str:
@@ -2010,7 +2053,7 @@ class EdgeStreamingWorker:
                         if resp.status == 200:
                             rtt_samples.append((time.perf_counter() - t_req) * 1000)
                             while True:
-                                chunk = await resp.content.read(65536)
+                                chunk = await resp.content.read(262144)
                                 if not chunk:
                                     break
                                 bytes_downloaded += len(chunk)
@@ -2265,14 +2308,14 @@ class EdgeStreamingWorker:
         try:
             pre_sources = await self._resolve_media_source(chat_id, message_id, channel_username=channel_username, fast_start=False)
             if pre_sources:
-                c_needed = max(1, math.ceil(target_bytes / (512 * 1024)))
-                lm = MultiBotLaneMatrix(pre_sources, sessions_per_bot=MEDIA_SESSIONS_PER_BOT)
+                c_needed = max(1, math.ceil(target_bytes / (1024 * 1024)))
+                lm = MultiBotLaneMatrix(pre_sources)
                 w_slots = {}
-                for li in range(min(c_needed, lm.total_lanes, 24)):
+                for li in range(min(c_needed, lm.total_lanes)):
                     sc, sl = lm.get_lane(li)
                     if sc:
                         w_slots[(id(sc[0]), sl)] = (sc, sl)
-                w_sem = asyncio.Semaphore(12)
+                w_sem = asyncio.Semaphore(24)
                 async def _w(sc, sl):
                     cli, fid, _, _ = sc
                     tdc = getattr(fid, "dc_id", target_dc)
@@ -2294,13 +2337,13 @@ class EdgeStreamingWorker:
 
         conn = TCPConnector(ssl=False)
         try:
-            async with ClientSession(connector=conn, timeout=ClientTimeout(total=50)) as session:
+            async with ClientSession(connector=conn, timeout=ClientTimeout(total=60)) as session:
                 async with session.get(url, headers=headers) as resp:
                     if resp.status not in (200, 206):
                         return await self.handle_benchmark_tg_speed(request, parsed_body=body)
 
                     while True:
-                        chunk = await resp.content.read(65536)
+                        chunk = await resp.content.read(262144)
                         if not chunk:
                             break
                         now = time.perf_counter()
@@ -2740,7 +2783,7 @@ class EdgeStreamingWorker:
                 return web.json_response({"success": False, "error": "Edge TG client not ready"}, status=502)
 
             is_dl = (request.query.get("download") == "1")
-            usable_sources = await self._resolve_media_source(chat_id, message_id, channel_username=channel_username, fast_start=(not is_dl))
+            usable_sources = await self._resolve_media_source(chat_id, message_id, channel_username=channel_username, fast_start=not is_dl)
             if not usable_sources:
                 return web.json_response({"success": False, "error": "Media not found in channel or not accessible"}, status=404)
 
@@ -2878,7 +2921,7 @@ class EdgeStreamingWorker:
                 mode = "bulk_download" if is_download else "streaming"
 
                 # 自适应分片粒度：默认 512KB 分片最大化激发数十个 Bot 阵列横向并发；超大范围拉取切入 1MB 分片
-                if is_download and req_length >= 64 * 1024 * 1024:
+                if is_download and req_length >= 16 * 1024 * 1024:
                     chunk_size = 1024 * 1024
                 else:
                     chunk_size = 512 * 1024
@@ -2896,7 +2939,7 @@ class EdgeStreamingWorker:
                 path_tracker = self._path_trackers.setdefault(target_dc, NetworkPathTracker(dc_id=target_dc))
                 pid_controller = PIDWindowController(is_download=is_download, hw_guard=self._hw_guard, egress_bw_mb_s=self.get_physical_egress_mb_s())
 
-                lane_matrix = MultiBotLaneMatrix(usable_sources, sessions_per_bot=MEDIA_SESSIONS_PER_BOT)
+                lane_matrix = MultiBotLaneMatrix(usable_sources)
                 prefetch_tasks = {}
                 prefetch_start_times = {}
                 next_prefetch_idx = 0
@@ -3027,44 +3070,63 @@ class EdgeStreamingWorker:
                         )
 
                     chunk = b""
-                    if task.done():
-                        try:
-                            chunk = task.result()
-                        except Exception:
-                            chunk = b""
+                    if is_download:
+                        # 大文件极速下载 / 测速模式：全流水线并行预取，杜绝激进超时打断底层 MTProto 连接
+                        if task.done():
+                            try:
+                                chunk = task.result()
+                            except Exception:
+                                chunk = b""
+                        else:
+                            try:
+                                chunk = await asyncio.wait_for(task, timeout=12.0)
+                            except Exception:
+                                chunk = b""
+                        if not chunk:
+                            try:
+                                chunk = await self._fetch_media_part(chat_id, message_id, channel_username, p_off, chunk_size, client_ctx=b_src, slot_idx=b_slot)
+                            except Exception:
+                                chunk = b""
                     else:
-                        t_hedge = path_tracker.get_hedge_deadline(is_first_chunk=False)
-                        try:
-                            chunk = await asyncio.wait_for(asyncio.shield(task), timeout=t_hedge)
-                        except (asyncio.TimeoutError, Exception):
-                            hedged_requests += 1
-                            h_task = asyncio.create_task(
-                                self._fetch_media_part(chat_id, message_id, channel_username, p_off, chunk_size, client_ctx=b_src, slot_idx=b_slot)
-                            )
-                            done, pending = await asyncio.wait([task, h_task], return_when=asyncio.FIRST_COMPLETED, timeout=10.0)
-                            for d in done:
-                                try:
-                                    res = d.result()
-                                    if res:
-                                        chunk = res
-                                        if d is h_task:
-                                            hedged_wins += 1
-                                        break
-                                except Exception:
-                                    pass
-                            if not chunk and pending:
-                                done2, pending2 = await asyncio.wait(pending, timeout=6.0, return_when=asyncio.FIRST_COMPLETED)
-                                for d in done2:
+                        # 流媒体播放模式：首帧秒开与低延迟自适应对冲
+                        if task.done():
+                            try:
+                                chunk = task.result()
+                            except Exception:
+                                chunk = b""
+                        else:
+                            t_hedge = path_tracker.get_hedge_deadline(is_first_chunk=False)
+                            try:
+                                chunk = await asyncio.wait_for(asyncio.shield(task), timeout=t_hedge)
+                            except (asyncio.TimeoutError, Exception):
+                                hedged_requests += 1
+                                h_task = asyncio.create_task(
+                                    self._fetch_media_part(chat_id, message_id, channel_username, p_off, chunk_size, client_ctx=b_src, slot_idx=b_slot)
+                                )
+                                done, pending = await asyncio.wait([task, h_task], return_when=asyncio.FIRST_COMPLETED, timeout=10.0)
+                                for d in done:
                                     try:
                                         res = d.result()
                                         if res:
                                             chunk = res
+                                            if d is h_task:
+                                                hedged_wins += 1
                                             break
                                     except Exception:
                                         pass
-                            for p in pending:
-                                if not p.done():
-                                    p.cancel()
+                                if not chunk and pending:
+                                    done2, pending2 = await asyncio.wait(pending, timeout=6.0, return_when=asyncio.FIRST_COMPLETED)
+                                    for d in done2:
+                                        try:
+                                            res = d.result()
+                                            if res:
+                                                chunk = res
+                                                break
+                                        except Exception:
+                                            pass
+                                for p in pending:
+                                    if not p.done():
+                                        p.cancel()
 
                     if not chunk:
                         try:
