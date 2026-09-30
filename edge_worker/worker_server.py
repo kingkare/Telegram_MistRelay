@@ -439,25 +439,37 @@ class NetworkPathTracker:
             return max(0.045, min(0.35, self.rtt_min * 1.15))
         return max(0.080, min(1.2, self.srtt + 1.25 * self.rttvar))
 
-    def get_target_bdp_chunks(self, chunk_size: int = 524288) -> int:
-        bw_bytes_sec = self.estimated_speed_mb_s * 1024 * 1024
-        bdp_bytes = bw_bytes_sec * max(0.02, self.rtt_min)
+    def get_target_bdp_chunks(self, chunk_size: int = 524288, active_lanes: int = 1) -> int:
+        effective_lanes = max(1, active_lanes)
+        bw_bytes_sec = max(self.estimated_speed_mb_s * effective_lanes, 10.0) * 1024 * 1024
+        bdp_bytes = bw_bytes_sec * max(0.04, self.srtt)
         chunks = math.ceil(bdp_bytes / max(1, chunk_size))
         return max(2, chunks)
 
 
 class PIDWindowController:
     """
-    闭环控制理论 PID 动态滑动窗口调速器 (BBR 风格背压感知)
+    闭环控制理论 PID 动态滑动窗口调速器 (BBR 风格背压感知 + 单链多径虚拟条带聚合)
     根据下游客户端写入耗时 (tau_write) 实时辨识网络背压与缓冲拥塞:
-    - 客户端播放卡顿/暂停/缓冲已满 (tau_write 显著增加) -> 乘性减窗 (Multiplicative Decrease) 截断预取，杜绝内存堆积
-    - 客户端线速拉取 (tau_write 极低且队列通畅) -> 加性增窗 (Additive Increase) 扩充并发，跑满全集群物理带宽
+    - 下载模式 (is_download=True): 解除公网 RTT 伪背压误判，全开多 Bot 并发窗口 (16~32 块)，让单连接直接跑满多连接带宽
+    - 流播模式 (is_download=False): 首帧秒开后维持平稳预取步长，客户端暂停/卡顿时立即乘性减窗防内存堆积
     """
     def __init__(self, is_download: bool, hw_guard: SystemHardwareGuardrail):
         self.is_download = is_download
         self.hw_guard = hw_guard
-        self.min_window = 2 if not is_download else 4
-        self.current_window = 3 if not is_download else 6
+        if self.is_download:
+            if self.hw_guard.tier == "ULTRA_LOW_NAT":
+                self.min_window = 4
+                self.current_window = 8
+            elif self.hw_guard.tier == "BUDGET_VPS":
+                self.min_window = 8
+                self.current_window = 18
+            else:
+                self.min_window = 12
+                self.current_window = 32
+        else:
+            self.min_window = 2
+            self.current_window = 4
         self.kp = 0.6
         self.ki = 0.1
         self.kd = 0.05
@@ -466,24 +478,38 @@ class PIDWindowController:
         self.backpressure_detected = False
 
     def on_downstream_feedback(self, write_dur_s: float, chunk_bytes: int, path_tracker: NetworkPathTracker):
-        target_write_time = 0.010
-        error = target_write_time - write_dur_s
-        self.integral = max(-5.0, min(5.0, self.integral + error))
-        deriv = error - self.last_error
-        self.last_error = error
+        if self.is_download:
+            # 下载模式：追求单链跑满多链极速，仅在下行严重阻塞 (> 0.350s，折算 < 1.4 MB/s) 时才触发背压收缩
+            if write_dur_s > 0.350:
+                self.backpressure_detected = True
+                self.current_window = max(self.min_window, int(self.current_window * 0.75))
+            else:
+                self.backpressure_detected = False
+                if write_dur_s < 0.080:
+                    self.current_window += 2
 
-        if write_dur_s > 0.060:
-            self.backpressure_detected = True
-            self.current_window = max(self.min_window, int(self.current_window * 0.6))
-        elif write_dur_s < 0.015:
-            step = 2 if self.is_download else 1
-            self.current_window += step
+            bdp_target = path_tracker.get_target_bdp_chunks(chunk_size=chunk_bytes, active_lanes=self.current_window)
+            self.current_window = max(self.min_window, min(self.current_window, max(bdp_target, self.min_window * 2)))
         else:
-            delta = self.kp * error + self.ki * self.integral + self.kd * deriv
-            self.current_window = int(self.current_window + delta)
+            # 流播模式：首帧秒开与平滑背压自适应
+            target_write_time = 0.015
+            error = target_write_time - write_dur_s
+            self.integral = max(-5.0, min(5.0, self.integral + error))
+            deriv = error - self.last_error
+            self.last_error = error
 
-        bdp_target = path_tracker.get_target_bdp_chunks(chunk_size=chunk_bytes)
-        self.current_window = int(0.75 * self.current_window + 0.25 * bdp_target)
+            if write_dur_s > 0.080:
+                self.backpressure_detected = True
+                self.current_window = max(self.min_window, int(self.current_window * 0.6))
+            elif write_dur_s < 0.020:
+                self.current_window += 1
+            else:
+                delta = self.kp * error + self.ki * self.integral + self.kd * deriv
+                self.current_window = int(self.current_window + delta)
+
+            bdp_target = path_tracker.get_target_bdp_chunks(chunk_size=chunk_bytes, active_lanes=max(2, self.current_window // 2))
+            self.current_window = int(0.75 * self.current_window + 0.25 * bdp_target)
+
         self.current_window = self.hw_guard.clamp_window(self.current_window, chunk_size=chunk_bytes)
 
 
@@ -2478,10 +2504,12 @@ class EdgeStreamingWorker:
         try:
             transport = request.transport
             if transport:
+                if hasattr(transport, "set_write_buffer_limits"):
+                    transport.set_write_buffer_limits(high=4 * 1024 * 1024, low=1024 * 1024)
                 sock = transport.get_extra_info("socket")
                 if sock and hasattr(sock, "setsockopt"):
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 * 1024 * 1024)
         except Exception:
             pass
 
@@ -2534,8 +2562,8 @@ class EdgeStreamingWorker:
                 is_download = (disposition == "attachment" or request.query.get("download") == "1")
                 mode = "bulk_download" if is_download else "streaming"
 
-                # 双阶段自适应分片：首包 512KB 极速秒开；下载且文件较大时自适应切入 1MB (1048576 字节) 巨型分片，降低 50% RPC 往返
-                if is_download and file_size >= 2 * 1024 * 1024:
+                # 自适应分片粒度：默认 512KB 分片最大化激发数十个 Bot 阵列横向并发；超大范围拉取切入 1MB 分片
+                if is_download and req_length >= 64 * 1024 * 1024:
                     chunk_size = 1024 * 1024
                 else:
                     chunk_size = 512 * 1024
@@ -2555,6 +2583,7 @@ class EdgeStreamingWorker:
 
                 lane_matrix = MultiBotLaneMatrix(usable_sources, sessions_per_bot=MEDIA_SESSIONS_PER_BOT)
                 prefetch_tasks = {}
+                prefetch_start_times = {}
                 next_prefetch_idx = 0
 
                 hedged_requests = 0
@@ -2569,6 +2598,7 @@ class EdgeStreamingWorker:
                         idx = next_prefetch_idx
                         p_off = offset + idx * chunk_size
                         src_ctx, slot = lane_matrix.get_lane(idx)
+                        prefetch_start_times[idx] = time.perf_counter()
                         prefetch_tasks[idx] = asyncio.create_task(
                             self._fetch_media_part(chat_id, message_id, channel_username, p_off, chunk_size, client_ctx=src_ctx, slot_idx=slot)
                         )
@@ -2591,6 +2621,10 @@ class EdgeStreamingWorker:
                     t1 = asyncio.create_task(
                         self._fetch_media_part(chat_id, message_id, channel_username, p_off, chunk_size, client_ctx=src_1, slot_idx=slot_1)
                     )
+
+                    # 核心突破：首分片刚发射，立即启动后续所有可用从机的并行预取，绝不等首包结束才拉从机！
+                    next_prefetch_idx = 1
+                    schedule_prefetch()
 
                     # 无论流播还是大文件下载，首分片均启动投机双发竞速 (Speculative Dual-Launch)，消除冷启动延迟
                     if lane_matrix.total_lanes > 1 and not is_probe:
@@ -2670,8 +2704,9 @@ class EdgeStreamingWorker:
                     s_src, s_slot = lane_matrix.get_lane(p_idx)
                     b_src, b_slot = lane_matrix.get_backup_lane(p_idx)
 
-                    t_chk_start = time.perf_counter()
+                    t_chk_start = prefetch_start_times.pop(p_idx, time.perf_counter())
                     if task is None:
+                        t_chk_start = time.perf_counter()
                         task = asyncio.create_task(
                             self._fetch_media_part(chat_id, message_id, channel_username, p_off, chunk_size, client_ctx=s_src, slot_idx=s_slot)
                         )

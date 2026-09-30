@@ -112,7 +112,7 @@ class AdaptiveTransmissionAccelerationTests(unittest.TestCase):
         tracker.update_rtt(0.050)
         tracker.update_speed(10 * 1024 * 1024, 0.2) # 50 MB/s
 
-        controller = PIDWindowController(is_download=True, hw_guard=guard)
+        controller = PIDWindowController(is_download=False, hw_guard=guard)
         initial_win = controller.current_window
 
         # 1. 模拟下游客户端快速畅通消费 (write_dur_s = 0.005s < 0.015s)
@@ -121,12 +121,33 @@ class AdaptiveTransmissionAccelerationTests(unittest.TestCase):
         self.assertGreater(controller.current_window, initial_win)
         self.assertFalse(controller.backpressure_detected)
 
-        # 2. 模拟下游客户端暂停/卡顿/缓冲堆积发生背压 (write_dur_s = 0.120s > 0.060s)
+        # 2. 模拟下游客户端暂停/卡顿/缓冲堆积发生背压 (write_dur_s = 0.120s > 0.080s)
         prev_win = controller.current_window
         controller.on_downstream_feedback(write_dur_s=0.120, chunk_bytes=524288, path_tracker=tracker)
         self.assertTrue(controller.backpressure_detected)
         self.assertLess(controller.current_window, prev_win)
         self.assertGreaterEqual(controller.current_window, controller.min_window)
+
+    def test_single_connection_download_multi_lane_saturation(self):
+        """测试单链下载模式下解除公网 RTT 伪背压误判，维持高并发多 Bot 虚拟条带窗口"""
+        guard = SystemHardwareGuardrail()
+        guard._total_mb = 2048.0
+        guard._free_mb = 1500.0
+
+        tracker = NetworkPathTracker(dc_id=5)
+        tracker.update_rtt(0.220) # 模拟 Telegram DC 单块拉取真实 RTT 220ms
+        tracker.update_speed(524288, 0.220) # 单 Bot 约 2.27 MB/s
+
+        dl_controller = PIDWindowController(is_download=True, hw_guard=guard)
+        self.assertGreaterEqual(dl_controller.current_window, 24)
+
+        # 模拟公网单链 TCP 跨洋传输 (write_dur_s = 0.065s， раніше 0.060s 阈值会误判为背压)
+        for _ in range(10):
+            dl_controller.on_downstream_feedback(write_dur_s=0.065, chunk_bytes=524288, path_tracker=tracker)
+
+        # 验证未触发伪背压，且并发预取窗口保持满载 (>= 24 条并行 Bot 通道)
+        self.assertFalse(dl_controller.backpressure_detected)
+        self.assertGreaterEqual(dl_controller.current_window, 24)
 
     def test_multi_bot_lane_matrix_allocation(self):
         """测试多 Bot 多 Session 高维无竞态通道矩阵映射与备份对冲调度"""

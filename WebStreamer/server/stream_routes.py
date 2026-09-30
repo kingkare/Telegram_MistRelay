@@ -3975,6 +3975,19 @@ async def media_streamer(request: web.Request, message_id: int, secure_hash: str
         chat_id=record_chat_id,
     )
 
+    try:
+        transport = request.transport
+        if transport:
+            if hasattr(transport, "set_write_buffer_limits"):
+                transport.set_write_buffer_limits(high=4 * 1024 * 1024, low=1024 * 1024)
+            sock = transport.get_extra_info("socket")
+            if sock and hasattr(sock, "setsockopt"):
+                import socket
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 * 1024 * 1024)
+    except Exception:
+        pass
+
     return web.Response(
         status=status,
         body=body,
