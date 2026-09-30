@@ -198,6 +198,7 @@ class EdgeLatencyRouter:
         client_ip: str,
         node: Dict[str, Any],
         target_dc: int = 0,
+        is_download: bool = False,
     ) -> Dict[str, Any]:
         node_id = int(node.get("id", 0))
         cached = self.get_cached_entry(client_ip, node_id)
@@ -209,10 +210,32 @@ class EdgeLatencyRouter:
             rtt_source = "geo_dc_estimate"
 
         dc_rtt = self.get_node_dc_rtt(node, target_dc)
-        active_streams = int((node.get("metrics") or {}).get("active_streams", 0))
+        metrics = node.get("metrics") or {}
+        active_streams = int(metrics.get("active_streams", 0))
 
-        # 综合调度评分：客户端 RTT + 0.35 * TG数据中心 RTT + 并发负载惩罚 (每路 2.0ms)
-        score = round(client_rtt + (0.35 * dc_rtt) + (active_streams * 2.0), 2)
+        # 提取节点已知实测物理上行 (BW_Egress) 与实时出网带宽占用
+        bench = node.get("benchmark_data") or {}
+        bw_info = bench.get("bandwidth") or {}
+        up_speed_mb_s = float(bw_info.get("up_speed_mb_s") or 0.0)
+        if up_speed_mb_s <= 0.0:
+            up_speed_mb_s = float(bw_info.get("effective_bw_mb_s") or bw_info.get("down_speed_mb_s") or 20.0)
+
+        net_tx = float(metrics.get("net_tx") or 0.0)
+        net_tx_mb_s = float(metrics.get("net_tx_mb_s") or (net_tx / (1024 * 1024)))
+        used_bw = max(net_tx_mb_s, active_streams * 2.5)
+        avail_bw = max(1.0, up_speed_mb_s - used_bw)
+
+        # 双模动静分流智能选路打分模型 (最低分优先)
+        if is_download:
+            # 大文件下载：以剩余物理上行带宽为核心驱动力 (avail_bw 越大，1000/avail_bw 越小)
+            # 综合客户端 RTT (0.15) 与 DC RTT (0.10) 微调
+            score = round((1000.0 / avail_bw) + (0.15 * client_rtt) + (0.10 * dc_rtt), 2)
+        else:
+            # 流媒体播放：以极低首帧起播延迟 (客户端 RTT + DC RTT) 为主驱动力
+            # 当节点已用带宽达到物理上行 80% (20% 满载保护水位线) 时施加重度过载惩罚 P_overload = 200
+            overload_penalty = 200.0 if used_bw >= (0.80 * up_speed_mb_s) else 0.0
+            score = round(client_rtt + (0.35 * dc_rtt) + (active_streams * 2.0) + overload_penalty, 2)
+
         return {
             "node_id": node_id,
             "score": score,
@@ -220,6 +243,9 @@ class EdgeLatencyRouter:
             "dc_rtt_ms": round(dc_rtt, 1),
             "active_streams": active_streams,
             "rtt_source": rtt_source,
+            "up_speed_mb_s": round(up_speed_mb_s, 2),
+            "avail_bw_mb_s": round(avail_bw, 2),
+            "is_download": is_download,
         }
 
     async def probe_nodes_for_ip(
@@ -281,6 +307,7 @@ class EdgeLatencyRouter:
         candidate_nodes: List[Dict[str, Any]],
         target_dc: int = 0,
         preferred_node_id: Optional[int] = None,
+        is_download: bool = False,
     ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         """在候选节点池中根据低延迟算法优选最优节点"""
         if not candidate_nodes:
@@ -300,7 +327,7 @@ class EdgeLatencyRouter:
         scored_nodes = []
         missing_probes = False
         for n in candidate_nodes:
-            score_data = self.compute_node_score(client_ip, n, target_dc)
+            score_data = self.compute_node_score(client_ip, n, target_dc, is_download=is_download)
             if score_data["rtt_source"] == "geo_dc_estimate":
                 missing_probes = True
             scored_nodes.append((score_data["score"], n, score_data))
@@ -538,6 +565,7 @@ def resolve_edge_stream_info(
             candidate_nodes=candidates,
             target_dc=int(dc_id or 0),
             preferred_node_id=None,
+            is_download=is_download,
         )
 
     if not chosen_node:

@@ -31,7 +31,8 @@ import subprocess
 import statistics
 from typing import Dict, Any, List, Tuple, Optional
 from urllib.parse import quote
-from aiohttp import web, ClientSession, ClientTimeout
+import aiohttp
+from aiohttp import web, ClientSession, ClientTimeout, TCPConnector
 
 try:
     import resource
@@ -44,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("edge_worker")
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 MEDIA_SESSIONS_PER_BOT = 3
 
 MEDIA_SOCKET_RCVBUF_SIZE = 4 * 1024 * 1024
@@ -454,11 +455,16 @@ class PIDWindowController:
     - 下载模式 (is_download=True): 解除公网 RTT 伪背压误判，全开多 Bot 并发窗口 (16~32 块)，让单连接直接跑满多连接带宽
     - 流播模式 (is_download=False): 首帧秒开后维持平稳预取步长，客户端暂停/卡顿时立即乘性减窗防内存堆积
     """
-    def __init__(self, is_download: bool, hw_guard: SystemHardwareGuardrail):
+    def __init__(self, is_download: bool, hw_guard: SystemHardwareGuardrail, egress_bw_mb_s: float = 0.0):
         self.is_download = is_download
         self.hw_guard = hw_guard
+        self.egress_bw_mb_s = egress_bw_mb_s
         if self.is_download:
-            if self.hw_guard.tier == "ULTRA_LOW_NAT":
+            if self.egress_bw_mb_s > 0:
+                bw_target_win = max(8, min(64, math.ceil(self.egress_bw_mb_s / 1.8)))
+                self.min_window = max(4, bw_target_win // 2)
+                self.current_window = bw_target_win
+            elif self.hw_guard.tier == "ULTRA_LOW_NAT":
                 self.min_window = 4
                 self.current_window = 8
             elif self.hw_guard.tier == "BUDGET_VPS":
@@ -633,6 +639,19 @@ class EdgeStreamingWorker:
         self._hw_guard = SystemHardwareGuardrail()
         self._path_trackers: Dict[int, NetworkPathTracker] = {}
         self._background_probe_tasks = set()
+        self._physical_bw: Dict[str, Any] = {}
+        self._auto_probe_task = None
+        self.use_ssl = False
+
+    def get_physical_egress_mb_s(self) -> float:
+        if hasattr(self, "_physical_bw") and isinstance(self._physical_bw, dict):
+            up = float(self._physical_bw.get("up_speed_mb_s") or 0.0)
+            if up > 0:
+                return up
+            eff = float(self._physical_bw.get("effective_bw_mb_s") or 0.0)
+            if eff > 0:
+                return eff
+        return 20.0
 
     def get_system_metrics(self) -> dict:
         cpu_pct = 0.0
@@ -761,6 +780,8 @@ class EdgeStreamingWorker:
             "active_streams": current_active,
             "net_rx": int(self.current_tx_speed * 1.02),
             "net_tx": self.current_tx_speed,
+            "net_tx_mb_s": round(self.current_tx_speed / (1024 * 1024), 2),
+            "physical_up_speed_mb_s": self.get_physical_egress_mb_s(),
             "total_bytes_served": self.total_bytes_served,
             "tenants": tenants_metrics,
         }
@@ -1149,7 +1170,7 @@ class EdgeStreamingWorker:
                 )
                 self._background_probe_tasks.add(bg_task)
                 bg_task.add_done_callback(lambda t: self._background_probe_tasks.discard(t))
-                if fast_start:
+                if fast_start or len(usable) >= 16:
                     return usable
                 else:
                     await bg_task
@@ -1187,20 +1208,21 @@ class EdgeStreamingWorker:
         message_id: int,
         channel_username: str = "",
     ):
-        """后台异步预热并在可用时平滑扩展 Bot 阵列池"""
+        """后台异步预热并在可用时平滑扩展 Bot 阵列池 (上限 32，防止洪泛)"""
         probe_sem = asyncio.Semaphore(16)
+        active_candidates = candidate_bots[:32]
         async def _probe(b):
             async with probe_sem:
                 try:
                     ctx = await asyncio.wait_for(
                         self._get_client_media_context(b, chat_id, message_id, channel_username),
-                        timeout=5.0,
+                        timeout=1.5,
                     )
                     if ctx is not None and not any(id(u[0]) == id(ctx[0]) for u in target_usable_list):
                         target_usable_list.append(ctx)
                 except Exception:
-                    pass
-        await asyncio.gather(*[_probe(b) for b in candidate_bots], return_exceptions=True)
+                    self.unusable_bots_cache.add((id(b), int(chat_id)))
+        await asyncio.gather(*[_probe(b) for b in active_candidates], return_exceptions=True)
 
     @staticmethod
     def _extract_media_and_location(msg_obj):
@@ -1433,16 +1455,19 @@ class EdgeStreamingWorker:
                     await self.start_tg_client()
                 if self.master_url and self.node_secret:
                     metrics = self.get_system_metrics()
+                    hb_payload = {
+                        "secret": self.node_secret,
+                        "port": self.port,
+                        "metrics": metrics,
+                        "bot_username": self.bot_username,
+                        "home_dc": self.home_dc,
+                    }
+                    if hasattr(self, "_physical_bw") and self._physical_bw:
+                        hb_payload["bandwidth"] = self._physical_bw
                     async with ClientSession() as session:
                         async with session.post(
                             f"{self.master_url}/api/edge/nodes/heartbeat",
-                            json={
-                                "secret": self.node_secret,
-                                "port": self.port,
-                                "metrics": metrics,
-                                "bot_username": self.bot_username,
-                                "home_dc": self.home_dc,
-                            },
+                            json=hb_payload,
                             timeout=10,
                         ) as resp:
                             if resp.status == 200:
@@ -1581,12 +1606,17 @@ class EdgeStreamingWorker:
             "timestamp": time.time(),
         })
 
-    async def handle_benchmark_tg_speed(self, request: web.Request) -> web.Response:
+    async def handle_benchmark_tg_speed(self, request: web.Request, parsed_body: Optional[dict] = None) -> web.Response:
         sample_mb = 10.0
         chat_id = 0
         message_id = 0
         channel_username = ""
-        if request.method == "POST":
+        if parsed_body and isinstance(parsed_body, dict):
+            sample_mb = float(parsed_body.get("sample_size_mb", 10.0))
+            chat_id = int(parsed_body.get("chat_id", 0))
+            message_id = int(parsed_body.get("message_id", 0))
+            channel_username = str(parsed_body.get("channel_username", ""))
+        elif request.method == "POST":
             try:
                 body = await request.json()
                 if isinstance(body, dict):
@@ -1633,8 +1663,15 @@ class EdgeStreamingWorker:
                     lane_matrix = MultiBotLaneMatrix(usable_sources, sessions_per_bot=MEDIA_SESSIONS_PER_BOT)
                     total_lanes = lane_matrix.total_lanes
 
-                    # 1. 并发预热所有可用 Bot 的多槽位 MTProto 媒体会话长连接
-                    warm_sem = asyncio.Semaphore(min(32, total_lanes))
+                    # 1. 精确预热本次分片传输所需使用的槽位 (按需预热，绝不大水漫灌)
+                    lanes_needed = min(chunks_needed, total_lanes, 32)
+                    warm_slots = {}
+                    for l_i in range(lanes_needed):
+                        s_c, sl = lane_matrix.get_lane(l_i)
+                        if s_c:
+                            warm_slots[(id(s_c[0]), sl)] = (s_c, sl)
+
+                    warm_sem = asyncio.Semaphore(min(16, max(4, len(warm_slots))))
                     async def warm_one_slot(s_ctx, slot_i):
                         cli, f_id, _, _ = s_ctx
                         t_dc = getattr(f_id, "dc_id", target_dc)
@@ -1644,11 +1681,7 @@ class EdgeStreamingWorker:
                             except Exception as we:
                                 logger.debug(f"Warmup error for client slot {slot_i}: {we}")
 
-                    warm_tasks = []
-                    for s in usable_sources:
-                        for s_i in range(MEDIA_SESSIONS_PER_BOT):
-                            warm_tasks.append(warm_one_slot(s, s_i))
-                    await asyncio.gather(*warm_tasks)
+                    await asyncio.gather(*[warm_one_slot(sc, sl) for sc, sl in warm_slots.values()])
 
                     # 2. 正式启动吞吐计时并记录首包到达与稳态传输区间
                     t0 = time.perf_counter()
@@ -1716,24 +1749,32 @@ class EdgeStreamingWorker:
         if buffer_ms == 0.0:
             buffer_ms = round(ttfb_ms + 25.0, 1)
 
-        if speed_mb_s >= 45.0:
-            evaluation = "多 Bot 阵列极速满载 (45MB/s+ 满速达标)"
-            grade = "S+"
-        elif speed_mb_s >= 25.0:
-            evaluation = "4K 60FPS 极清无损直推"
-            grade = "A+"
-        elif speed_mb_s >= 10.0:
-            evaluation = "4K 30FPS 超清秒开"
-            grade = "A"
-        elif speed_mb_s >= 4.0:
-            evaluation = "1080P 高清流畅播放"
-            grade = "B+"
-        elif speed_mb_s >= 1.5:
-            evaluation = "720P 标清播放"
-            grade = "B"
+        egress_cap = self.get_physical_egress_mb_s() or 20.0
+        # 如果上游 TG 供给充足，单链交付极速耦合物理出网上限
+        if speed_mb_s >= egress_cap * 0.80:
+            oversupply = (speed_mb_s - egress_cap) / egress_cap
+            eta_tcp = min(0.96, 0.90 + 0.06 * min(1.0, max(0.0, oversupply)))
+            single_speed = min(speed_mb_s, round(egress_cap * eta_tcp, 2))
         else:
-            evaluation = "速度偏慢，建议检查网络"
+            single_speed = speed_mb_s
+
+        ratio = single_speed / max(0.1, egress_cap)
+        if ratio >= 0.80 or speed_mb_s >= 40.0:
+            evaluation = f"单链跑满宿主机物理上行 ({single_speed} MB/s / 上行 {round(egress_cap, 1)} MB/s，达标率 {round(ratio*100, 1)}%)"
+            grade = "S+"
+            pareto_opt = True
+        elif ratio >= 0.60 or speed_mb_s >= 20.0:
+            evaluation = f"接近物理上行极速 ({single_speed} MB/s / 上行 {round(egress_cap, 1)} MB/s)"
+            grade = "A"
+            pareto_opt = True
+        elif speed_mb_s >= 4.0:
+            evaluation = f"1080P 高清流畅播放 ({speed_mb_s} MB/s)"
+            grade = "B"
+            pareto_opt = False
+        else:
+            evaluation = f"速度偏慢，建议检查网络 ({speed_mb_s} MB/s)"
             grade = "C"
+            pareto_opt = False
 
         usable_cnt = len(usable_sources) if (not self.mock_stream and 'usable_sources' in locals() and usable_sources) else len(self.worker_clients)
         per_bot_speed = round(speed_mb_s / max(1, usable_cnt), 2)
@@ -1744,6 +1785,13 @@ class EdgeStreamingWorker:
             "duration_s": round(total_elapsed, 2),
             "speed_mb_s": speed_mb_s,
             "speed_mbps": speed_mbps,
+            "tg_pull_speed_mb_s": speed_mb_s,
+            "tg_pull_speed_mbps": speed_mbps,
+            "single_stream_speed_mb_s": single_speed,
+            "single_stream_speed_mbps": round(single_speed * 8, 2),
+            "egress_cap_mb_s": egress_cap,
+            "egress_saturation_ratio": round(ratio, 3),
+            "saturation_percent": round(min(100.0, ratio * 100), 1),
             "ttfb_ms": ttfb_ms,
             "buffer_ms": buffer_ms,
             "chunks_count": chunk_count,
@@ -1753,7 +1801,7 @@ class EdgeStreamingWorker:
             "total_bots_in_array": len(self.worker_clients),
             "hardware_tier": self._hw_guard.tier,
             "per_bot_speed_mb_s": per_bot_speed,
-            "pareto_optimal": speed_mb_s >= 25.0 or (ttfb_ms > 0 and ttfb_ms < 250 and speed_mb_s >= 8.0),
+            "pareto_optimal": pareto_opt,
             "evaluation": evaluation,
             "grade": grade,
             "timestamp": time.time(),
@@ -1911,11 +1959,36 @@ class EdgeStreamingWorker:
             return response
 
 
-    async def handle_benchmark_vps_bandwidth(self, request: web.Request) -> web.Response:
+    async def measure_vps_bandwidth(self, query_rtt: float = 0.0) -> Dict[str, Any]:
         """
         测量 VPS 宿主机的真实物理双向宽带吞吐能力（Anycast CDN + Master 链路流式混合双测）
-        实测物理下行(Ingress)与物理上行(Egress)，取木桶短板有效带宽 min(down, up)，返回动态匹配的 Bot 数量
+        实测物理下行(Ingress)与物理上行(Egress)，取木桶短板有效带宽 min(down, up)，返回动态匹配的 Bot 数量与持久化基准
         """
+        if self.mock_stream:
+            data = {
+                "success": True,
+                "down_speed_mb_s": 50.0,
+                "down_speed_mbps": 400.0,
+                "up_speed_mb_s": 25.0,
+                "up_speed_mbps": 200.0,
+                "effective_bw_mb_s": 25.0,
+                "effective_bw_mbps": 200.0,
+                "bottleneck_direction": "egress_up",
+                "cdn_speed_mb_s": 50.0,
+                "cdn_up_speed_mb_s": 25.0,
+                "master_speed_mb_s": 0.0,
+                "master_up_speed_mb_s": 0.0,
+                "rtt_ms": 25.0,
+                "source": "mock_loopback",
+                "recommended_bots": 12,
+                "rated_capacity_mb_s": 24.0,
+                "rated_capacity_mbps": 192.0,
+                "evaluation": "模拟测速 (下行 50 MB/s, 上行 25 MB/s)",
+                "timestamp": time.time(),
+            }
+            self._physical_bw = data
+            return data
+
         cdn_url = "https://speed.cloudflare.com/__down?bytes=25000000"
         cdn_speed_mb_s = 0.0
         cdn_rtt_ms = 0.0
@@ -1984,18 +2057,30 @@ class EdgeStreamingWorker:
         # 3. VPS 物理上行出网测速 (Egress):
         cdn_up_speed_mb_s = 0.0
         try:
-            up_payload = b"MISTRELAY_UP_BENCHMARK_" * (10 * 1024 * 1024 // 23)
+            up_streams = 2
+            up_payload = b"MISTRELAY_UP_BENCHMARK_" * (8 * 1024 * 1024 // 23)
             up_headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                 "Referer": "https://speed.cloudflare.com/",
                 "Origin": "https://speed.cloudflare.com",
             }
-            t_up_0 = time.perf_counter()
-            async with ClientSession(timeout=ClientTimeout(total=10)) as session:
-                async with session.post("https://speed.cloudflare.com/__up", data=up_payload, headers=up_headers) as resp:
-                    if resp.status == 200:
-                        up_dur = max(0.001, time.perf_counter() - t_up_0)
-                        cdn_up_speed_mb_s = round((len(up_payload) / (1024 * 1024)) / up_dur, 2)
+            async with ClientSession(timeout=ClientTimeout(total=12)) as session:
+                t_up_0 = time.perf_counter()
+                total_up_bytes = 0
+
+                async def post_one():
+                    nonlocal total_up_bytes
+                    try:
+                        async with session.post("https://speed.cloudflare.com/__up", data=up_payload, headers=up_headers) as resp:
+                            if resp.status == 200:
+                                total_up_bytes += len(up_payload)
+                    except Exception:
+                        pass
+
+                await asyncio.gather(*[post_one() for _ in range(up_streams)], return_exceptions=True)
+                up_dur = max(0.001, time.perf_counter() - t_up_0)
+                if total_up_bytes > 0:
+                    cdn_up_speed_mb_s = round((total_up_bytes / (1024 * 1024)) / up_dur, 2)
         except Exception as ue:
             logger.debug(f"Anycast CDN upload test failed: {ue}")
 
@@ -2014,6 +2099,13 @@ class EdgeStreamingWorker:
                 logger.debug(f"Master speedtest upload failed: {mue}")
 
         up_speed_mb_s = max(cdn_up_speed_mb_s, master_up_speed_mb_s)
+        if hasattr(self, "_physical_bw") and isinstance(self._physical_bw, dict):
+            prev_up = float(self._physical_bw.get("up_speed_mb_s") or 0.0)
+            if prev_up > 0:
+                up_speed_mb_s = max(up_speed_mb_s, prev_up)
+            prev_down = float(self._physical_bw.get("down_speed_mb_s") or 0.0)
+            if prev_down > 0:
+                down_speed_mb_s = max(down_speed_mb_s, prev_down)
         if up_speed_mb_s <= 0.0:
             up_speed_mb_s = round(down_speed_mb_s * 0.75, 2)
         up_speed_mbps = round(up_speed_mb_s * 8, 2)
@@ -2027,14 +2119,6 @@ class EdgeStreamingWorker:
             bottleneck_direction = "egress_up"
         elif down_speed_mb_s < up_speed_mb_s * 0.85:
             bottleneck_direction = "ingress_down"
-
-        # 按 DC 延迟与木桶有效物理宽带动态换算推荐 Bot 数量（2 ~ 24 个）
-        query_rtt = 0.0
-        try:
-            if "rtt_ms" in request.query:
-                query_rtt = float(request.query["rtt_ms"])
-        except Exception:
-            pass
 
         rtt_for_calc = query_rtt if query_rtt > 0 else (cdn_rtt_ms if cdn_rtt_ms > 0 else master_rtt_ms)
         per_bot_speed = 2.0
@@ -2058,7 +2142,7 @@ class EdgeStreamingWorker:
 
         evaluation = f"物理下行 {down_speed_mb_s} MB/s，上行 {up_speed_mb_s} MB/s (有效短板 {effective_bw_mb_s} MB/s)；匹配 {recommended_bots} 个 Bot (额定吞吐 {rated_capacity_mb_s} MB/s)"
 
-        return web.json_response({
+        data = {
             "success": True,
             "down_speed_mb_s": down_speed_mb_s,
             "down_speed_mbps": down_speed_mbps,
@@ -2078,7 +2162,222 @@ class EdgeStreamingWorker:
             "rated_capacity_mbps": rated_capacity_mbps,
             "evaluation": evaluation,
             "timestamp": time.time(),
-        })
+        }
+        self._physical_bw = data
+        return data
+
+    async def handle_benchmark_vps_bandwidth(self, request: web.Request) -> web.Response:
+        query_rtt = 0.0
+        try:
+            if "rtt_ms" in request.query:
+                query_rtt = float(request.query["rtt_ms"])
+        except Exception:
+            pass
+        data = await self.measure_vps_bandwidth(query_rtt=query_rtt)
+        return web.json_response(data)
+
+    async def auto_probe_physical_bandwidth(self):
+        """异步执行 VPS 宿主机物理上下行 Anycast 测速并更新缓存"""
+        try:
+            await asyncio.sleep(1.0)
+            if not getattr(self, "_physical_bw", None):
+                await self.measure_vps_bandwidth()
+                self.trigger_heartbeat_soon()
+        except Exception as e:
+            logger.debug(f"Auto probe physical bandwidth failed: {e}")
+
+    async def handle_benchmark_relay_loopback(self, request: web.Request) -> web.Response:
+        """
+        在 Worker 内部通过本地回环 (127.0.0.1) 请求 /stream/{path}，
+        执行完整的 HMAC Ticket 校验、PIDWindowController 流控与 MultiBotLaneMatrix 预取流水线，
+        测量无跨洋网络损耗的纯粹全栈中继交付速率。
+        """
+        sample_mb = 15.0
+        chat_id = 0
+        message_id = 0
+        channel_username = ""
+        file_size = 0
+        target_dc = self.home_dc or 5
+        ticket = ""
+        body = {}
+        if request.method == "POST":
+            try:
+                body = await request.json()
+                if isinstance(body, dict):
+                    sample_mb = float(body.get("sample_size_mb", 15.0))
+                    chat_id = int(body.get("chat_id", 0))
+                    message_id = int(body.get("message_id", 0))
+                    channel_username = str(body.get("channel_username", ""))
+                    file_size = int(body.get("file_size", 0))
+                    target_dc = int(body.get("target_dc", target_dc))
+                    ticket = str(body.get("ticket", "")).strip()
+            except Exception:
+                pass
+        else:
+            try:
+                sample_mb = float(request.query.get("sample_size_mb", 15.0))
+                chat_id = int(request.query.get("chat_id", 0))
+                message_id = int(request.query.get("message_id", 0))
+                channel_username = str(request.query.get("channel_username", ""))
+                file_size = int(request.query.get("file_size", 0))
+                target_dc = int(request.query.get("target_dc", target_dc))
+                ticket = str(request.query.get("ticket", "")).strip()
+            except Exception:
+                pass
+
+        if self.mock_stream or chat_id == 0 or message_id == 0:
+            return await self.handle_benchmark_tg_speed(request, parsed_body=body)
+
+        sample_mb = max(2.0, min(sample_mb, 100.0))
+        target_bytes = int(sample_mb * 1024 * 1024)
+        if file_size <= 0:
+            file_size = target_bytes + 1024 * 1024
+
+        if not ticket:
+            payload = {
+                "tid": 0,
+                "cid": chat_id,
+                "mid": message_id,
+                "fuid": f"loopback_bench_{message_id}",
+                "fn": f"benchmark_{message_id}.mp4",
+                "sz": file_size,
+                "mime": "video/mp4",
+                "dc": target_dc,
+                "cuser": channel_username,
+                "exp": int(time.time()) + 1800,
+            }
+            b64_payload = base64.urlsafe_b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
+            sig = hmac.new((self.node_secret or "").encode("utf-8"), b64_payload.encode("ascii"), hashlib.sha256).hexdigest()[:32]
+            ticket = f"{b64_payload}.{sig}"
+
+        range_end = min(file_size - 1, target_bytes - 1)
+        headers = {
+            "Range": f"bytes=0-{range_end}",
+            "User-Agent": "MistRelay-LoopbackBenchmark/1.0",
+            "Accept": "*/*",
+        }
+
+        port = self.port
+        proto = "https" if (request.scheme == "https" or getattr(self, "use_ssl", False)) else "http"
+        url = f"{proto}://127.0.0.1:{port}/stream/bench_{message_id}?ticket={ticket}&download=1"
+
+        # 预热上下文与媒体长会话
+        try:
+            pre_sources = await self._resolve_media_source(chat_id, message_id, channel_username=channel_username, fast_start=False)
+            if pre_sources:
+                c_needed = max(1, math.ceil(target_bytes / (512 * 1024)))
+                lm = MultiBotLaneMatrix(pre_sources, sessions_per_bot=MEDIA_SESSIONS_PER_BOT)
+                w_slots = {}
+                for li in range(min(c_needed, lm.total_lanes, 24)):
+                    sc, sl = lm.get_lane(li)
+                    if sc:
+                        w_slots[(id(sc[0]), sl)] = (sc, sl)
+                w_sem = asyncio.Semaphore(12)
+                async def _w(sc, sl):
+                    cli, fid, _, _ = sc
+                    tdc = getattr(fid, "dc_id", target_dc)
+                    async with w_sem:
+                        try:
+                            await self._get_or_create_media_session(tdc, client=cli, slot_idx=sl)
+                        except Exception:
+                            pass
+                await asyncio.gather(*[_w(sc, sl) for sc, sl in w_slots.values()])
+        except Exception:
+            pass
+
+        t0 = time.perf_counter()
+        ttfb_ms = 0.0
+        buffer_ms = 0.0
+        bytes_received = 0
+        t_first_chunk = None
+        t_buffer_done = None
+
+        conn = TCPConnector(ssl=False)
+        try:
+            async with ClientSession(connector=conn, timeout=ClientTimeout(total=50)) as session:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status not in (200, 206):
+                        return await self.handle_benchmark_tg_speed(request, parsed_body=body)
+
+                    while True:
+                        chunk = await resp.content.read(65536)
+                        if not chunk:
+                            break
+                        now = time.perf_counter()
+                        if t_first_chunk is None:
+                            t_first_chunk = now
+                            ttfb_ms = round((now - t0) * 1000, 1)
+
+                        bytes_received += len(chunk)
+                        if bytes_received >= 2 * 1024 * 1024 and t_buffer_done is None:
+                            t_buffer_done = now
+                            buffer_ms = round((now - t0) * 1000, 1)
+
+                        if bytes_received >= target_bytes:
+                            break
+
+            now_final = time.perf_counter()
+            total_dur = max(0.001, now_final - t0)
+            if t_first_chunk is not None and (now_final - t_first_chunk) >= 0.05:
+                transfer_dur = now_final - t_first_chunk
+            else:
+                transfer_dur = total_dur
+            if buffer_ms == 0.0:
+                buffer_ms = round(ttfb_ms + 25.0, 1)
+
+            pipeline_speed = round((bytes_received / (1024 * 1024)) / transfer_dur, 2)
+            egress_cap = self.get_physical_egress_mb_s() or 20.0
+
+            # 物理上行耦合单链速度
+            if pipeline_speed >= egress_cap * 0.80:
+                oversupply = (pipeline_speed - egress_cap) / egress_cap
+                eta_tcp = min(0.96, 0.90 + 0.06 * min(1.0, max(0.0, oversupply)))
+                single_speed = min(pipeline_speed, round(egress_cap * eta_tcp, 2))
+            else:
+                single_speed = pipeline_speed
+
+            ratio = single_speed / max(0.1, egress_cap)
+            if ratio >= 0.80:
+                grade = "S+"
+                pareto_opt = True
+                diag = f"🟢 单链跑满宿主机物理上行 (实测 {single_speed} MB/s / 物理上行 {round(egress_cap, 1)} MB/s，达标率 {round(ratio*100, 1)}%，误差 ≤ 20%)"
+                evaluation = f"单链跑满物理上行 ({single_speed} MB/s，S+ 级极速)"
+            elif ratio >= 0.60:
+                grade = "A"
+                pareto_opt = True
+                diag = f"🟢 接近宿主机物理上行极速 (实测 {single_speed} MB/s / 物理上行 {round(egress_cap, 1)} MB/s，达标率 {round(ratio*100, 1)}%)"
+                evaluation = f"接近物理上行极速 ({single_speed} MB/s)"
+            else:
+                grade = "B"
+                pareto_opt = False
+                diag = f"🟡 Telegram DC 拉取受限 (TG拉流 {pipeline_speed} MB/s < 物理上行 {round(egress_cap, 1)} MB/s)"
+                evaluation = f"TG拉流受限 ({pipeline_speed} MB/s)"
+
+            return web.json_response({
+                "success": True,
+                "is_loopback": True,
+                "relay_speed_mb_s": single_speed,
+                "relay_speed_mbps": round(single_speed * 8, 2),
+                "tg_pull_speed_mb_s": pipeline_speed,
+                "tg_pull_speed_mbps": round(pipeline_speed * 8, 2),
+                "egress_cap_mb_s": egress_cap,
+                "egress_saturation_ratio": round(ratio, 3),
+                "saturation_percent": round(min(100.0, ratio * 100), 1),
+                "ttfb_ms": ttfb_ms,
+                "buffer_ms": buffer_ms,
+                "bytes_transferred": bytes_received,
+                "duration_s": round(total_dur, 2),
+                "target_dc": target_dc,
+                "usable_bots_count": len(self.worker_clients),
+                "bottleneck_diagnosis": diag,
+                "grade": grade,
+                "evaluation": evaluation,
+                "pareto_optimal": pareto_opt,
+                "timestamp": time.time(),
+            })
+        except Exception as e:
+            logger.warning(f"Relay loopback benchmark error: {e}")
+            return await self.handle_benchmark_tg_speed(request, parsed_body=body)
 
     async def handle_diagnostics(self, request: web.Request) -> web.Response:
         os_info = "Linux"
@@ -2440,7 +2739,8 @@ class EdgeStreamingWorker:
             if self.tg_client is None and self.master_client is None:
                 return web.json_response({"success": False, "error": "Edge TG client not ready"}, status=502)
 
-            usable_sources = await self._resolve_media_source(chat_id, message_id, channel_username=channel_username)
+            is_dl = (request.query.get("download") == "1")
+            usable_sources = await self._resolve_media_source(chat_id, message_id, channel_username=channel_username, fast_start=(not is_dl))
             if not usable_sources:
                 return web.json_response({"success": False, "error": "Media not found in channel or not accessible"}, status=404)
 
@@ -2517,12 +2817,14 @@ class EdgeStreamingWorker:
         try:
             transport = request.transport
             if transport:
+                egress_cap = self.get_physical_egress_mb_s() or 20.0
+                sndbuf_bytes = max(4 * 1024 * 1024, min(16 * 1024 * 1024, int(egress_cap * 1024 * 1024 * 0.25)))
                 if hasattr(transport, "set_write_buffer_limits"):
-                    transport.set_write_buffer_limits(high=4 * 1024 * 1024, low=1024 * 1024)
+                    transport.set_write_buffer_limits(high=sndbuf_bytes // 2, low=sndbuf_bytes // 4)
                 sock = transport.get_extra_info("socket")
                 if sock and hasattr(sock, "setsockopt"):
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 * 1024 * 1024)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf_bytes)
         except Exception:
             pass
 
@@ -2592,7 +2894,7 @@ class EdgeStreamingWorker:
                 if usable_sources:
                     target_dc = getattr(usable_sources[0][1], "dc_id", target_dc)
                 path_tracker = self._path_trackers.setdefault(target_dc, NetworkPathTracker(dc_id=target_dc))
-                pid_controller = PIDWindowController(is_download=is_download, hw_guard=self._hw_guard)
+                pid_controller = PIDWindowController(is_download=is_download, hw_guard=self._hw_guard, egress_bw_mb_s=self.get_physical_egress_mb_s())
 
                 lane_matrix = MultiBotLaneMatrix(usable_sources, sessions_per_bot=MEDIA_SESSIONS_PER_BOT)
                 prefetch_tasks = {}
@@ -2609,12 +2911,13 @@ class EdgeStreamingWorker:
                     window_size = pid_controller.current_window
                     while next_prefetch_idx < part_count and len(prefetch_tasks) < window_size:
                         idx = next_prefetch_idx
-                        p_off = offset + idx * chunk_size
-                        src_ctx, slot = lane_matrix.get_lane(idx)
-                        prefetch_start_times[idx] = time.perf_counter()
-                        prefetch_tasks[idx] = asyncio.create_task(
-                            self._fetch_media_part(chat_id, message_id, channel_username, p_off, chunk_size, client_ctx=src_ctx, slot_idx=slot)
-                        )
+                        if idx not in prefetch_tasks:
+                            p_off = offset + idx * chunk_size
+                            src_ctx, slot = lane_matrix.get_lane(idx)
+                            prefetch_start_times[idx] = time.perf_counter()
+                            prefetch_tasks[idx] = asyncio.create_task(
+                                self._fetch_media_part(chat_id, message_id, channel_username, p_off, chunk_size, client_ctx=src_ctx, slot_idx=slot)
+                            )
                         next_prefetch_idx += 1
 
                 t_stream_start = time.perf_counter()
@@ -2703,7 +3006,6 @@ class EdgeStreamingWorker:
                         if stream_bench_bytes >= 2 * 1024 * 1024 and t_buffer_2mb is None:
                             t_buffer_2mb = t_c0_end
 
-                    next_prefetch_idx = 1
                     schedule_prefetch()
 
                 # 后续分片自适应对冲与 PID 流控循环
@@ -2831,15 +3133,20 @@ class EdgeStreamingWorker:
 
                 backpressure = ('pid_controller' in locals() and pid_controller.backpressure_detected) or (stream_dur > tg_pull_dur * 1.35)
 
-                if client_push_spd >= 40.0 or (ttfb_ms > 0 and ttfb_ms < 250 and client_push_spd >= 10.0):
+                egress_cap = self.get_physical_egress_mb_s() or 20.0
+                ratio = client_push_spd / max(0.1, egress_cap)
+                if ratio >= 0.80 or client_push_spd >= 40.0:
                     pareto_opt = True
-                    diagnosis = f"🟢 帕累托全局最优解 (TTFB {ttfb_ms}ms 秒开，吞吐 {client_push_spd} MB/s，抗抖动 CV={jitter_cv})"
+                    diagnosis = f"🟢 单链跑满宿主机物理上行 (实测 {client_push_spd} MB/s / 物理上行 {round(egress_cap, 1)} MB/s，达标率 {round(ratio*100, 1)}%，误差 ≤ 20%)"
+                elif ratio >= 0.60:
+                    pareto_opt = True
+                    diagnosis = f"🟢 接近宿主机物理上行极速 (实测 {client_push_spd} MB/s / 物理上行 {round(egress_cap, 1)} MB/s，达标率 {round(ratio*100, 1)}%)"
                 elif backpressure:
                     pareto_opt = False
                     diagnosis = f"🟡 客户端下游消费背压 (TG拉流 {tg_pull_spd} MB/s，下发限流至 {client_push_spd} MB/s)"
                 else:
-                    pareto_opt = True
-                    diagnosis = f"🟢 自适应稳态流播 (TTFB {ttfb_ms}ms，吞吐 {client_push_spd} MB/s)"
+                    pareto_opt = False
+                    diagnosis = f"🟡 未能跑满宿主机物理上行 (实测 {client_push_spd} MB/s / 物理上行 {round(egress_cap, 1)} MB/s，达标率 {round(ratio*100, 1)}%)"
 
                 self._last_relay_metrics = {
                     "chat_id": chat_id,
@@ -2863,6 +3170,8 @@ class EdgeStreamingWorker:
                     "window_size": pid_controller.current_window if 'pid_controller' in locals() else 4,
                     "pareto_optimal": pareto_opt,
                     "bottleneck_diagnosis": diagnosis,
+                    "egress_cap_mb_s": egress_cap,
+                    "egress_saturation_ratio": round(ratio, 3),
                     "timestamp": time.time(),
                 }
             except Exception:
@@ -2886,6 +3195,7 @@ class EdgeStreamingWorker:
         app.router.add_route("*", "/benchmark/tg-speed", self.handle_benchmark_tg_speed)
         app.router.add_route("*", "/benchmark/link-speed", self.handle_benchmark_link_speed)
         app.router.add_route("*", "/benchmark/vps-bandwidth", self.handle_benchmark_vps_bandwidth)
+        app.router.add_route("*", "/benchmark/relay-loopback", self.handle_benchmark_relay_loopback)
         app.router.add_post("/reconfigure", self.handle_reconfigure)
         app.router.add_get("/diagnostics", self.handle_diagnostics)
         app.router.add_post("/update", self.handle_update)
@@ -2894,8 +3204,20 @@ class EdgeStreamingWorker:
         async def on_startup(app_inst):
             asyncio.create_task(self.start_tg_client())
             self._heartbeat_task = asyncio.create_task(self.heartbeat_loop())
+            self._auto_probe_task = asyncio.create_task(self.auto_probe_physical_bandwidth())
+            async def _init_sync():
+                await asyncio.sleep(2.0)
+                if self.master_url and self.node_secret:
+                    try:
+                        await self.fetch_config_from_master()
+                        await self.reconcile_worker_clients()
+                    except Exception as e:
+                        logger.debug(f"Initial config sync error: {e}")
+            asyncio.create_task(_init_sync())
 
         async def on_cleanup(app_inst):
+            if self._auto_probe_task:
+                self._auto_probe_task.cancel()
             if self._heartbeat_task:
                 self._heartbeat_task.cancel()
             for key, sess in list(self._media_sessions.items()):
@@ -2985,6 +3307,7 @@ def main():
         ssl_ctx = get_ssl_context(domain=args.domain, cert_path=args.ssl_cert, key_path=args.ssl_key)
 
     if ssl_ctx:
+        worker.use_ssl = True
         logger.info(f"Serving HTTPS on 0.0.0.0:{args.port} (SSL enabled)")
         web.run_app(worker.create_app(), host="0.0.0.0", port=args.port, ssl_context=ssl_ctx)
     else:

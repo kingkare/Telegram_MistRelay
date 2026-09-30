@@ -9,7 +9,20 @@ import ai_customer_service
 
 class TestAICustomerService(unittest.TestCase):
     def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.orig_db_path = db.DB_PATH
+        db.DB_PATH = self._tmp.name
+        db.init_db()
         self.bot = ai_customer_service.AICustomerServiceBot()
+
+    def tearDown(self):
+        db.DB_PATH = self.orig_db_path
+        if hasattr(self, "_tmp") and os.path.exists(self._tmp.name):
+            try:
+                os.remove(self._tmp.name)
+            except OSError:
+                pass
 
     def test_split_text(self):
         short_text = "Hello world"

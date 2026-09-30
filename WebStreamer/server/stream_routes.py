@@ -8499,6 +8499,15 @@ async def edge_node_heartbeat_handler(request: web.Request):
         if not node.get("ip") and request.remote and request.remote not in ("127.0.0.1", "::1"):
             update_kwargs["ip"] = request.remote
 
+        # 自动同步持久化 Worker 上报的宿主机物理上下行带宽基准
+        incoming_bw = data.get("bandwidth") or (incoming_metrics.get("bandwidth") if isinstance(incoming_metrics, dict) else None)
+        if isinstance(incoming_bw, dict) and incoming_bw.get("up_speed_mb_s"):
+            existing_bench = dict(node.get("benchmark_data") or {})
+            existing_bw = dict(existing_bench.get("bandwidth") or {})
+            existing_bw.update(incoming_bw)
+            existing_bench["bandwidth"] = existing_bw
+            update_kwargs["benchmark_data"] = existing_bench
+
         db.update_edge_node(node["id"], **update_kwargs)
         try:
             from edge_node_manager import broadcast_edge_node_update

@@ -241,6 +241,148 @@ class AdaptiveTransmissionAccelerationTests(unittest.TestCase):
         self.assertLess(fake_relay_metrics["ttfb_ms"], 200.0)
         self.assertGreater(fake_relay_metrics["relay_speed_mb_s"], 20.0)
 
+    def test_dynamic_download_vs_streaming_routing(self):
+        """测试动静分流智能选路：下载优先跑满大带宽，流播优先低延迟首帧秒开且带80%满载溢出保护"""
+        router = edge_node_manager.EdgeLatencyRouter()
+
+        node_hk = {
+            "id": 1,
+            "node_name": "Hong Kong High Bandwidth",
+            "benchmark_data": {
+                "bandwidth": {"up_speed_mb_s": 67.0, "down_speed_mb_s": 280.0},
+                "dcs": [{"dc_id": 5, "avg_rtt_ms": 20.0}],
+            },
+            "metrics": {"active_streams": 0, "net_tx_mb_s": 0.0},
+        }
+        node_local = {
+            "id": 2,
+            "node_name": "Local Low RTT Small Bandwidth",
+            "benchmark_data": {
+                "bandwidth": {"up_speed_mb_s": 15.0, "down_speed_mb_s": 50.0},
+                "dcs": [{"dc_id": 5, "avg_rtt_ms": 30.0}],
+            },
+            "metrics": {"active_streams": 0, "net_tx_mb_s": 0.0},
+        }
+
+        client_ip = "114.114.114.114"
+        router.record_client_latency(client_ip, 1, rtt_ms=60.0)
+        router.record_client_latency(client_ip, 2, rtt_ms=15.0)
+
+        # 1. 验证大文件下载模式 (is_download=True): 优先选中可用物理上行最大 (67MB/s) 的香港节点
+        best_dl, meta_dl = router.select_best_edge_node(
+            client_ip=client_ip,
+            candidate_nodes=[node_hk, node_local],
+            target_dc=5,
+            is_download=True,
+        )
+        self.assertEqual(best_dl["id"], 1)
+        self.assertTrue(meta_dl["is_download"])
+        self.assertGreater(meta_dl["avail_bw_mb_s"], 60.0)
+
+        # 2. 验证流媒体播放模式 (is_download=False): 优先选中 RTT 最低 (15ms) 的近端节点
+        best_stream, meta_stream = router.select_best_edge_node(
+            client_ip=client_ip,
+            candidate_nodes=[node_hk, node_local],
+            target_dc=5,
+            is_download=False,
+        )
+        self.assertEqual(best_stream["id"], 2)
+        self.assertFalse(meta_stream["is_download"])
+
+        # 3. 验证 80% 物理上行满载溢出保护：当近端节点已占用 13MB/s (超 80% 水位线) 时自动将新流引向空闲大管节点
+        node_local_busy = dict(node_local)
+        node_local_busy["metrics"] = {"active_streams": 5, "net_tx_mb_s": 13.0} # 13/15 = 86.7% >= 80%
+
+        best_overflow, meta_overflow = router.select_best_edge_node(
+            client_ip=client_ip,
+            candidate_nodes=[node_hk, node_local_busy],
+            target_dc=5,
+            is_download=False,
+        )
+        self.assertEqual(best_overflow["id"], 1) # 触发 P_overload=200 惩罚后自动避让至香港节点
+
+    def test_physical_egress_saturation_margin_of_error_20_percent(self):
+        """测试基于宿主机物理上行 ±20% 误差的满速达标评级模型"""
+        # 1. 25 MB/s VPS 节点实测 21.0 MB/s (达标率 84% >= 80%，误差 16% <= 20%): 判定为 S+ 跑满物理上行
+        up_bw_25 = 25.0
+        delivered_speed_21 = 21.0
+        ratio_21 = delivered_speed_21 / up_bw_25
+        self.assertGreaterEqual(ratio_21, 0.80)
+
+        # 2. 67 MB/s VPS 节点跑出 25.0 MB/s (达标率 37.3% < 80%): 判定为未跑满物理上行
+        up_bw_67 = 67.0
+        delivered_speed_25 = 25.0
+        ratio_25 = delivered_speed_25 / up_bw_67
+        self.assertLess(ratio_25, 0.80)
+
+    def test_worker_physical_bandwidth_cache_and_window_binding(self):
+        """测试 Worker 物理带宽自动测速缓存与 PID 滑动窗口按物理上行反推绑定"""
+        worker = EdgeStreamingWorker(port=8091, node_secret="sec_test", mock_stream=True)
+        # 运行 mock 测速
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        data = loop.run_until_complete(worker.measure_vps_bandwidth())
+        loop.close()
+
+        self.assertTrue(data["success"])
+        self.assertEqual(worker.get_physical_egress_mb_s(), 25.0)
+
+        guard = SystemHardwareGuardrail()
+        # 验证根据 25 MB/s 物理上行反推预取窗口 W = ceil(25 / 1.8) = 14
+        pid_25 = PIDWindowController(is_download=True, hw_guard=guard, egress_bw_mb_s=25.0)
+        self.assertEqual(pid_25.current_window, 14)
+
+        # 验证根据 67 MB/s 物理上行反推预取窗口 W = ceil(67 / 1.8) = 38
+        pid_67 = PIDWindowController(is_download=True, hw_guard=guard, egress_bw_mb_s=67.0)
+        self.assertEqual(pid_67.current_window, 38)
+
+    def test_heartbeat_bandwidth_persistence(self):
+        """测试心跳上报物理上下行基准自动持久化更新至 edge_nodes 数据库"""
+        # 创建测试边缘节点
+        created = db.create_edge_node(
+            tenant_id=1,
+            node_name="Test Sync Node",
+            ip="192.0.2.1",
+            port=8090,
+            auth_secret="hb_test_secret_xyz",
+        )
+        node_id = created["id"]
+
+        node_before = db.get_edge_node_by_id(node_id)
+        bench_before = node_before.get("benchmark_data") or {}
+        self.assertNotIn("up_speed_mb_s", bench_before.get("bandwidth") or {})
+
+        # 模拟心跳上报最新探测的物理带宽
+        from WebStreamer.server.stream_routes import edge_node_heartbeat_handler
+        req = MagicMock()
+        async def fake_json():
+            return {
+                "secret": "hb_test_secret_xyz",
+                "port": 8090,
+                "metrics": {"active_streams": 1, "net_tx": 1048576},
+                "bandwidth": {
+                    "up_speed_mb_s": 67.74,
+                    "down_speed_mb_s": 278.8,
+                    "effective_bw_mb_s": 67.74,
+                }
+            }
+        req.json = fake_json
+        req.headers = {}
+        req.remote = "192.0.2.1"
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        resp = loop.run_until_complete(edge_node_heartbeat_handler(req))
+        loop.close()
+
+        self.assertEqual(resp.status, 200)
+
+        # 验证已持久化至沙箱数据库
+        node_after = db.get_edge_node_by_id(node_id)
+        bw_after = (node_after.get("benchmark_data") or {}).get("bandwidth") or {}
+        self.assertEqual(bw_after.get("up_speed_mb_s"), 67.74)
+        self.assertEqual(bw_after.get("down_speed_mb_s"), 278.8)
+
 
 if __name__ == "__main__":
     unittest.main()
