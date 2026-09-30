@@ -608,6 +608,15 @@ def find_best_benchmark_media(target_dc_id: Optional[int] = None) -> Optional[Di
             LIMIT 50
         """)
         rows = c.fetchall()
+        if not rows:
+            c.execute("""
+                SELECT m.message_id, m.chat_id, m.file_id, m.file_size, "" as bin_channel_username
+                FROM tg_media m 
+                WHERE m.file_size >= 20971520
+                ORDER BY m.file_size DESC
+                LIMIT 50
+            """)
+            rows = c.fetchall()
 
         if target_dc_id:
             for r in rows:
@@ -663,6 +672,7 @@ async def run_edge_tg_speed_benchmark(
     sample_mb: float = 10.0,
     chat_id: int = 0,
     message_id: int = 0,
+    channel_username: str = "",
     timeout: float = 45.0,
 ) -> Dict[str, Any]:
     """测试边缘节点直接从 Telegram DC 拉取媒体分片的吞吐速率"""
@@ -674,7 +684,6 @@ async def run_edge_tg_speed_benchmark(
         return {"success": False, "error": "未配置节点 IP 或域名"}
 
     # 尝试从库中匹配样本媒体（优先匹配节点目标 DC，且必须为公开租户频道大文件）
-    channel_username = ""
     if chat_id == 0 or message_id == 0:
         target_dc = node.get("target_dc_id")
         best_media = find_best_benchmark_media(target_dc_id=target_dc)
@@ -682,6 +691,15 @@ async def run_edge_tg_speed_benchmark(
             chat_id = best_media["chat_id"]
             message_id = best_media["message_id"]
             channel_username = best_media["channel_username"]
+
+    if chat_id != 0 and not channel_username:
+        try:
+            conn = db.get_connection()
+            row = conn.execute("SELECT bin_channel_username FROM users WHERE bin_channel_id = ?", (chat_id,)).fetchone()
+            if row and row["bin_channel_username"]:
+                channel_username = row["bin_channel_username"]
+        except Exception:
+            pass
 
     payload = {
         "sample_size_mb": float(sample_mb),

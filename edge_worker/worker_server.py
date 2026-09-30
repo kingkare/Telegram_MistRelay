@@ -1151,6 +1151,9 @@ class EdgeStreamingWorker:
                 bg_task.add_done_callback(lambda t: self._background_probe_tasks.discard(t))
                 if fast_start:
                     return usable
+                else:
+                    await bg_task
+                    return usable
 
         # 兜底：若初始未命中任何 Bot，执行轻量限时并发探测
         if not usable:
@@ -1605,8 +1608,10 @@ class EdgeStreamingWorker:
         sample_mb = max(1.0, min(sample_mb, 100.0))
         target_bytes = int(sample_mb * 1024 * 1024)
 
-        if not self.mock_stream and self.tg_client is None:
-            await self.start_tg_client()
+        if not self.mock_stream:
+            self.unusable_bots_cache.clear()
+            if self.tg_client is None:
+                await self.start_tg_client()
 
         t0 = time.perf_counter()
         ttfb_ms = 0.0
@@ -1620,7 +1625,7 @@ class EdgeStreamingWorker:
                 usable_sources = await self._resolve_media_source(chat_id, message_id, channel_username=channel_username, fast_start=False)
                 if usable_sources:
                     base_cli, file_id, _, msg = usable_sources[0]
-                    target_dc = getattr(file_id, dc_id, target_dc)
+                    target_dc = getattr(file_id, "dc_id", target_dc)
                     num_src = len(usable_sources)
                     chunk_size = 1024 * 1024 if (target_bytes >= 8 * 1024 * 1024 and num_src <= 12) else 512 * 1024
                     chunks_needed = max(1, math.ceil(target_bytes / chunk_size))
@@ -1632,7 +1637,7 @@ class EdgeStreamingWorker:
                     warm_sem = asyncio.Semaphore(min(32, total_lanes))
                     async def warm_one_slot(s_ctx, slot_i):
                         cli, f_id, _, _ = s_ctx
-                        t_dc = getattr(f_id, dc_id, target_dc)
+                        t_dc = getattr(f_id, "dc_id", target_dc)
                         async with warm_sem:
                             try:
                                 await self._get_or_create_media_session(t_dc, client=cli, slot_idx=slot_i)
@@ -1676,8 +1681,16 @@ class EdgeStreamingWorker:
             except Exception as e:
                 logger.warning(f"Benchmark real TG stream error: {e}")
 
-        # Fallback to simulated / local streaming test if no media or failed
+        # 杜绝虚假模拟兜底：若真实拉取失败，直接如实报错，绝不伪造 33 MB/s 虚假数据
         if bytes_downloaded == 0:
+            if not self.mock_stream:
+                return web.json_response({
+                    "success": False,
+                    "error": f"无法从 Telegram DC 获取真实媒体分片 (chat_id={chat_id}, msg_id={message_id})",
+                    "speed_mb_s": 0.0,
+                    "speed_mbps": 0.0,
+                    "ttfb_ms": 0.0,
+                }, status=502)
             sim_chunk = b"MISTRELAY_BENCHMARK_PAYLOAD_" * 16384  # 448KB
             sim_chunks = math.ceil(target_bytes / len(sim_chunk))
             t0 = time.perf_counter()
