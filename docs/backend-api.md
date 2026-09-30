@@ -2401,3 +2401,214 @@ curl -L "$BASE_URL/12345/movie.mp4?hash=a1b2c3d4"
     "message": "已发送中止信号，任务即将停止"
   }
   ```
+
+
+---
+
+## 17. 多租户管理与 TMA 身份鉴权 API
+
+### 17.1 Telegram Mini App (TMA) 自动鉴权
+- **端点**：`POST /api/auth/tma`
+- **鉴权**：公开端点，通过 Telegram WebApp HMAC-SHA256 签名算法校验
+- **请求体**：
+  ```json
+  {
+    "init_data": "query_id=...&user=...&auth_date=...&hash=..."
+  }
+  ```
+- **响应示例**：
+  ```json
+  {
+    "success": true,
+    "token": "eyJhbGciOiJIUzI1NiIsIn...",
+    "refresh_token": "eyJhbGciOi...",
+    "user": {
+      "id": 10,
+      "username": "tg_user_123456",
+      "role": "user",
+      "dc_id": 5,
+      "bin_channel_username": "mr_u10_store"
+    }
+  }
+  ```
+
+### 17.2 获取租户与用户列表
+- **端点**：`GET /api/users`
+- **权限**：管理员权限
+- **响应示例**：
+  ```json
+  {
+    "success": true,
+    "users": [
+      {
+        "id": 1,
+        "username": "admin",
+        "role": "admin",
+        "dc_id": 5,
+        "bin_channel_id": -1001234567890,
+        "bin_channel_username": "official_store",
+        "file_count": 272,
+        "total_bytes": 113500000000,
+        "created_at": "2026-01-20 00:00:00"
+      }
+    ]
+  }
+  ```
+
+### 17.3 创建租户并自动分配专属频道
+- **端点**：`POST /api/users`
+- **权限**：管理员权限
+- **请求体**：
+  ```json
+  {
+    "username": "tenant_alice",
+    "password": "SecurePassword123!",
+    "role": "user",
+    "dc_id": 5,
+    "auto_provision_channel": true
+  }
+  ```
+
+### 17.4 租户专属频道无损平移 (Channel Migration)
+- **启动迁移**：`POST /api/users/{id}/migrate-channel/start`
+- **查询状态**：`GET /api/users/{id}/migrate-channel/status`
+- **中止平移**：`POST /api/users/{id}/migrate-channel/cancel`
+
+---
+
+## 18. VPS 边缘推流分流节点网络 (Edge Nodes) API
+
+### 18.1 查询边缘节点列表与健康监控
+- **端点**：`GET /api/edge/nodes`
+- **权限**：管理员或租户权限（租户仅可见自建节点）
+- **响应示例**：
+  ```json
+  {
+    "success": true,
+    "nodes": [
+      {
+        "id": 1,
+        "node_name": "RackNerd-LA-Node1",
+        "ip": "198.51.100.22",
+        "stream_port": 8090,
+        "status": "online",
+        "health_score": 98,
+        "target_dc_id": 1,
+        "egress_speed_mbps": 850.5,
+        "active_streams": 12,
+        "allocated_bots_count": 6
+      }
+    ]
+  }
+  ```
+
+### 18.2 SSH 异步全自动纳管与一键部署
+- **端点**：`POST /api/edge/nodes/{node_id}/ssh-deploy`
+- **权限**：管理员权限
+- **请求体**：
+  ```json
+  {
+    "ssh_host": "198.51.100.22",
+    "ssh_port": 22,
+    "ssh_user": "root",
+    "ssh_password": "HostPasswordHere"
+  }
+  ```
+- **实时部署日志轮询**：`GET /api/edge/nodes/{node_id}/deploy-logs`
+
+### 18.3 客户端流播智能解析 (302 智能分流与 Ticket 签发)
+- **端点**：`POST /api/edge/resolve-stream-url`
+- **说明**：根据客户端真实 IP、网络延迟测速缓存与 DC 亲和矩阵，计算最优边缘推流节点，签发有时效限制与 HMAC 签名的安全 Ticket。
+
+---
+
+## 19. 系统全量数据灾备与三级容灾防御 API
+
+### 19.1 获取灾备快照列表
+- **端点**：`GET /api/system/backups`
+- **权限**：超级管理员
+- **响应示例**：
+  ```json
+  {
+    "success": true,
+    "backups": [
+      {
+        "filename": "backup_mistrelay_20260930_045958.tar.gz",
+        "size_bytes": 105700000,
+        "size_formatted": "100.8 MB",
+        "is_protected": true,
+        "backup_type": "full",
+        "created_at": "2026-09-30 04:59:58"
+      }
+    ],
+    "retention_policy": {
+      "auto_backup_enabled": true,
+      "interval_hours": 24,
+      "max_backups_to_keep": 7
+    }
+  }
+  ```
+
+### 19.2 在线热备与非破坏性恢复
+- **即时创建热备**：`POST /api/system/backups/create`
+- **恢复快照**：`POST /api/system/backups/{filename}/restore` (支持 `union` 并集迁移与 `overwrite` 覆盖恢复)
+- **下载灾备包**：`GET /api/system/backups/{filename}/download`
+
+---
+
+## 20. Telegram 网盘大文件分片断点上传 API
+
+### 20.1 初始化分片上传任务
+- **端点**：`POST /api/telegram/upload/init`
+- **权限**：登录用户
+- **请求体**：
+  ```json
+  {
+    "file_name": "example_movie.mp4",
+    "file_size": 1048576000,
+    "mime_type": "video/mp4",
+    "total_chunks": 200
+  }
+  ```
+
+### 20.2 上传数据分片
+- **端点**：`POST /api/telegram/upload/chunk`
+- **数据**：`multipart/form-data`，包含 `upload_id`、`chunk_index` 及分片二进制文件。
+
+### 20.3 完成分片汇聚并转存至专属网盘
+- **端点**：`POST /api/telegram/upload/finish`
+- **说明**：后台流式拼接并直接推送到 Telegram MTProto 专属存储频道，秒级生成直链与抽帧缩略图。
+
+---
+
+## 21. Telegram 群专属 AI 智能客服管理 API
+
+### 21.1 查询客服运行状态与配置
+- **端点**：`GET /api/telegram/customer-service/status`
+- **权限**：管理员权限
+- **响应示例**：
+  ```json
+  {
+    "success": true,
+    "running": true,
+    "bot_info": {
+      "id": 8961962822,
+      "username": "MistRelayCustomerBot"
+    },
+    "config": {
+      "enabled": true,
+      "target_chat": "MistRelay",
+      "group_trigger_mode": "mention_or_reply",
+      "api_base": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini"
+    }
+  }
+  ```
+
+### 21.2 保存客服配置与热重载
+- **端点**：`POST /api/telegram/customer-service/config`
+- **权限**：管理员权限
+
+### 21.3 客服调试沙箱独立问答
+- **端点**：`POST /api/telegram/customer-service/test-chat`
+- **说明**：支持在 Web 端测试 Prompt 效果并实时回显 LLM 响应延迟与出站安全脱敏结果。
