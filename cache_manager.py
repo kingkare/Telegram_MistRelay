@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import shutil
+import sqlite3
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -335,11 +336,92 @@ async def get_all_cache_stats(aria2_client: Any = None) -> dict[str, Any]:
     }
 
 
+def clean_orphaned_telegram_thumbnails(dry_run: bool = False) -> dict[str, Any]:
+    """
+    全量审计并清理 cache/thumbnails/telegram/ 目录下与 tg_media 表失联的孤儿缩略图
+    """
+    tg = get_thumbnail_generator()
+    tg_thumb_dir = tg.cache_dir / "telegram"
+    if not tg_thumb_dir.exists():
+        return {
+            "category": "orphaned_telegram_thumbnails",
+            "scanned_files": 0,
+            "deleted_files": 0,
+            "deleted_bytes": 0,
+            "deleted_size_mb": 0.0,
+            "dry_run": dry_run,
+        }
+
+    import db
+    default_bin = None
+    try:
+        from WebStreamer.vars import Var
+        default_bin = getattr(Var, "BIN_CHANNEL", None)
+    except Exception:
+        pass
+
+    valid_hashes = set()
+    try:
+        with db.db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT message_id, file_name, chat_id FROM tg_media").fetchall()
+            for r in rows:
+                mid = r["message_id"]
+                fname = r["file_name"] or ""
+                cid = r["chat_id"]
+                keys = [f"{mid}_{fname}"]
+                if cid is not None and str(cid) != str(default_bin):
+                    keys.append(f"{cid}_{mid}_{fname}")
+                for k in keys:
+                    h = tg._get_cache_key("telegram", k)
+                    valid_hashes.add(f"{h}.webp")
+    except Exception as e:
+        logger.debug(f"查询有效 tg_media 缩略图键异常: {e}")
+
+    scanned_files = 0
+    deleted_files = 0
+    deleted_bytes = 0
+
+    for item in tg_thumb_dir.glob("*.webp"):
+        if not item.is_file():
+            continue
+        scanned_files += 1
+        name = item.name
+        if name.startswith("fallback-"):
+            continue
+
+        if name not in valid_hashes:
+            try:
+                stat = item.stat()
+                deleted_bytes += stat.st_size
+                deleted_files += 1
+                if not dry_run:
+                    item.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+    if not dry_run and hasattr(tg, "_get_cached_path"):
+        try:
+            tg._get_cached_path.cache_clear()
+        except Exception:
+            pass
+
+    return {
+        "category": "orphaned_telegram_thumbnails",
+        "scanned_files": scanned_files,
+        "deleted_files": deleted_files,
+        "deleted_bytes": deleted_bytes,
+        "deleted_size_mb": round(deleted_bytes / (1024 * 1024), 2),
+        "dry_run": dry_run,
+    }
+
+
 def clean_thumbnails(
     retention_days: Optional[int] = None,
     purge_all: bool = False,
     dry_run: bool = False,
     sub_source: Optional[str] = None,
+    purge_orphans: bool = False,
 ) -> dict[str, Any]:
     """清理缩略图缓存"""
     from path_security import validate_child_name
@@ -393,6 +475,19 @@ def clean_thumbnails(
     if not dry_run and hasattr(tg, "_get_cached_path"):
         tg._get_cached_path.cache_clear()
 
+    # 执行时间策略清理后，核销已在数据库中删除的孤儿缩略图
+    orphan_deleted_files = 0
+    orphan_deleted_bytes = 0
+    if purge_orphans and not purge_all and (sub_source is None or sub_source == "telegram"):
+        try:
+            orphan_res = clean_orphaned_telegram_thumbnails(dry_run=dry_run)
+            orphan_deleted_files = orphan_res.get("deleted_files", 0)
+            orphan_deleted_bytes = orphan_res.get("deleted_bytes", 0)
+            deleted_files += orphan_deleted_files
+            deleted_bytes += orphan_deleted_bytes
+        except Exception as e:
+            logger.debug(f"核销孤儿缩略图异常: {e}")
+
     return {
         "category": "thumbnails",
         "purge_all": purge_all,
@@ -416,6 +511,12 @@ async def clean_downloads(
         retention_hours=retention_hours,
         dry_run=dry_run,
     )
+    stale_uploads_info = {}
+    try:
+        from telegram_user_uploader import user_upload_manager
+        stale_uploads_info = user_upload_manager.cleanup_stale_uploads()
+    except Exception as e:
+        logger.debug(f"清理废弃上传分片异常: {e}")
     return {
         "category": "downloads",
         "root": res.get("root"),
@@ -491,6 +592,14 @@ def clean_memory() -> dict[str, Any]:
         reload_config()
     except Exception:
         pass
+
+    try:
+        import db
+        db.cleanup_expired_auth_sessions()
+        db.cleanup_expired_edge_node_tokens()
+        db.cleanup_expired_tg_register_codes()
+    except Exception as e:
+        logger.debug(f"内存清理阶段核销过期会话与凭证异常: {e}")
 
     return {
         "category": "memory",

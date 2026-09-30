@@ -1,5 +1,8 @@
 
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
 import time
 import threading
 import logging
@@ -29,7 +32,7 @@ class SystemMonitor:
         self._last_time = None
 
     def start(self):
-        if self.running:
+        if self.running or psutil is None:
             return
         self.running = True
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)

@@ -1,3 +1,4 @@
+import pyrogram_patch
 import math
 import socket
 import asyncio
@@ -43,10 +44,10 @@ def clear_global_bot_ctx_cache(message_id: Optional[int] = None) -> None:
         _global_bot_ctx_locks.clear()
     else:
         for k in list(_global_bot_ctx_cache.keys()):
-            if k[1] == message_id:
+            if k[-1] == message_id or (len(k) > 1 and k[1] == message_id):
                 _global_bot_ctx_cache.pop(k, None)
         for k in list(_global_bot_ctx_locks.keys()):
-            if k[1] == message_id:
+            if k[-1] == message_id or (len(k) > 1 and k[1] == message_id):
                 _global_bot_ctx_locks.pop(k, None)
 
 # 每个 Bot 在每个媒体 DC 上建立的独立 Session 数量（每个 Session 拥有独立的 Auth().create() 密钥）
@@ -182,29 +183,62 @@ class ByteStreamer:
             inst = cls(client)
         return inst
 
-    async def get_file_properties(self, message_id: int, force_refresh: bool = False) -> FileId:
+    async def get_file_properties(self, message_id: int, chat_id: Optional[int] = None, force_refresh: bool = False) -> FileId:
+        target_chat = chat_id or Var.BIN_CHANNEL
+        cache_key = (target_chat, message_id)
         if force_refresh:
             async with self._cache_lock:
-                self.cached_file_ids.pop(message_id, None)
-                await self.generate_file_properties(message_id)
+                self.cached_file_ids.pop(cache_key, None)
+                if target_chat == Var.BIN_CHANNEL:
+                    self.cached_file_ids.pop(message_id, None)
+                await self.generate_file_properties(message_id, chat_id=target_chat)
+                return self.cached_file_ids.get(cache_key) or self.cached_file_ids.get(message_id)
+
+        if cache_key in self.cached_file_ids:
+            return self.cached_file_ids[cache_key]
+        if target_chat == Var.BIN_CHANNEL and message_id in self.cached_file_ids:
+            return self.cached_file_ids[message_id]
+
+        async with self._cache_lock:
+            if cache_key in self.cached_file_ids:
+                return self.cached_file_ids[cache_key]
+            if target_chat == Var.BIN_CHANNEL and message_id in self.cached_file_ids:
                 return self.cached_file_ids[message_id]
+            await self.generate_file_properties(message_id, chat_id=target_chat)
+            logger.debug(f"Cached file properties for message with ID {message_id} in {target_chat}")
+        return self.cached_file_ids.get(cache_key) or self.cached_file_ids.get(message_id)
 
-        if message_id not in self.cached_file_ids:
-            async with self._cache_lock:
-                if message_id not in self.cached_file_ids:
-                    await self.generate_file_properties(message_id)
-                    logger.debug(f"Cached file properties for message with ID {message_id}")
-        return self.cached_file_ids[message_id]
+    async def generate_file_properties(self, message_id: int, chat_id: Optional[int] = None) -> FileId:
+        target_chat = chat_id or Var.BIN_CHANNEL
+        try:
+            file_id = await get_file_ids(self.client, target_chat, message_id)
+        except Exception as e:
+            import db
+            channel_username = db.get_channel_username_by_chat_id(target_chat)
+            if channel_username and not str(channel_username).startswith("channel_") and hasattr(self.client, "get_chat"):
+                try:
+                    clean_uname = str(channel_username).lstrip("@")
+                    await self.client.get_chat(f"@{clean_uname}")
+                    file_id = await get_file_ids(self.client, target_chat, message_id)
+                except Exception:
+                    raise e
+            elif hasattr(self.client, "get_chat"):
+                try:
+                    await self.client.get_chat(target_chat)
+                    file_id = await get_file_ids(self.client, target_chat, message_id)
+                except Exception:
+                    raise e
+            else:
+                raise e
 
-    async def generate_file_properties(self, message_id: int) -> FileId:
-        file_id = await get_file_ids(self.client, Var.BIN_CHANNEL, message_id)
-        logger.debug(f"Generated file ID and Unique ID for message with ID {message_id}")
+        logger.debug(f"Generated file ID and Unique ID for message with ID {message_id} in {target_chat}")
         if not file_id:
-            logger.debug(f"Message with ID {message_id} not found")
+            logger.debug(f"Message with ID {message_id} not found in {target_chat}")
             raise FIleNotFound
-        self.cached_file_ids[message_id] = file_id
-        logger.debug(f"Cached media message with ID {message_id}")
-        return self.cached_file_ids[message_id]
+        if target_chat == Var.BIN_CHANNEL:
+            self.cached_file_ids[message_id] = file_id
+        self.cached_file_ids[(target_chat, message_id)] = file_id
+        return file_id
 
     async def generate_media_session(
         self,
@@ -408,10 +442,20 @@ class ByteStreamer:
                 return True, r, client, None
 
             except (asyncio.TimeoutError, TimeoutError) as e:
-                logger.warning(f"客户端 {client_index} 拉取分片超时 (offset={offset})")
+                try:
+                    dc_pool = getattr(client, "_media_session_pool", {}).get(getattr(file_id, "dc_id", None), {})
+                    dead_session = dc_pool.pop(cur_slot, None)
+                    if dead_session and hasattr(dead_session, "stop"):
+                        stop_res = dead_session.stop()
+                        if asyncio.iscoroutine(stop_res):
+                            asyncio.create_task(stop_res)
+                except Exception:
+                    pass
                 if retry_attempt < actual_retries - 1:
+                    logger.debug(f"客户端 {client_index} 槽位 {cur_slot} 拉取分片超时 (offset={offset})，销毁失效会话并重试...")
                     await asyncio.sleep(0.2 * (retry_attempt + 1))
                 else:
+                    logger.warning(f"客户端 {client_index} 拉取分片超时 (offset={offset})")
                     mark_bot_failure(client_index, e)
                     return False, None, client, None
 
@@ -454,6 +498,7 @@ class ByteStreamer:
         default_file_id: FileId,
         default_location,
         force_refresh: bool = False,
+        chat_id: Optional[int] = None,
     ):
         bot_client = multi_clients.get(bot_idx)
         if bot_client is None:
@@ -462,7 +507,8 @@ class ByteStreamer:
         if bot_idx == self._find_own_index() or message_id is None:
             return bot_client, bot_streamer, default_file_id, default_location
 
-        cache_key = (bot_idx, message_id)
+        target_chat = chat_id or Var.BIN_CHANNEL
+        cache_key = (bot_idx, target_chat, message_id)
         if not force_refresh and cache_key in _global_bot_ctx_cache:
             return _global_bot_ctx_cache[cache_key]
 
@@ -470,8 +516,7 @@ class ByteStreamer:
         async with lock:
             if not force_refresh and cache_key in _global_bot_ctx_cache:
                 return _global_bot_ctx_cache[cache_key]
-            # 每个从机器人必须通过自己的会话获取专属 file_reference，否则 Telegram 会拒绝并抛出 FILE_REFERENCE_EXPIRED
-            bot_file_id = await bot_streamer.get_file_properties(message_id, force_refresh=force_refresh)
+            bot_file_id = await bot_streamer.get_file_properties(message_id, chat_id=target_chat, force_refresh=force_refresh)
             bot_location = await bot_streamer.get_location(bot_file_id)
             res = (bot_client, bot_streamer, bot_file_id, bot_location)
             _global_bot_ctx_cache[cache_key] = res
@@ -494,6 +539,7 @@ class ByteStreamer:
         chunk_size: int,
         slot_preacquired: bool = False,
         message_id: Optional[int] = None,
+        chat_id: Optional[int] = None,
     ) -> Union[str, None]:
         current_index = index
         failed_indices = set()
@@ -563,20 +609,29 @@ class ByteStreamer:
             current_index: (self.client, self, file_id, default_location)
         }
         bot_ctx_locks: Dict[int, asyncio.Lock] = {b: asyncio.Lock() for b in multi_clients.keys()}
+        unusable_ctx_bots: set = set()
 
         async def _get_ctx(bot_idx: int):
+            if bot_idx in unusable_ctx_bots:
+                return None
             if bot_idx in bot_ctx_cache:
                 return bot_ctx_cache[bot_idx]
             lock = bot_ctx_locks.setdefault(bot_idx, asyncio.Lock())
             async with lock:
+                if bot_idx in unusable_ctx_bots:
+                    return None
                 if bot_idx in bot_ctx_cache:
                     return bot_ctx_cache[bot_idx]
                 try:
-                    ctx = await self._prepare_bot_context(bot_idx, message_id, file_id, default_location)
-                    bot_ctx_cache[bot_idx] = ctx
-                    return ctx
+                    ctx = await self._prepare_bot_context(bot_idx, message_id, file_id, default_location, chat_id=chat_id)
+                    if ctx is not None:
+                        bot_ctx_cache[bot_idx] = ctx
+                        return ctx
+                    unusable_ctx_bots.add(bot_idx)
+                    return None
                 except Exception as e:
-                    logger.warning(f"从机 {bot_idx} 初始化分片上下文失败: {e}")
+                    unusable_ctx_bots.add(bot_idx)
+                    logger.debug(f"从机 {bot_idx} 初始化分片上下文不可用 (chat={chat_id}): {e}")
                     return None
 
         # 受控全量非阻塞预热：通过 Semaphore(16) 在后台流水线预热当前流分配的全部条带 Bot，
@@ -597,42 +652,50 @@ class ByteStreamer:
 
         async def _fetch_part(part_idx: int, override_bot: Optional[int] = None):
             part_offset = offset + (part_idx - 1) * chunk_size
-            active_bots = stripe_bots or [current_index]
+            active_bots = [b for b in (stripe_bots or [current_index]) if b not in unusable_ctx_bots] or [current_index]
             assigned_bot = override_bot if override_bot is not None else active_bots[(part_idx - 1) % len(active_bots)]
-            slot_idx = ((part_idx - 1) // len(active_bots)) % MEDIA_SESSIONS_PER_BOT
+            slot_idx = ((part_idx - 1) // max(1, len(active_bots))) % MEDIA_SESSIONS_PER_BOT
 
             try:
                 ctx = await _get_ctx(assigned_bot)
                 if ctx is None:
+                    actual_bot = current_index
                     ctx = bot_ctx_cache[current_index]
+                else:
+                    actual_bot = assigned_bot
                 b_client, b_streamer, b_file_id, b_location = ctx
                 success, r, _, _ = await b_streamer._try_get_file_chunk(
-                    b_client, assigned_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=2, slot_idx=slot_idx, timeout=8.0, message_id=message_id
+                    b_client, actual_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=2, slot_idx=slot_idx, timeout=12.0, message_id=message_id
                 )
                 if success and isinstance(r, raw.types.upload.File):
-                    return True, r, assigned_bot, part_offset
+                    return True, r, actual_bot, part_offset
             except Exception as e:
                 logger.warning(f"条带 Bot {assigned_bot} 获取分片异常 (offset={part_offset}): {e}")
 
             part_failed = {assigned_bot}
 
             for fallback_attempt in range(2):
-                next_bot = get_next_available_client(assigned_bot, part_failed, target_dc=target_dc)
+                next_bot = get_next_available_client(assigned_bot, part_failed | unusable_ctx_bots, target_dc=target_dc)
+                if next_bot is None:
+                    next_bot = current_index if current_index not in part_failed else None
                 if next_bot is None:
                     break
+                part_failed.add(next_bot)
                 try:
                     ctx = await _get_ctx(next_bot)
                     if ctx is None:
+                        actual_next = current_index
                         ctx = bot_ctx_cache[current_index]
+                    else:
+                        actual_next = next_bot
                     b_client, b_streamer, b_file_id, b_location = ctx
                     success, r, _, _ = await b_streamer._try_get_file_chunk(
-                        b_client, next_bot, b_file_id, b_location, part_offset, chunk_size, max_retries=1, timeout=6.0, message_id=message_id
+                        b_client, actual_next, b_file_id, b_location, part_offset, chunk_size, max_retries=1, timeout=8.0, message_id=message_id
                     )
                     if success and isinstance(r, raw.types.upload.File):
-                        return True, r, next_bot, part_offset
+                        return True, r, actual_next, part_offset
                 except Exception as e:
                     logger.warning(f"备用 Bot {next_bot} 获取分片失败 (offset={part_offset}): {e}")
-                part_failed.add(next_bot)
 
             return False, None, assigned_bot, part_offset
 

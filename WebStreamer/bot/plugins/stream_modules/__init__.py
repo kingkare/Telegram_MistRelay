@@ -58,7 +58,15 @@ from .media_processor import (
     process_media_group,
     process_single_media,
     media_receive_handler,
-    channel_link_receive_handler
+    channel_link_receive_handler,
+    user_register_command_handler,
+    start_command_handler,
+    help_command_handler,
+    get_target_bin_channel_for_message,
+    register_stream_handlers,
+    STREAM_HANDLERS,
+    ensure_peer_cached,
+    is_allowed_user
 )
 
 __all__ = [
@@ -104,4 +112,12 @@ __all__ = [
     'process_single_media',
     'media_receive_handler',
     'channel_link_receive_handler',
+    'user_register_command_handler',
+    'start_command_handler',
+    'help_command_handler',
+    'get_target_bin_channel_for_message',
+    'register_stream_handlers',
+    'STREAM_HANDLERS',
+    'ensure_peer_cached',
+    'is_allowed_user',
 ]

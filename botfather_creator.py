@@ -1,3 +1,4 @@
+import pyrogram_patch
 try:
     import pyrogram.errors.rpc_error
     _orig_rpc_init = pyrogram.errors.rpc_error.RPCError.__init__
@@ -23,6 +24,7 @@ except Exception:
 """
 
 import os
+import sqlite3
 import re
 import json
 import time
@@ -33,7 +35,7 @@ import logging
 from typing import List, Dict, Tuple, Optional, Any, Callable, Union
 
 try:
-    from pyrogram import Client
+    from pyrogram import Client, raw
     from pyrogram.errors import FloodWait, RPCError
 except ImportError:
     Client = None
@@ -192,6 +194,10 @@ def _save_cached_session(
     session_type: str = "pyrogram_string",
     api_id: Optional[int] = None,
     api_hash: Optional[str] = None,
+    two_fa_password: Optional[str] = None,
+    two_fa_hint: Optional[str] = None,
+    has_two_fa: Optional[int] = None,
+    local_otp_token: Optional[str] = None,
 ) -> Optional[Dict]:
     norm_phone = phone.strip()
     if re.fullmatch(r"\d{8,15}", norm_phone):
@@ -226,6 +232,10 @@ def _save_cached_session(
             remark=remark,
             api_id=api_id,
             api_hash=api_hash,
+            two_fa_password=two_fa_password,
+            two_fa_hint=two_fa_hint,
+            has_two_fa=has_two_fa,
+            local_otp_token=local_otp_token,
         )
     except Exception as e:
         logger.debug(f"持久化协议号到数据库异常: {e}")
@@ -479,8 +489,35 @@ async def fetch_residential_proxy_for_region(
 
 
 
-def sanitize_account_record(row: Dict) -> Dict:
-    """脱敏协议号记录，隐藏底层 auth_key 密文，保留管理所需的元数据与解码参数"""
+SELLER_DEFAULT_2FA_PASSWORDS = {"z4422404", "qq1122", "8899", "123456", "666888", "888888", "112233"}
+
+
+def is_account_taken_over(row: Dict) -> bool:
+    """判断协议号是否已完成安全接管（独立高强 2FA 云密码 + 本机自主接码链接）"""
+    if not row:
+        return False
+    if row.get("is_taken_over"):
+        return True
+    code_url = str(row.get("code_url") or "").strip()
+    if not code_url.startswith("/api/telegram/botfather/otp/"):
+        return False
+    pwd = str(row.get("two_fa_password") or "").strip()
+    if not pwd:
+        return False
+    if pwd.startswith("Mr-"):
+        return True
+    hint = str(row.get("two_fa_hint") or "").strip()
+    if hint.startswith("MistRelay"):
+        return True
+    return pwd not in SELLER_DEFAULT_2FA_PASSWORDS and len(pwd) >= 8
+
+
+def sanitize_account_record(
+    row: Dict,
+    tenant_aggregates: Optional[Dict[int, Dict]] = None,
+    active_cluster_bots: Optional[set] = None,
+) -> Dict:
+    """脱敏协议号记录，隐藏底层 auth_key 密文，保留管理所需的元数据与解码参数，并聚合多租户频道与集群节点数据"""
     code_url = row.get("code_url") or ""
     masked_url = ""
     if code_url:
@@ -518,6 +555,42 @@ def sanitize_account_record(row: Dict) -> Dict:
     phone_val = str(row.get("phone") or "")
     region = row.get("region") or detect_region_from_phone(phone_val)
 
+    acc_id = row.get("id")
+    if tenant_aggregates is None and acc_id is not None:
+        try:
+            tenant_aggregates = db.get_protocol_account_tenant_aggregates()
+        except Exception:
+            tenant_aggregates = {}
+
+    t_info = (tenant_aggregates or {}).get(int(acc_id)) if acc_id is not None else {}
+    created_channels_count = int(t_info.get("channel_count", 0)) if t_info else 0
+    tenant_usernames = list(t_info.get("tenant_usernames", [])) if t_info else []
+
+    if active_cluster_bots is None:
+        try:
+            import WebStreamer.bot as bot_mod
+            active_cluster_bots = {
+                str(getattr(cli, "username", "")).lower().lstrip("@")
+                for cli in getattr(bot_mod, "multi_clients", {}).values()
+                if getattr(cli, "username", None)
+            }
+        except Exception:
+            active_cluster_bots = set()
+
+    raw_bot_names = row.get("bot_usernames")
+    bot_usernames_list: List[str] = []
+    if raw_bot_names:
+        try:
+            parsed = json.loads(raw_bot_names)
+            if isinstance(parsed, list):
+                bot_usernames_list = [str(b).lstrip("@") for b in parsed]
+        except Exception:
+            bot_usernames_list = [b.strip().lstrip("@") for b in str(raw_bot_names).split(",") if b.strip()]
+
+    cluster_active_bots_count = sum(
+        1 for b in bot_usernames_list if b.lower() in (active_cluster_bots or set())
+    )
+
     return {
         "id": row.get("id"),
         "region": region,
@@ -545,6 +618,18 @@ def sanitize_account_record(row: Dict) -> Dict:
         "last_used_at": row.get("last_used_at"),
         "remark": row.get("remark") or "",
         "created_at": row.get("created_at"),
+        "has_two_fa": bool(row.get("has_two_fa") or row.get("two_fa_password")),
+        "two_fa_hint": row.get("two_fa_hint") or "",
+        "masked_two_fa": f"{str(row.get('two_fa_password'))[:2]}****{str(row.get('two_fa_password'))[-2:]}" if len(str(row.get("two_fa_password") or "")) >= 4 else ("***" if row.get("two_fa_password") else ""),
+        "local_otp_token": row.get("local_otp_token") or "",
+        "is_taken_over": is_account_taken_over(row),
+        "is_local_otp": str(code_url).strip().startswith("/api/telegram/botfather/otp/"),
+        "taken_over_at": row.get("taken_over_at") or "",
+        "created_channels_count": created_channels_count,
+        "max_channels": 10,
+        "tenant_usernames": tenant_usernames,
+        "bot_usernames": bot_usernames_list,
+        "cluster_active_bots_count": cluster_active_bots_count,
     }
 
 
@@ -649,7 +734,17 @@ def sync_cached_sessions_to_db() -> List[Dict]:
                 elif r_api_id and r_api_hash:
                     _save_cached_credentials(r_phone, r_api_id, r_api_hash)
 
-            return [sanitize_account_record(r) for r in existing_rows]
+            t_aggs = db.get_protocol_account_tenant_aggregates()
+            try:
+                import WebStreamer.bot as bot_mod
+                a_bots = {
+                    str(getattr(cli, "username", "")).lower().lstrip("@")
+                    for cli in getattr(bot_mod, "multi_clients", {}).values()
+                    if getattr(cli, "username", None)
+                }
+            except Exception:
+                a_bots = set()
+            return [sanitize_account_record(r, tenant_aggregates=t_aggs, active_cluster_bots=a_bots) for r in existing_rows]
 
         # 仅当数据库完全为空时执行一次初始化历史迁移
         found = dict(_PHONE_SESSION_CACHE)
@@ -1130,6 +1225,8 @@ async def login_via_phone_and_code_url(
             session_type="telethon_string",
             api_id=api_id,
             api_hash=api_hash,
+            two_fa_password=two_fa_password,
+            has_two_fa=1 if two_fa_password else 0,
         )
         logger.info(f"协议号登录并转换完成: {me.first_name} (@{me.username or '无用户名'}, ID: {me.id})")
         report_progress(f"协议号 {phone} 登录并转换完成 ({me.first_name})")
@@ -1752,10 +1849,18 @@ async def check_protocol_account(account_id: int) -> Dict:
             except Exception:
                 dc_id = None
 
+        bot_uname_list = [b["username"] for b in existing_bots if b.get("username")]
+        bot_uname_list = [b["username"] for b in existing_bots if b.get("username")] if check_bots else None
+        update_kw = {
+            "phone": real_phone if real_phone == phone else phone,
+            "bot_count": bot_count,
+        }
+        if bot_uname_list is not None:
+            update_kw["bot_usernames"] = json.dumps(bot_uname_list)
         db.update_protocol_account(
             account_id,
-            phone=real_phone if real_phone == phone else phone,
-            bot_count=bot_count,
+            **update_kw,
+            bot_usernames=json.dumps(bot_uname_list),
             status=new_status,
             first_name=getattr(me, "first_name", "") or "",
             username=getattr(me, "username", "") or "",
@@ -2421,8 +2526,26 @@ async def get_protocol_account_detail(account_id: int, refresh_online: bool = Fa
         online_bots = check_res.get("bots")
 
     sanitized = sanitize_account_record(acc)
+    tenant_channels = []
+    try:
+        with db.db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            t_rows = conn.execute(
+                """
+                SELECT id AS user_id, username, bin_channel_id, bin_channel_username, dc_id, role, created_at
+                FROM users
+                WHERE creator_account_id = ? AND bin_channel_id IS NOT NULL
+                ORDER BY id ASC
+                """,
+                (int(account_id),),
+            ).fetchall()
+            tenant_channels = [dict(r) for r in t_rows]
+    except Exception as e:
+        logger.warning(f"获取母号 #{account_id} 托管租户频道明细失败: {e}")
+
     return {
         "account": sanitized,
+        "tenant_channels": tenant_channels,
         "metadata": {
             "dc_id": acc.get("dc_id") or meta.get("dc_id"),
             "dc_name": meta.get("dc_name"),
@@ -2453,6 +2576,15 @@ async def get_protocol_account_detail(account_id: int, refresh_online: bool = Fa
         },
         "user_info": online_user,
         "bots": online_bots,
+        "two_fa": {
+            "has_two_fa": bool(acc.get("has_two_fa") or acc.get("two_fa_password")),
+            "two_fa_password": acc.get("two_fa_password") or "",
+            "two_fa_hint": acc.get("two_fa_hint") or "",
+        },
+        "otp": {
+            "local_otp_token": acc.get("local_otp_token") or "",
+            "local_otp_path": f"/api/telegram/botfather/otp/{acc.get('local_otp_token') or ''}",
+        },
     }
 
 
@@ -2935,6 +3067,548 @@ async def update_protocol_account_credentials(
     return detail
 
 
+
+async def fetch_account_login_code(account_id: int, limit: int = 10) -> Dict[str, Any]:
+    """
+    通过协议号本地 MTProto 活跃会话实时截获 Telegram 官方服务通知 (777000) 的最新登录验证码及安全上下文
+    """
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    pyro_session = _normalize_session_str(acc["session_data"])
+    if Client is None:
+        raise RuntimeError("Pyrogram Client 环境未就绪")
+
+    user_client = Client(
+        name=f"otp_read_{account_id}_{secrets.token_hex(3)}",
+        api_id=acc.get("api_id") or Var.API_ID or 2040,
+        api_hash=acc.get("api_hash") or Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+        session_string=pyro_session,
+        in_memory=True,
+    )
+
+    await user_client.start()
+    try:
+        latest_code = None
+        code_time = None
+        age_seconds = None
+        device = None
+        ip = None
+        location = None
+        raw_text = None
+        recent_messages = []
+
+        now_ts = time.time()
+        async for msg in user_client.get_chat_history(777000, limit=max(1, min(limit, 20))):
+            txt = (msg.text or "").strip()
+            if not txt:
+                continue
+
+            msg_dt = msg.date
+            msg_ts = msg_dt.timestamp() if msg_dt else now_ts
+            diff_sec = max(0, int(now_ts - msg_ts))
+
+            # 智能提取 5~6 位纯数字验证码
+            extracted_code = None
+            m_code = re.search(r"(?:Login\s*code|登录代码|登录验证码|验证码)[^\w\d]*\s*(\d{5,6})\b", txt, re.IGNORECASE)
+            if m_code:
+                extracted_code = m_code.group(1)
+            elif any(k in txt.lower() for k in ("login", "sign in", "登录", "777000", "code")):
+                m_code2 = re.search(r"\b(\d{5,6})\b", txt)
+                if m_code2:
+                    extracted_code = m_code2.group(1)
+
+            # 提取设备、IP 与位置信息
+            dev_m = re.search(r"(?:Device|设备)[^\w\d]*\s*([^\n,，]+)", txt, re.IGNORECASE)
+            ip_m = re.search(r"(?:IP|IP地址)[^\w\d]*\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", txt, re.IGNORECASE)
+            loc_m = re.search(r"(?:Location|位置)[^\w\d]*\s*([^\n]+)", txt, re.IGNORECASE)
+
+            msg_item = {
+                "id": msg.id,
+                "text": txt,
+                "code": extracted_code,
+                "date": msg_dt.strftime("%Y-%m-%d %H:%M:%S") if msg_dt else "",
+                "age_seconds": diff_sec,
+                "device": dev_m.group(1).strip() if dev_m else None,
+                "ip": ip_m.group(1).strip() if ip_m else None,
+                "location": loc_m.group(1).strip() if loc_m else None,
+            }
+            recent_messages.append(msg_item)
+
+            if latest_code is None and extracted_code:
+                latest_code = extracted_code
+                code_time = msg_item["date"]
+                age_seconds = diff_sec
+                device = msg_item["device"]
+                ip = msg_item["ip"]
+                location = msg_item["location"]
+                raw_text = txt
+
+        relative_time_str = "暂无验证码"
+        is_recent = False
+        if age_seconds is not None:
+            is_recent = age_seconds < 600  # 10 分钟以内
+            if age_seconds < 60:
+                relative_time_str = f"{age_seconds} 秒前 (刚刚收到)"
+            elif age_seconds < 3600:
+                relative_time_str = f"{age_seconds // 60} 分钟前"
+            else:
+                relative_time_str = f"{age_seconds // 3600} 小时前"
+
+        return {
+            "account_id": account_id,
+            "phone": acc["phone"],
+            "latest_code": latest_code,
+            "code_time": code_time,
+            "relative_time": relative_time_str,
+            "age_seconds": age_seconds,
+            "is_recent": is_recent,
+            "device": device or "未知设备",
+            "ip": ip or "未知 IP",
+            "location": location or "未知位置",
+            "raw_text": raw_text or "",
+            "pass2fa": acc.get("two_fa_password") or "",
+            "has_two_fa": bool(acc.get("has_two_fa") or acc.get("two_fa_password")),
+            "messages": recent_messages[:6],
+        }
+    finally:
+        try:
+            await user_client.stop()
+        except Exception:
+            pass
+
+
+async def get_account_2fa_status(account_id: int) -> Dict[str, Any]:
+    """
+    通过 MTProto account.GetPassword 实时探测 Telegram 官方 2FA 状态、密码提示与重置风险
+    """
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    pyro_session = _normalize_session_str(acc["session_data"])
+    if Client is None or raw is None:
+        raise RuntimeError("Pyrogram Client 环境未就绪")
+
+    user_client = Client(
+        name=f"2fa_chk_{account_id}_{secrets.token_hex(3)}",
+        api_id=acc.get("api_id") or Var.API_ID or 2040,
+        api_hash=acc.get("api_hash") or Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+        session_string=pyro_session,
+        in_memory=True,
+    )
+
+    await user_client.start()
+    try:
+        r = await user_client.invoke(raw.functions.account.GetPassword())
+        has_password = bool(getattr(r, "has_password", False))
+        hint = str(getattr(r, "hint", "") or "")
+        has_recovery = bool(getattr(r, "has_recovery", False))
+        login_email = getattr(r, "login_email_pattern", None)
+        pending_reset_date = getattr(r, "pending_reset_date", None)
+        has_pending_reset = bool(pending_reset_date and pending_reset_date > 0)
+
+        db_updates = {}
+        if has_password != bool(acc.get("has_two_fa")):
+            db_updates["has_two_fa"] = 1 if has_password else 0
+        if hint and hint != (acc.get("two_fa_hint") or ""):
+            db_updates["two_fa_hint"] = hint
+        if db_updates:
+            db.update_protocol_account(account_id, **db_updates)
+
+        return {
+            "account_id": account_id,
+            "phone": acc["phone"],
+            "has_password": has_password,
+            "hint": hint,
+            "has_recovery": has_recovery,
+            "login_email_pattern": login_email or "",
+            "pending_reset_date": pending_reset_date,
+            "has_pending_reset": has_pending_reset,
+            "saved_two_fa_password": acc.get("two_fa_password") or "",
+        }
+    finally:
+        try:
+            await user_client.stop()
+        except Exception:
+            pass
+
+
+def generate_strong_2fa_password(prefix: str = "Mr-", length: int = 12) -> str:
+    """
+    生成格式清晰、防视觉混淆的高强度 2FA 密码
+    采用 Mr- 前缀 + 12 位不混淆的大小写字母与数字组合（如 Mr-8kP4xV9mQ2wL）
+    """
+    alphabet = "23456789abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"
+    rand_part = "".join(secrets.choice(alphabet) for _ in range(length))
+    return f"{prefix}{rand_part}"
+
+
+async def update_account_2fa_password(
+    account_id: int,
+    new_password: Optional[str] = None,
+    current_password: Optional[str] = None,
+    hint: str = "",
+) -> Dict[str, Any]:
+    """
+    为协议号开启或修改 2FA 云密码并更新本地数据库
+    支持自动生成高强度新密码，并按优先级自动尝试候选旧密码完成验证
+    """
+    clean_new_pass = str(new_password or "").strip()
+    if not clean_new_pass or clean_new_pass.lower() == "auto":
+        clean_new_pass = generate_strong_2fa_password()
+
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    pyro_session = _normalize_session_str(acc["session_data"])
+    if Client is None or raw is None:
+        raise RuntimeError("Pyrogram Client 环境未就绪")
+
+    user_client = Client(
+        name=f"2fa_up_{account_id}_{secrets.token_hex(3)}",
+        api_id=acc.get("api_id") or Var.API_ID or 2040,
+        api_hash=acc.get("api_hash") or Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+        session_string=pyro_session,
+        in_memory=True,
+    )
+
+    await user_client.start()
+    try:
+        r = await user_client.invoke(raw.functions.account.GetPassword())
+        has_password = bool(getattr(r, "has_password", False))
+
+        matched_old = None
+        if not has_password:
+            logger.info(f"协议号 {acc['phone']} 尚未设置 2FA 云密码，正在开启...")
+            await user_client.enable_cloud_password(password=clean_new_pass, hint=hint or "")
+            action = "created"
+        else:
+            candidates: List[str] = []
+            if current_password and str(current_password).strip():
+                candidates.append(str(current_password).strip())
+            if acc.get("two_fa_password") and str(acc["two_fa_password"]).strip():
+                p = str(acc["two_fa_password"]).strip()
+                if p not in candidates:
+                    candidates.append(p)
+
+            # 号商历史高频默认密码池兜底
+            for dp in ("z4422404", "qq1122", "8899"):
+                if dp not in candidates:
+                    candidates.append(dp)
+
+            logger.info(f"协议号 {acc['phone']} 已存在 2FA 云密码，正在尝试候选原密码修改为新密码...")
+            success = False
+            last_err = None
+            for cand in candidates:
+                try:
+                    await user_client.change_cloud_password(
+                        current_password=cand,
+                        new_password=clean_new_pass,
+                        new_hint=hint or "",
+                    )
+                    success = True
+                    matched_old = cand
+                    action = "updated"
+                    logger.info(f"协议号 {acc['phone']} 原 2FA 密码匹配成功 ({cand})，已更新为新密码！")
+                    break
+                except Exception as cand_err:
+                    err_str = str(cand_err).upper()
+                    err_cls = cand_err.__class__.__name__
+                    if "PASSWORD_HASH_INVALID" in err_str or "INVALID PASSWORD" in err_str or "PasswordHashInvalid" in err_cls:
+                        last_err = cand_err
+                        continue
+                    raise cand_err
+
+            if not success:
+                raise ValueError(f"修改 2FA 密码失败：候选原密码校验未通过 ({last_err or '请手动输入原密码'})")
+
+        db.update_protocol_account(
+            account_id,
+            two_fa_password=clean_new_pass,
+            two_fa_hint=hint or "",
+            has_two_fa=1,
+        )
+        logger.info(f"协议号 {acc['phone']} 2FA 云密码已成功更新并落库！")
+
+        return {
+            "success": True,
+            "action": action,
+            "message": "2FA 云密码已成功设置并持久化落库！",
+            "phone": acc["phone"],
+            "new_password": clean_new_pass,
+            "has_two_fa": True,
+            "hint": hint or "",
+            "matched_old_password": matched_old,
+        }
+    finally:
+        try:
+            await user_client.stop()
+        except Exception:
+            pass
+
+
+async def terminate_account_other_sessions(account_id: int) -> Dict[str, Any]:
+    """
+    一键注销除当前 MistRelay 之外的所有外部已登录会话 (Terminate All Other Sessions)
+    """
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    pyro_session = _normalize_session_str(acc["session_data"])
+    if Client is None or raw is None:
+        raise RuntimeError("Pyrogram Client 环境未就绪")
+
+    user_client = Client(
+        name=f"term_sess_{account_id}_{secrets.token_hex(3)}",
+        api_id=acc.get("api_id") or Var.API_ID or 2040,
+        api_hash=acc.get("api_hash") or Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+        session_string=pyro_session,
+        in_memory=True,
+    )
+
+    await user_client.start()
+    try:
+        before_auths = []
+        try:
+            res_auths = await user_client.invoke(raw.functions.account.GetAuthorizations())
+            before_auths = getattr(res_auths, "authorizations", []) or []
+        except Exception as e:
+            logger.warning(f"获取授权会话列表失败: {e}")
+
+        total_before = len(before_auths)
+
+        try:
+            await user_client.invoke(raw.functions.auth.ResetAuthorizations())
+        except Exception as reset_err:
+            err_name = reset_err.__class__.__name__
+            if "FreshReset" in err_name or "FRESH_RESET_AUTHORISATION_FORBIDDEN" in str(reset_err):
+                return {
+                    "success": False,
+                    "restricted": True,
+                    "total_sessions": total_before,
+                    "message": "该会话在当前设备登录未满 24 小时，受 Telegram 官方安全风控限制暂不可踢除其他设备。但只要 2FA 云密码已修改，号商外部会话掉线后无法再次登录，请在 24 小时后重试踢除！",
+                }
+            raise reset_err
+
+        after_count = 1
+        try:
+            res_auths2 = await user_client.invoke(raw.functions.account.GetAuthorizations())
+            after_count = len(getattr(res_auths2, "authorizations", []) or [])
+        except Exception:
+            pass
+
+        terminated_count = max(0, total_before - after_count)
+        return {
+            "success": True,
+            "terminated_count": terminated_count,
+            "remaining_sessions": after_count,
+            "message": f"成功踢除 {terminated_count} 个外部设备会话！当前仅保留 MistRelay 本地会话。",
+        }
+    finally:
+        try:
+            await user_client.stop()
+        except Exception:
+            pass
+
+
+async def cancel_account_password_reset(account_id: int) -> Dict[str, Any]:
+    """
+    一键撤销正在进行的 Telegram 密码重置申请，阻断外部收回
+    """
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    pyro_session = _normalize_session_str(acc["session_data"])
+    if Client is None or raw is None:
+        raise RuntimeError("Pyrogram Client 环境未就绪")
+
+    user_client = Client(
+        name=f"cancel_reset_{account_id}_{secrets.token_hex(3)}",
+        api_id=acc.get("api_id") or Var.API_ID or 2040,
+        api_hash=acc.get("api_hash") or Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+        session_string=pyro_session,
+        in_memory=True,
+    )
+
+    await user_client.start()
+    try:
+        await user_client.invoke(raw.functions.account.DeclinePasswordReset())
+        return {
+            "success": True,
+            "message": "已成功撤销 Telegram 密码重置申请，账号所有权锁定！",
+        }
+    finally:
+        try:
+            await user_client.stop()
+        except Exception:
+            pass
+
+
+def bind_local_otp_url(account_id: int, replace_code_url: bool = True) -> Dict[str, Any]:
+    """
+    为协议号绑定专属本地安全接码链接，并可选替换号商原有 code_url
+    """
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    token = acc.get("local_otp_token")
+    if not token:
+        token = secrets.token_hex(16)
+        db.update_protocol_account(account_id, local_otp_token=token)
+
+    local_path = f"/api/telegram/botfather/otp/{token}"
+    if replace_code_url:
+        db.update_protocol_account(account_id, code_url=local_path)
+
+    return {
+        "account_id": account_id,
+        "token": token,
+        "otp_path": local_path,
+        "code_url": local_path if replace_code_url else (acc.get("code_url") or ""),
+    }
+
+
+async def takeover_protocol_account(
+    account_id: int,
+    new_password: Optional[str] = None,
+    hint: str = "MistRelay",
+) -> Dict[str, Any]:
+    """
+    一键全自动安全接管指定协议号：
+    1. 自动生成（或使用指定的）高强度 2FA 云密码并更新至 Telegram 与本地数据库；
+    2. 自动绑定本机自主接码链接并替换号商 code_url；
+    3. 自动注销号商其他所有外部设备会话 (Terminate Other Sessions)。
+    """
+    acc = db.get_protocol_account_by_id(int(account_id))
+    if not acc:
+        raise KeyError(f"未找到 ID={account_id} 的协议号记录")
+
+    clean_new_pass = str(new_password or "").strip()
+    if not clean_new_pass or clean_new_pass.lower() == "auto":
+        clean_new_pass = generate_strong_2fa_password()
+
+    pass_res = await update_account_2fa_password(
+        account_id=account_id,
+        new_password=clean_new_pass,
+        hint=hint,
+    )
+    final_new_pass = pass_res.get("new_password", clean_new_pass)
+
+    otp_res = bind_local_otp_url(account_id=account_id, replace_code_url=True)
+
+    try:
+        term_res = await terminate_account_other_sessions(account_id=account_id)
+    except Exception as term_err:
+        logger.warning(f"接管协议号 {acc['phone']} 时踢除外部设备异常: {term_err}")
+        term_res = {"success": False, "terminated_count": 0, "message": str(term_err)}
+
+    db.update_protocol_account(
+        account_id,
+        is_taken_over=1,
+        taken_over_at=db._now_iso(),
+    )
+
+    detail = await get_protocol_account_detail(account_id)
+    terminated_cnt = term_res.get("terminated_count", 0)
+    is_restricted = bool(term_res.get("restricted", False))
+
+    msg = f"协议号 {acc['phone']} 已完成全自动安全接管！新 2FA 密码 ({final_new_pass}) 已加锁落库，接码已切换为本机链接。"
+    if is_restricted:
+        msg += "（注：新会话未满 24h 暂不可踢旧设备，但因 2FA 已改，号商无法再登）"
+    elif term_res.get("success"):
+        msg += f" 已踢除 {terminated_cnt} 个外部设备！"
+
+    return {
+        "success": True,
+        "account_id": account_id,
+        "phone": acc["phone"],
+        "new_password": final_new_pass,
+        "hint": hint,
+        "otp_path": otp_res.get("otp_path"),
+        "code_url": otp_res.get("code_url"),
+        "terminated_count": terminated_cnt,
+        "restricted": is_restricted,
+        "message": msg,
+        "detail": detail,
+    }
+
+
+async def takeover_all_protocol_accounts(
+    account_ids: Optional[List[int]] = None,
+    only_unsecured: bool = True,
+    force_all: bool = False,
+) -> Dict[str, Any]:
+    """
+    全池（或指定账号列表）批量自动生成专属强密码并一键安全接管。
+    默认自动跳过已完成安全接管的协议号，仅对未接管账号执行操作。
+    """
+    all_pool = db.list_protocol_accounts()
+    pool_total = len(all_pool)
+    already_taken_over_count = sum(1 for a in all_pool if is_account_taken_over(a))
+
+    if account_ids:
+        candidates = [db.get_protocol_account_by_id(int(aid)) for aid in account_ids]
+        candidates = [a for a in candidates if a]
+    else:
+        candidates = [a for a in all_pool if a.get("status") != "invalid"]
+
+    if only_unsecured and not force_all:
+        accounts = [a for a in candidates if not is_account_taken_over(a)]
+        skipped_count = already_taken_over_count
+    else:
+        accounts = candidates
+        skipped_count = 0
+
+    total = len(accounts)
+    success_count = 0
+    failed_count = 0
+    results = []
+
+    for idx, acc in enumerate(accounts):
+        aid = acc["id"]
+        phone = acc["phone"]
+        try:
+            res = await takeover_protocol_account(aid)
+            success_count += 1
+            results.append({
+                "account_id": aid,
+                "phone": phone,
+                "success": True,
+                "new_password": res["new_password"],
+                "terminated_count": res.get("terminated_count", 0),
+                "restricted": res.get("restricted", False),
+                "message": res["message"],
+            })
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"批量接管协议号 {phone} 失败: {e}")
+            results.append({
+                "account_id": aid,
+                "phone": phone,
+                "success": False,
+                "error": str(e),
+            })
+        if idx < total - 1:
+            await asyncio.sleep(1.2)
+
+    return {
+        "success": True,
+        "pool_total": pool_total,
+        "total": total,
+        "skipped_count": skipped_count,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "results": results,
+        "pool": [sanitize_account_record(a) for a in db.list_protocol_accounts()],
+    }
+
+
 async def keepalive_protocol_account(account_id: int, check_bots: bool = False) -> Dict[str, Any]:
     """
     对指定协议号资产发起一次轻量 MTProto 保活连接，刷新账号档案与活跃时间，
@@ -3196,3 +3870,237 @@ def get_keepalive_worker() -> ProtocolKeepaliveWorker:
     if _keepalive_worker is None:
         _keepalive_worker = ProtocolKeepaliveWorker()
     return _keepalive_worker
+
+
+
+# ============================================================================
+# 多租户专属存储频道开通与 DC 区域智能探测引擎
+# ============================================================================
+
+def detect_user_dc_id(tg_user: Any) -> int:
+    """
+    根据 Telegram 用户的 Peer/头像或客户端语言偏好智能探测其归属的 DC 数据中心编号 (1~5)
+    """
+    if tg_user is None:
+        return 5
+
+    # 1. 优先读取 Telegram 官方附带的 dc_id (若用户设置了头像，Pyrogram User 会解析出 dc_id)
+    dc_attr = getattr(tg_user, "dc_id", None)
+    if dc_attr and isinstance(dc_attr, int) and 1 <= dc_attr <= 5:
+        return dc_attr
+
+    # 2. 检查 photo 属性中是否有 dc_id
+    photo = getattr(tg_user, "photo", None)
+    if photo:
+        p_dc = getattr(photo, "dc_id", None)
+        if p_dc and isinstance(p_dc, int) and 1 <= p_dc <= 5:
+            return p_dc
+
+    # 3. 若无头像，根据客户端语言代码 language_code 智能判定
+    lang = (getattr(tg_user, "language_code", None) or "").lower().strip()
+    if any(lang.startswith(p) for p in ("zh", "ja", "ko", "my", "id", "th", "vi", "fil", "ms", "km", "lo")):
+        return 5  # DC5 亚太/新加坡
+    if any(lang.startswith(p) for p in ("ru", "uk", "be", "kz", "uz", "az", "hy", "ka")):
+        return 2  # DC2 欧洲/阿姆斯特丹
+    if any(lang.startswith(p) for p in ("en", "es", "pt", "fr", "de", "it", "nl")):
+        return 1  # DC1 美洲/迈阿密
+
+    # 4. 默认分配系统配置的 DEFAULT_TENANT_DC_ID (默认 DC5)
+    try:
+        default_dc = int(db.get_config("DEFAULT_TENANT_DC_ID", 5) or 5)
+        if 1 <= default_dc <= 5:
+            return default_dc
+    except Exception:
+        pass
+    return 5
+
+
+async def provision_user_storage_channel(
+    username: str,
+    target_dc_id: int = 5,
+    tg_user_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    从协议号资产池中优先挑选与用户 target_dc_id 相同的有效协议号，
+    自动调用 MTProto 创建专属公开存储频道（设置随机公开 Handle），
+    并将主控 Bot 与同区写节点 Bot 提权为管理员。
+    """
+    accs = db.list_protocol_accounts()
+    valid_accs = [a for a in accs if a.get("status") != "invalid" and a.get("session_data")]
+    if not valid_accs:
+        raise RuntimeError("协议号资产池中无可用的 Telegram 协议号，请先在「自动铸机」页面导入协议号")
+
+    try:
+        all_users = db.list_users()
+        account_channel_counts = {}
+        for u in all_users:
+            cid_acc = u.get("creator_account_id")
+            if cid_acc:
+                account_channel_counts[int(cid_acc)] = account_channel_counts.get(int(cid_acc), 0) + 1
+    except Exception:
+        account_channel_counts = {}
+
+    def _acc_score(acc_item: dict) -> tuple:
+        s = sanitize_account_record(acc_item)
+        acc_dc = s.get("dc_id") or 1
+        is_same_dc = (acc_dc == target_dc_id)
+        dc_diff = 0 if is_same_dc else abs(acc_dc - target_dc_id)
+        ch_count = account_channel_counts.get(int(acc_item["id"]), 0)
+        is_near_limit = ch_count >= 8
+        return (is_near_limit, not is_same_dc, dc_diff, ch_count, acc_item["id"])
+
+    sorted_accs = sorted(valid_accs, key=_acc_score)
+
+    if Client is None:
+        raise RuntimeError("Pyrogram Client 环境未就绪")
+
+    last_err = None
+    for acc_idx, selected_acc in enumerate(sorted_accs):
+        selected_meta = sanitize_account_record(selected_acc)
+        acc_dc_id = selected_meta.get("dc_id") or target_dc_id or 5
+
+        logger.info(
+            f"[多租户建频] 为用户 {username} (TG ID: {tg_user_id}, 偏好 DC: {target_dc_id}) "
+            f"分配协议号 ID={selected_acc['id']} (Phone: {selected_acc['phone']}, 实际 DC: {acc_dc_id})"
+        )
+
+        pyro_session = _normalize_session_str(selected_acc["session_data"])
+        user_client = Client(
+            name=f"prov_chan_{selected_acc['id']}_{secrets.token_hex(3)}",
+            api_id=selected_acc.get("api_id") or Var.API_ID or 2040,
+            api_hash=selected_acc.get("api_hash") or Var.API_HASH or "b18441a1ff607e10a989891a5462e627",
+            session_string=pyro_session,
+            in_memory=True,
+        )
+
+        await user_client.start()
+        try:
+            title_suffix = f" - {username}" if username else ""
+            chan_title = f"MistRelay Cloud{title_suffix}"
+            chan_desc = "MistRelay Dedicated Cloud Storage Channel"
+            created_chat = await user_client.create_channel(
+                title=chan_title,
+                description=chan_desc,
+            )
+            channel_id = created_chat.id
+
+            channel_username = None
+            quota_exceeded = False
+            for attempt in range(5):
+                suffix = secrets.token_hex(4)
+                uid_tag = str(tg_user_id)[-4:] if tg_user_id else secrets.token_hex(2)
+                raw_prefix = str(db.get_config("TENANT_CHANNEL_PREFIX", "mr_u") or "mr_u").strip()
+                clean_prefix = re.sub(r"[^a-zA-Z0-9_]", "", raw_prefix).lower() or "mr_u"
+                if not clean_prefix[0].isalpha():
+                    clean_prefix = f"mr_{clean_prefix}"
+                candidate_username = f"{clean_prefix}{uid_tag}_{suffix}" 
+                try:
+                    await user_client.set_chat_username(channel_id, candidate_username)
+                    channel_username = candidate_username
+                    break
+                except Exception as e:
+                    err_msg = str(e)
+                    if "PUBLIC_TOO_MUCH" in err_msg or "CHANNELS_ADMIN_PUBLIC_TOO_MUCH" in err_msg or "CHANNELS_TOO_MUCH" in err_msg:
+                        logger.warning(f"协议号 ID={selected_acc['id']} 公开频道配额已达上限: {e}")
+                        quota_exceeded = True
+                        break
+                    logger.warning(f"设置频道公开 Handle @{candidate_username} 失败 (尝试 {attempt + 1}/5): {e}")
+                    await asyncio.sleep(0.3)
+
+            if not channel_username:
+                if quota_exceeded and acc_idx < len(sorted_accs) - 1:
+                    logger.info(f"协议号 ID={selected_acc['id']} 公开频道配额已满，清理空频道并自动切换下一个协议号重试...")
+                    try:
+                        await user_client.delete_channel(channel_id)
+                    except Exception:
+                        pass
+                    continue
+
+                candidate_username = f"mr_box_{int(time.time())}_{secrets.token_hex(2)}"
+                try:
+                    await user_client.set_chat_username(channel_id, candidate_username)
+                    channel_username = candidate_username
+                except Exception as e:
+                    logger.warning(f"设置兜底频道 Handle 失败: {e}")
+                    channel_username = f"channel_{abs(channel_id)}"
+
+            try:
+                from pyrogram.types import ChatPrivileges
+                admin_privileges = ChatPrivileges(
+                    can_manage_chat=True,
+                    can_post_messages=True,
+                    can_edit_messages=True,
+                    can_delete_messages=True,
+                    can_invite_users=True,
+                )
+            except Exception:
+                admin_privileges = None
+
+            bot_candidates = []
+            try:
+                from WebStreamer.bot import StreamBot
+                if StreamBot and getattr(StreamBot, "me", None) and getattr(StreamBot.me, "username", None):
+                    bot_candidates.append(StreamBot.me.username)
+            except Exception:
+                pass
+
+            try:
+                from WebStreamer.bot.clients import multi_clients
+                for idx, cl in list(multi_clients.items())[:3]:
+                    if getattr(cl, "me", None) and getattr(cl.me, "username", None):
+                        if cl.me.username not in bot_candidates:
+                            bot_candidates.append(cl.me.username)
+            except Exception:
+                pass
+
+            for b_uname in bot_candidates:
+                try:
+                    if admin_privileges is not None:
+                        await user_client.promote_chat_member(
+                            chat_id=channel_id,
+                            user_id=b_uname,
+                            privileges=admin_privileges,
+                        )
+                    else:
+                        await user_client.promote_chat_member(chat_id=channel_id, user_id=b_uname)
+                    logger.info(f"成功将机器人 @{b_uname} 提权为专属频道管理员 (chat_id={channel_id})")
+                except Exception as e:
+                    logger.warning(f"提权机器人 @{b_uname} 失败 (已忽略): {e}")
+
+            try:
+                from WebStreamer.bot import StreamBot
+                if StreamBot and getattr(StreamBot, "is_connected", False):
+                    await StreamBot.send_message(
+                        chat_id=channel_id,
+                        text=(
+                            f"🚀 <b>MistRelay 专属云盘存储空间初始化成功</b>\n\n"
+                            f"👤 <b>归属用户:</b> <code>{username}</code> (ID: <code>{tg_user_id or 'N/A'}</code>)\n"
+                            f"🌐 <b>数据中心:</b> <code>DC{acc_dc_id}</code>\n"
+                            f"📡 <b>公开句柄:</b> @{channel_username}\n\n"
+                            f"💡 <i>此频道用于安全物理隔离存储您的个人媒体与转存文件，支持全集群 55+ Bot 免加群并发极速串流。</i>"
+                        ),
+                    )
+            except Exception as e:
+                logger.warning(f"发送频道初始化消息失败 (已忽略): {e}")
+
+            return {
+                "bin_channel_id": channel_id,
+                "bin_channel_username": channel_username,
+                "dc_id": acc_dc_id,
+                "creator_account_id": selected_acc["id"],
+            }
+        except Exception as e:
+            last_err = e
+            if acc_idx < len(sorted_accs) - 1:
+                logger.warning(f"协议号 ID={selected_acc['id']} 建频异常 ({e})，切换下一协议号重试...")
+                continue
+            raise e
+        finally:
+            try:
+                await user_client.stop()
+            except Exception:
+                pass
+
+    if last_err:
+        raise last_err
+    raise RuntimeError("无法开通专属存储频道")

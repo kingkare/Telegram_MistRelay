@@ -52,6 +52,10 @@ class TestTenBotLoadBalancing(unittest.IsolatedAsyncioTestCase):
         bot_mod.channel_write_clients.clear()
         bot_mod.bot_channel_modes.clear()
         bot_mod.bot_runtime.clear()
+        self.orig_multi_tokens = Var.MULTI_BOT_TOKENS
+        self.orig_multi_client = Var.MULTI_CLIENT
+        self.orig_bot_token = Var.BOT_TOKEN
+        self.orig_bin_channel = Var.BIN_CHANNEL
         Var.MULTI_BOT_TOKENS = []
         Var.MULTI_CLIENT = False
         Var.BOT_TOKEN = "111111111:AAAPrimaryBotToken1234567890abcdef"
@@ -66,6 +70,10 @@ class TestTenBotLoadBalancing(unittest.IsolatedAsyncioTestCase):
         bot_mod.channel_write_clients.add(0)
 
     def tearDown(self):
+        Var.MULTI_BOT_TOKENS = self.orig_multi_tokens
+        Var.MULTI_CLIENT = self.orig_multi_client
+        Var.BOT_TOKEN = self.orig_bot_token
+        Var.BIN_CHANNEL = self.orig_bin_channel
         bot_mod.multi_clients.clear()
         bot_mod.work_loads.clear()
         bot_mod.channel_accessible_clients.clear()

@@ -1,3 +1,4 @@
+import pyrogram_patch
 import asyncio
 import datetime
 import logging
@@ -90,605 +91,160 @@ client = AsyncAria2Client(RPC_SECRET, f'ws://{docker_rpc_url}', bot)
 aria2_client = client
 
 
-@bot.on(events.NewMessage(pattern="/start", from_users=ADMIN_ID))
-async def handler(event):
-    welcome_msg = (
-        f"🤖 <b>MistRelay 下载机器人</b>\n\n"
-        f"📥 支持HTTP、磁力、种子下载\n"
-        f"☁️ 支持Telegram频道网盘自动上传\n"
-        f"🔗 支持Telegram文件直链生成\n\n"
-        f"👤 你的ID: <code>{event.chat_id}</code>\n\n"
-        f"💡 使用下方菜单按钮或发送 <code>/help</code> 查看帮助"
-    )
-    await event.reply(welcome_msg, parse_mode='html', buttons=get_menu())
+def _is_authorized_tg_user(sender_id: int) -> bool:
+    if not sender_id:
+        return False
+    try:
+        if ADMIN_ID and int(sender_id) == int(ADMIN_ID):
+            return True
+    except (ValueError, TypeError):
+        pass
+    if Var and Var.ALLOWED_USERS and str(sender_id) in Var.ALLOWED_USERS:
+        return True
+    try:
+        import db
+        u = db.get_user_by_tg_id(int(sender_id))
+        return bool(u)
+    except Exception:
+        return False
 
 
-@bot.on(events.NewMessage(pattern="/menu", from_users=ADMIN_ID))
-async def handler(event):
-    await event.reply("📋 功能菜单", parse_mode='html', buttons=get_menu())
+@bot.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
+async def handle_private_message(event):
+    """
+    处理 Telegram 私聊消息：
+    - 所有指令 (如 /start, /help, /register) 均由 Pyrogram StreamBot 统一响应并自动清除历史残留键盘
+    - 支持授权用户直接发送 HTTP 链接、磁力链接 (magnet:) 或种子文件 (.torrent) 投递 Aria2 下载
+    """
+    sender_id = event.sender_id
+    if not _is_authorized_tg_user(sender_id):
+        return
 
+    text = (event.raw_text or "").strip()
 
-@bot.on(events.NewMessage(pattern="/info", from_users=ADMIN_ID))
-async def handler(event):
-    result = await client.get_global_option()
-    await event.respond(
-        f'下载目录: {result["dir"]}\n'
-        f'最大同时下载数: {result["max-concurrent-downloads"]}\n'
-        f'允许覆盖: {"是" if result["allow-overwrite"] else "否"}'
-    )
+    # 指令由 Pyrogram StreamBot 统一处理并清除客户端旧版键盘，Telethon 忽略
+    if text.startswith("/"):
+        return
 
-
-@bot.on(events.NewMessage(pattern="/help", from_users=ADMIN_ID))
-async def handler(event):
-    help_text = (
-        f"📖 <b>MistRelay 使用帮助</b>\n\n"
-        f"<b>📋 基本命令：</b>\n"
-        f"• <code>/start</code> - 开始使用并显示菜单\n"
-        f"• <code>/menu</code> - 显示功能菜单\n"
-        f"• <code>/help</code> - 显示此帮助信息\n"
-        f"• <code>/info</code> - 查看系统信息\n"
-        f"• <code>/info</code> - 查看下载服务状态\n\n"
-        f"<b>📥 下载方式：</b>\n"
-        f"• 发送HTTP链接\n"
-        f"• 发送磁力链接（magnet:）\n"
-        f"• 发送种子文件（.torrent）\n"
-        f"• 发送Telegram文件（保存到TG网盘并生成直链）\n\n"
-        f"<b>🎛️ 菜单功能：</b>\n"
-        f"• ⬇️正在下载 - 查看正在下载的任务\n"
-        f"• ⌛️ 正在等待 - 查看等待中的任务\n"
-        f"• ✅ 已完成/停止 - 查看已完成的任务\n"
-        f"• ⏸️暂停任务 - 暂停选中的任务\n"
-        f"• ▶️恢复任务 - 恢复选中的任务\n"
-        f"• ❌ 删除任务 - 删除选中的任务\n"
-        f"• 📊 系统信息 - 查看系统配置信息\n"
-        f"• 🔗 直链状态 - 查看直链功能状态\n"
-        f"• 🗑️ 清空已完成 - 清空所有已完成的任务\n\n"
-        f"👤 你的ID: <code>{event.chat_id}</code>"
-    )
-    await event.reply(help_text, parse_mode='html', buttons=[
-        [Button.url('📚 更多帮助', 'https://github.com/jw-star/aria2bot')],
-        [Button.text('📋 显示菜单', resize=True)]
-    ])
-
-
-@bot.on(events.NewMessage(from_users=ADMIN_ID))
-async def send_welcome(event):
-    text = event.raw_text
     log.info(
-        "%s: admin message received (length=%d, media=%s)",
+        "%s: authorized private message received from %s (length=%d, media=%s)",
         datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        len(text or ""),
+        sender_id,
+        len(text),
         bool(event.media),
     )
-    
-    # 任务查看菜单
-    if text == '⬇️正在下载':
-        await downloading(event)
-        return
-    elif text == '⌛️ 正在等待':
-        await waiting(event)
-        return
-    elif text == '📋 消息队列':
-        await show_message_queue(event)
-        return
-    elif text == '✅ 已完成/停止':
-        await stoped(event)
-        return
-    # 任务管理菜单
-    elif text == '⏸️暂停任务':
-        await stop_task(event)
-        return
-    elif text == '▶️恢复任务':
-        await unpause_task(event)
-        return
-    elif text == '❌ 删除任务':
-        await remove_task(event)
-        return
-    elif text == '🗑️ 清空已完成':
-        await remove_all(event)
-        return
-    # 系统功能菜单
-    elif text == '📊 系统信息':
-        result = await client.get_global_option()
-        msg = await event.respond(
-            f'📁 下载目录: <code>{result["dir"]}</code>\n'
-            f'🔢 最大同时下载数: <code>{result["max-concurrent-downloads"]}</code>\n'
-            f'🔄 允许覆盖: {"是" if result["allow-overwrite"] else "否"}\n'
-            f'📎 直链功能: {"已启用" if ENABLE_STREAM else "已禁用"}',
-            parse_mode='html'
-        )
-        await auto_delete_message(msg)
-        return
-    elif text == '🔗 直链状态':
-        if ENABLE_STREAM and Var:
-            status = "✅ 已启用" if Var.ENABLE_STREAM else "❌ 已禁用"
-            auto_download = "✅ 已启用" if Var.AUTO_DOWNLOAD else "❌ 已禁用"
-            bin_channel = f"<code>{Var.BIN_CHANNEL}</code>" if Var.BIN_CHANNEL else "❌ 未配置"
-            stream_url = Var.URL if Var else "未配置"
-            msg = await event.respond(
-                f'📎 <b>直链功能状态</b>\n\n'
-                f'状态: {status}\n'
-                f'自动下载兼容开关: {auto_download}\n'
-                f'日志频道: {bin_channel}\n'
-                f'Web地址: <code>{stream_url}</code>',
-                parse_mode='html'
+
+    # 查询发送者绑定的租户账号与专属频道
+    import db
+    db_u = None
+    try:
+        db_u = db.get_user_by_tg_id(int(sender_id))
+    except Exception:
+        pass
+
+    is_admin = False
+    try:
+        if ADMIN_ID and int(sender_id) == int(ADMIN_ID):
+            is_admin = True
+    except (ValueError, TypeError):
+        pass
+    if db_u and db_u.get("role") == "admin":
+        is_admin = True
+
+    # 非管理员普通租户若未分配专属存储频道，禁止投递下载，避免文件无处存放或物理流入公用频道
+    if not is_admin:
+        if not db_u or not db_u.get("bin_channel_id"):
+            log.warning("拒绝未分配专属存储频道的普通租户投递下载任务 sender_id=%s", sender_id)
+            await event.reply(
+                "⚠️ 您尚未开通或绑定专属存储频道，无法接收转存文件。\n"
+                "请先使用 /register 完成注册开通专属空间后再试。"
             )
-        else:
-            msg = await event.respond('❌ 直链功能未启用', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    elif text == '⚖️ 负载状态':
-        await show_load_status(event)
-        return
-    elif text == '📋 显示菜单':
-        await event.reply("📋 功能菜单", parse_mode='html', buttons=get_menu())
-        return
-    elif text == '🔄 刷新菜单':
-        await event.reply("菜单已刷新", buttons=get_menu())
-        return
-    elif text == '❌ 关闭键盘':
-        await event.reply("键盘已关闭，发送 <code>/start</code> 或 <code>/menu</code> 重新开启", parse_mode='html', buttons=Button.clear())
-        return
-    # 获取输入信息
-    if text.startswith('http'):
-        url_arr = [u.strip() for u in text.split('\n') if u.strip()]
+            return
+
+    user_id = db_u["id"] if db_u else None
+    target_channel_id = db_u.get("bin_channel_id") if db_u else None
+    if is_admin and not target_channel_id:
+        try:
+            target_channel_id = int(Var.BIN_CHANNEL) if getattr(Var, "BIN_CHANNEL", None) else None
+        except (ValueError, TypeError):
+            target_channel_id = getattr(Var, "BIN_CHANNEL", None)
+
+    # 1. 磁力链接下载 (支持 40位Hex、32位Base32、混排文本及附加参数)
+    magnet_matches = list(dict.fromkeys(re.findall(
+        r'magnet:\?xt=urn:btih:(?:[0-9a-fA-F]{40,64}|[2-7a-zA-Z]{32})(?:&[^\s<>"\'`]+)?',
+        text,
+        flags=re.IGNORECASE,
+    )))
+    if magnet_matches:
+        for magnet_uri in magnet_matches:
+            res = await client.add_uri(
+                uris=[magnet_uri],
+            )
+            gid = res.get("result") if isinstance(res, dict) else None
+            if gid:
+                try:
+                    db.create_download(
+                        file_unique_id=f"aria2_{gid}",
+                        gid=gid,
+                        source_url=magnet_uri,
+                        user_id=user_id,
+                        target_channel_id=target_channel_id,
+                    )
+                except Exception as db_err:
+                    log.error("创建磁力下载记录关联租户失败 gid=%s: %s", gid, db_err)
+    # 2. HTTP 链接下载
+    elif text.startswith("http"):
+        url_arr = [u.strip() for u in text.split("\n") if u.strip()]
         # 过滤掉 Telegram 链接（由 Pyrogram 频道采集器/直链功能处理，避免误入 Aria2）
         aria2_urls = [
             u for u in url_arr
-            if not re.search(r'(?:https?://)?(?:t\.me|telegram\.me)/', u, re.IGNORECASE)
+            if not re.search(r"(?:https?://)?(?:t\.me|telegram\.me)/", u, re.IGNORECASE)
         ]
         if aria2_urls:
             for url in aria2_urls:
-                await client.add_uri(
+                res = await client.add_uri(
                     uris=[url],
                 )
+                gid = res.get("result") if isinstance(res, dict) else None
+                if gid:
+                    try:
+                        db.create_download(
+                            file_unique_id=f"aria2_{gid}",
+                            gid=gid,
+                            source_url=url,
+                            user_id=user_id,
+                            target_channel_id=target_channel_id,
+                        )
+                    except Exception as db_err:
+                        log.error("创建下载记录关联租户失败 gid=%s: %s", gid, db_err)
         if not aria2_urls:
-            log.debug('检测到 Telegram 频道/帖子链接，跳过 Aria2，交由 Pyrogram 采集器处理')
+            log.debug("检测到 Telegram 频道/帖子链接，跳过 Aria2，交由 Pyrogram 采集器处理")
             return
-    elif text.startswith('magnet'):
-        pattern_res = re.findall(r'magnet:\?xt=urn:btih:[0-9a-fA-F]{40,}.*', text)
-        for text in pattern_res:
-            await client.add_uri(
-                uris=[text],
-            )
+    # 3. 种子文件处理
     elif event.media:
-        # 处理媒体文件
-        # 如果直链功能启用，媒体文件由Pyrogram客户端处理，Telethon只处理种子文件
-        if ENABLE_STREAM:
-            # 检查是否是种子文件（种子文件需要Telethon处理）
-            if hasattr(event.media, 'document') and event.media.document:
-                if event.media.document.mime_type == 'application/x-bittorrent':
-                    # 种子文件：直接下载并添加到aria2（Telethon处理）
-                    await event.reply('收到了一个种子')
-                    path = await bot.download_media(event.message)
-                    await client.add_torrent(path)
-                else:
-                    # 其他文档类型：由Pyrogram客户端通过直链功能处理，Telethon不处理
-                    log.debug(f"媒体文件由Pyrogram直链功能处理，Telethon跳过")
-                    return
+        if hasattr(event.media, "document") and event.media.document:
+            if event.media.document.mime_type == "application/x-bittorrent":
+                await event.reply("📥 已收到种子文件，正在解析并添加到 Aria2 离线下载队列...")
+                path = await bot.download_media(event.message)
+                res = await client.add_torrent(path)
+                gid = res.get("result") if isinstance(res, dict) else None
+                if gid:
+                    try:
+                        db.create_download(
+                            file_unique_id=f"aria2_{gid}",
+                            gid=gid,
+                            source_url=f"torrent:{os.path.basename(path)}",
+                            user_id=user_id,
+                            target_channel_id=target_channel_id,
+                        )
+                    except Exception as db_err:
+                        log.error("创建种子下载记录关联租户失败 gid=%s: %s", gid, db_err)
             else:
-                # 照片、视频等媒体文件：由Pyrogram客户端通过直链功能处理，Telethon不处理
-                log.debug(f"媒体文件由Pyrogram直链功能处理，Telethon跳过")
+                log.debug("媒体文件由Pyrogram直链功能处理，Telethon跳过")
                 return
         else:
-            # 如果直链功能未启用，Telethon可以处理媒体文件（如果需要）
-            # 目前Telethon不处理非种子文件的媒体文件
-            if hasattr(event.media, 'document') and event.media.document:
-                if event.media.document.mime_type == 'application/x-bittorrent':
-                    # 种子文件：直接下载并添加到aria2
-                    await event.reply('收到了一个种子')
-                    path = await bot.download_media(event.message)
-                    await client.add_torrent(path)
-                else:
-                    log.info("直链功能未启用，媒体文件不进行TG网盘入库")
-                    return
-            else:
-                log.info("直链功能未启用，媒体文件不进行TG网盘入库")
-                return
-
-
-def get_media_from_message(message: "Message") -> Any:
-    media_types = (
-        "audio",
-        "document",
-        "photo",
-        "sticker",
-        "animation",
-        "video",
-        "voice",
-        "video_note",
-    )
-    for attr in media_types:
-        media = getattr(message, attr, None)
-        if media:
-            return media
-
-
-async def auto_delete_message(msg, delay=60):
-    """
-    在指定延迟后自动删除消息
-    
-    Args:
-        msg: 要删除的消息对象
-        delay: 延迟时间（秒），默认60秒
-    """
-    async def _delete():
-        await asyncio.sleep(delay)
-        try:
-            await msg.delete()
-        except Exception as e:
-            log.debug(f"自动删除消息失败: {e}")
-    
-    # 在后台任务中执行删除
-    asyncio.create_task(_delete())
-
-
-async def remove_all(event):
-    # 过滤 已完成或停止
-    tasks = await client.tell_stopped(0, 500)
-    for task in tasks:
-        await client.remove_download_result(task['gid'])
-    result = await client.get_global_option()
-    log.info(f"清空目录: {result['dir']}")
-    shutil.rmtree(result['dir'], ignore_errors=True)
-    msg = await event.respond('任务已清空,所有文件已删除', parse_mode='html')
-    await auto_delete_message(msg)
-
-
-async def unpause_task(event):
-    tasks = await client.tell_waiting(0, 50)
-    # 筛选send_id对应的任务
-    if len(tasks) == 0:
-        msg = await event.respond('没有已暂停的任务,无法恢复下载', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    buttons = []
-    for task in tasks:
-        file_name = get_file_name(task)
-        gid = task['gid']
-        buttons.append([Button.inline(file_name, 'unpause-task.' + gid)])
-    msg = await event.respond('请选择要恢复▶️的任务', parse_mode='html', buttons=buttons)
-    await auto_delete_message(msg)
-
-
-async def remove_task(event):
-    temp_task = []
-    # 正在下载的任务
-    tasks = await client.tell_active()
-    for task in tasks:
-        temp_task.append(task)
-    # 正在等待的任务
-    tasks = await  client.tell_waiting(0, 50)
-    for task in tasks:
-        temp_task.append(task)
-    if len(temp_task) == 0:
-        msg = await event.respond('没有正在运行或等待的任务,无删除选项', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    # 拼接所有任务
-    buttons = []
-    for task in temp_task:
-        file_name = get_file_name(task)
-        gid = task['gid']
-        buttons.append([Button.inline(file_name, 'del-task.' + gid)])
-    msg = await event.respond('请选择要删除❌ 的任务', parse_mode='html', buttons=buttons)
-    await auto_delete_message(msg)
-
-
-async def stop_task(event):
-    tasks = await client.tell_active()
-    if len(tasks) == 0:
-        msg = await event.respond('没有正在运行的任务,无暂停选项,请先添加任务', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    buttons = []
-    for task in tasks:
-        fileName = get_file_name(task)
-        gid = task['gid']
-        buttons.append([Button.inline(fileName, 'pause-task.' + gid)])
-
-    msg = await event.respond('请选择要暂停⏸️的任务', parse_mode='html', buttons=buttons)
-    await auto_delete_message(msg)
-
-
-async def downloading(event):
-    # 先显示消息队列状态
-    queue_msg = ""
-    if ENABLE_STREAM:
-        try:
-            from WebStreamer.bot.plugins.stream import get_queue_status
-            queue_status = await get_queue_status()
-            
-            if queue_status['current_processing']:
-                current = queue_status['current_processing']
-                queue_msg = "📋 <b>消息队列状态</b>\n\n"
-                queue_msg += f"🔄 <b>正在处理:</b>\n"
-                queue_msg += f"  • 任务ID: <code>{current.get('message_id', 'N/A')}</code>\n"
-                queue_msg += f"  • 标题: <code>{current.get('title', '未知')}</code>\n"
-                
-                if current.get('type') == 'media_group':
-                    total = current.get('media_group_total', 0)
-                    queue_msg += f"  • 类型: 媒体组 ({total} 个文件)\n"
-                else:
-                    queue_msg += f"  • 类型: 单个文件\n"
-                
-                task_gids = current.get('task_gids', [])
-                if task_gids:
-                    queue_msg += f"  • 下载任务数: {len(task_gids)}\n"
-                
-                queue_msg += "\n"
-            
-            if queue_status['waiting_count'] > 0:
-                queue_msg += f"⏳ <b>等待中 ({queue_status['waiting_count']} 个):</b>\n"
-                for i, item in enumerate(queue_status['waiting_items'][:10], 1):  # 最多显示10个
-                    if item['type'] == 'media_group':
-                        queue_msg += f"  {i}. <code>{item['title']}</code> 媒体组 ({item['media_group_total']} 个文件)\n"
-                    else:
-                        queue_msg += f"  {i}. <code>{item['title']}</code>\n"
-                
-                if queue_status['waiting_count'] > 10:
-                    queue_msg += f"  ... 还有 {queue_status['waiting_count'] - 10} 个任务\n"
-                queue_msg += "\n"
-        except Exception as e:
-            log.debug(f"获取消息队列状态失败: {e}")
-    
-    # 显示aria2下载任务
-    tasks = await client.tell_active()
-    if len(tasks) == 0:
-        if queue_msg:
-            msg = await event.respond(queue_msg + "\n📥 <b>aria2下载任务</b>\n\n没有正在运行的任务", parse_mode='html')
-        else:
-            msg = await event.respond('没有正在运行的任务', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    
-    empty_header = (queue_msg + "📥 <b>aria2下载任务</b>\n\n") if queue_msg else "📥 <b>aria2下载任务</b>\n\n"
-    send_msg = empty_header
-    for task in tasks:
-        completedLength = task['completedLength']
-        totalLength = task['totalLength']
-        downloadSpeed = task['downloadSpeed']
-        fileName = get_file_name(task)
-        if fileName == '':
-            continue
-        prog = progress(int(totalLength), int(completedLength))
-        size = byte2_readable(int(totalLength))
-        speed = hum_convert(int(downloadSpeed))
-
-        send_msg = send_msg + '📁 <b>' + fileName + '</b>\n'
-        send_msg = send_msg + '进度: ' + prog + '\n'
-        send_msg = send_msg + '大小: ' + size + '\n'
-        send_msg = send_msg + '速度: ' + speed + '/s\n\n'
-    if send_msg == empty_header:
-        msg = await event.respond(send_msg + '个别任务无法识别名称，请使用aria2Ng查看', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    msg = await event.respond(send_msg, parse_mode='html')
-    await auto_delete_message(msg)
-
-
-async def waiting(event):
-    # 显示消息队列等待状态
-    if ENABLE_STREAM:
-        try:
-            from WebStreamer.bot.plugins.stream import get_queue_status
-            queue_status = await get_queue_status()
-            
-            if queue_status['waiting_count'] > 0 or queue_status['current_processing']:
-                queue_msg = "📋 <b>消息队列</b>\n\n"
-                
-                if queue_status['current_processing']:
-                    current = queue_status['current_processing']
-                    queue_msg += f"🔄 <b>正在处理:</b>\n"
-                    queue_msg += f"  • 任务ID: <code>{current.get('message_id', 'N/A')}</code>\n"
-                    queue_msg += f"  • 标题: <code>{current.get('title', '未知')}</code>\n"
-                    
-                    if current.get('type') == 'media_group':
-                        total = current.get('media_group_total', 0)
-                        queue_msg += f"  • 媒体组 ({total} 个文件)\n"
-                    else:
-                        queue_msg += f"  • 单个文件\n"
-                    queue_msg += "\n"
-                
-                if queue_status['waiting_count'] > 0:
-                    queue_msg += f"⏳ <b>等待中 ({queue_status['waiting_count']} 个):</b>\n"
-                    for i, item in enumerate(queue_status['waiting_items'], 1):
-                        queue_msg += f"  {i}. "
-                        if item['type'] == 'media_group':
-                            queue_msg += f"<code>{item['title']}</code> 媒体组 ({item['media_group_total']} 个文件)\n"
-                        else:
-                            queue_msg += f"<code>{item['title']}</code>\n"
-                    queue_msg += "\n"
-                
-                msg = await event.respond(queue_msg, parse_mode='html')
-                await auto_delete_message(msg)
-                return
-        except Exception as e:
-            log.debug(f"获取消息队列状态失败: {e}")
-    
-    # 显示aria2等待任务
-    tasks = await client.tell_waiting(0, 30)
-    if len(tasks) == 0:
-        msg = await event.respond('没有正在等待的任务', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    send_msg = '📥 <b>aria2等待任务</b>\n\n'
-    for task in tasks:
-        completedLength = task['completedLength']
-        totalLength = task['totalLength']
-        downloadSpeed = task['downloadSpeed']
-        fileName = get_file_name(task)
-        prog = progress(int(totalLength), int(completedLength))
-        size = byte2_readable(int(totalLength))
-        speed = hum_convert(int(downloadSpeed))
-        send_msg = send_msg + '📁 <b>' + fileName + '</b>\n'
-        send_msg = send_msg + '进度: ' + prog + '\n'
-        send_msg = send_msg + '大小: ' + size + '\n'
-        send_msg = send_msg + '速度: ' + speed + '\n\n'
-    msg = await event.respond(send_msg, parse_mode='html')
-    await auto_delete_message(msg)
-
-
-async def show_message_queue(event):
-    """显示消息队列状态"""
-    if not ENABLE_STREAM:
-        msg = await event.respond('❌ 直链功能未启用，无法查看消息队列', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    
-    try:
-        from WebStreamer.bot.plugins.stream import get_queue_status
-        queue_status = await get_queue_status()
-        
-        msg = "📋 <b>消息队列状态</b>\n\n"
-
-        # 正在处理的项目（并发模式下可能有多个）
-        processing_items = queue_status.get('processing_items', [])
-        processing_count = queue_status.get('processing_count', 0)
-        # 兼容旧字段：如果没有 processing_items，用 current_processing 补充
-        if not processing_items and queue_status.get('current_processing'):
-            processing_items = [queue_status['current_processing']]
-            processing_count = 1
-
-        if processing_items:
-            msg += f"🔄 <b>正在处理 ({processing_count} 个):</b>\n"
-            for current in processing_items:
-                msg += f"  • 任务ID: <code>{current.get('message_id', 'N/A')}</code>\n"
-                msg += f"    标题: <code>{current.get('title', '未知')}</code>\n"
-                if current.get('type') == 'media_group':
-                    total = current.get('media_group_total', 0)
-                    msg += f"    类型: 媒体组 ({total} 个文件)\n"
-                else:
-                    msg += f"    类型: 单个文件\n"
-                task_gids = current.get('task_gids', [])
-                if task_gids:
-                    msg += f"    下载任务数: {len(task_gids)}\n"
-            msg += "\n"
-        else:
-            msg += "🔄 <b>正在处理:</b> 无\n\n"
-
-        # 等待中的项目
-        if queue_status['waiting_count'] > 0:
-            msg += f"⏳ <b>等待中 ({queue_status['waiting_count']} 个):</b>\n"
-            for i, item in enumerate(queue_status['waiting_items'], 1):
-                msg += f"  {i}. "
-                if item['type'] == 'media_group':
-                    msg += f"<code>{item['title']}</code> 媒体组 ({item['media_group_total']} 个文件)\n"
-                else:
-                    msg += f"<code>{item['title']}</code>\n"
-            msg += "\n"
-        else:
-            msg += "⏳ <b>等待中:</b> 无\n\n"
-
-        # 队列大小（显示实际排队数，不含已取出正在处理的）
-        msg += f"📊 <b>队列大小:</b> {queue_status['queue_size']}（处理中: {processing_count}，等待中: {queue_status['waiting_count']}）\n"
-        
-        response_msg = await event.respond(msg, parse_mode='html')
-        await auto_delete_message(response_msg)
-    except Exception as e:
-        log.error(f"显示消息队列状态失败: {e}", exc_info=True)
-        error_msg = await event.respond(f'❌ 获取消息队列状态失败: {e}', parse_mode='html')
-        await auto_delete_message(error_msg)
-
-
-async def stoped(event):
-    tasks = await client.tell_stopped(0, 30)
-    if len(tasks) == 0:
-        msg = await event.respond('没有已完成或停止的任务', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    send_msg = '📥 <b>已完成/停止的任务</b>\n\n'
-    for task in reversed(tasks):
-        completedLength = task['completedLength']
-        totalLength = task['totalLength']
-        downloadSpeed = task['downloadSpeed']
-        fileName = get_file_name(task)
-        prog = progress(int(totalLength), int(completedLength))
-        size = byte2_readable(int(totalLength))
-        speed = hum_convert(int(downloadSpeed))
-        send_msg = send_msg + '📁 <b>' + fileName + '</b>\n'
-        send_msg = send_msg + '进度: ' + prog + '\n'
-        send_msg = send_msg + '大小: ' + size + '\n'
-        send_msg = send_msg + '速度: ' + speed + '\n\n'
-    msg = await event.respond(send_msg, parse_mode='html')
-    await auto_delete_message(msg)
-
-
-async def show_load_status(event):
-    """显示多机器人负载状态，60秒后自动删除"""
-    if not ENABLE_STREAM:
-        msg = await event.respond('❌ 直链功能未启用，无法查看负载状态', parse_mode='html')
-        await auto_delete_message(msg)
-        return
-    
-    try:
-        # 获取负载信息
-        if not work_loads:
-            load_msg = (
-                '⚖️ <b>负载状态</b>\n\n'
-                '❌ 没有可用的客户端'
-            )
-        else:
-            # 构建负载信息
-            load_lines = []
-            total_load = 0
-            
-            # 按索引排序显示
-            sorted_clients = sorted(work_loads.items(), key=lambda x: x[0])
-            
-            for index, load in sorted_clients:
-                if index in multi_clients:
-                    client = multi_clients[index]
-                    username = getattr(client, 'username', f'Bot{index+1}')
-                    
-                    # 检查是否可访问频道
-                    channel_status = '✅' if index in channel_accessible_clients else '⚠️'
-                    
-                    # 负载指示器
-                    if load == 0:
-                        load_indicator = '⚪'
-                    elif load <= 2:
-                        load_indicator = '🟢'
-                    elif load <= 5:
-                        load_indicator = '🟡'
-                    else:
-                        load_indicator = '🔴'
-                    
-                    # 获取上传负载
-                    upload_load = upload_work_loads.get(index, 0)
-                    total_client_load = load + upload_load
-                    
-                    load_lines.append(
-                        f'{load_indicator} <b>Bot {index + 1}</b> (@{username})\n'
-                        f'   下载负载: <code>{load}</code> | 上传负载: <code>{upload_load}</code> | 总负载: <code>{total_client_load}</code> | 频道: {channel_status}\n'
-                    )
-                    total_load += load
-            
-            # 计算统计信息
-            active_clients = sum(1 for load in work_loads.values() if load > 0)
-            total_clients = len(multi_clients)
-            avg_load = total_load / total_clients if total_clients > 0 else 0
-            
-            load_msg = (
-                '⚖️ <b>多机器人负载状态</b>\n\n'
-                f'📊 <b>统计信息</b>\n'
-                f'总客户端数: <code>{total_clients}</code>\n'
-                f'活跃客户端: <code>{active_clients}</code>\n'
-                f'总负载: <code>{total_load}</code>\n'
-                f'平均负载: <code>{avg_load:.1f}</code>\n\n'
-                f'📋 <b>客户端详情</b>\n' +
-                '\n'.join(load_lines) +
-                f'\n⏰ <i>此消息将在60秒后自动删除</i>'
-            )
-        
-        # 发送消息
-        msg = await event.respond(load_msg, parse_mode='html')
-        await auto_delete_message(msg)
-            
-    except Exception as e:
-        log.error(f"显示负载状态失败: {e}", exc_info=True)
-        error_msg = await event.respond(f'❌ 获取负载状态失败: {e}', parse_mode='html')
-        await auto_delete_message(error_msg)
+            log.debug("媒体文件由Pyrogram直链功能处理，Telethon跳过")
+            return
 
 
 @events.register(events.CallbackQuery)
@@ -716,41 +272,6 @@ async def BotCallbackHandler(event):
                 f'🗑️ 任务已从下载队列中移除'
             )
             await bot.send_message(ADMIN_ID, success_msg, parse_mode='html')
-
-
-def get_menu():
-    """
-    优化的菜单布局
-    第一行：任务查看（下载中、等待中、已完成）
-    第二行：任务管理（暂停、恢复、删除）
-    第三行：系统功能（系统信息、直链状态、负载状态）
-    第四行：其他功能（清空已完成、刷新菜单、关闭键盘）
-    """
-    return [
-        [
-            Button.text('⬇️正在下载', resize=True),
-            Button.text('⌛️ 正在等待', resize=True),
-            Button.text('📋 消息队列', resize=True),
-        ],
-        [
-            Button.text('✅ 已完成/停止', resize=True),
-            Button.text('⏸️暂停任务', resize=True),
-            Button.text('▶️恢复任务', resize=True),
-        ],
-        [
-            Button.text('❌ 删除任务', resize=True),
-            Button.text('🗑️ 清空已完成', resize=True),
-            Button.text('📊 系统信息', resize=True),
-        ],
-        [
-            Button.text('🔗 直链状态', resize=True),
-            Button.text('⚖️ 负载状态', resize=True),
-            Button.text('🔄 刷新菜单', resize=True),
-        ],
-        [
-            Button.text('❌ 关闭键盘', resize=True),
-        ],
-    ]
 
 
 # 入口
@@ -782,10 +303,9 @@ async def main():
         await bot.start(bot_token=BOT_TOKEN)
         bot_me = await bot.get_me()
         commands = [
-            BotCommand(command="start", description='开始使用并显示菜单'),
-            BotCommand(command="menu", description='显示功能菜单'),
-            BotCommand(command="help", description='查看帮助信息'),
-            BotCommand(command="info", description='查看系统信息'),
+            BotCommand(command="start", description='启动云盘服务并查看绑定状态'),
+            BotCommand(command="register", description='获取注册验证码 / 查看专属存储频道'),
+            BotCommand(command="help", description='查看使用指南与功能说明'),
         ]
         await bot(
             SetBotCommandsRequest(
@@ -942,6 +462,21 @@ async def main():
                 bot_info = await StreamBot.get_me()
                 StreamBot.username = bot_info.username
                 log.info(f'直链机器人启动成功: @{bot_info.username}')
+                try:
+                    from WebStreamer.bot.plugins.stream_modules.media_processor import register_stream_handlers
+                    register_stream_handlers(StreamBot)
+                except Exception as reg_err:
+                    log.warning(f'通过 StreamBot 注册消息处理器失败: {reg_err}')
+                try:
+                    from pyrogram.types import BotCommand as PyrogramBotCommand
+                    await StreamBot.set_bot_commands([
+                        PyrogramBotCommand("start", "启动云盘服务并查看绑定状态"),
+                        PyrogramBotCommand("register", "获取注册验证码 / 查看专属存储频道"),
+                        PyrogramBotCommand("help", "查看使用指南与功能说明"),
+                    ])
+                    log.info("已通过 StreamBot 同步更新 Telegram 官方指令菜单 (start, register, help)")
+                except Exception as cmd_err:
+                    log.warning(f"通过 StreamBot 设置指令菜单失败（非致命）: {cmd_err}")
             except Exception as e:
                 error_str = str(e)
                 error_type = type(e).__name__
@@ -959,6 +494,8 @@ async def main():
                             await StreamBot.start()
                             info = await StreamBot.get_me()
                             StreamBot.username = info.username
+                            from WebStreamer.bot.plugins.stream_modules.media_processor import register_stream_handlers
+                            register_stream_handlers(StreamBot)
                             from WebStreamer.bot.clients import register_primary_streambot
                             await register_primary_streambot()
                             log.info(f'主 StreamBot (客户端 0) 后台恢复启动成功: @{info.username}')
@@ -1005,6 +542,12 @@ async def main():
             log.info("已启动 Telegram 协议号后台自动保活巡检 Worker")
         except Exception as e:
             log.warning(f"启动协议号保活 Worker 失败: {e}")
+        try:
+            from ai_customer_service import get_ai_cs_bot
+            asyncio.create_task(get_ai_cs_bot().start())
+            log.info("已安排启动 MistRelay 专属 AI 客服机器人守护任务")
+        except Exception as e:
+            log.warning(f"启动 AI 客服机器人失败: {e}")
 
 
 async def cleanup():
@@ -1016,6 +559,11 @@ async def cleanup():
     try:
         from botfather_creator import get_keepalive_worker
         await get_keepalive_worker().stop()
+    except Exception:
+        pass
+    try:
+        from ai_customer_service import get_ai_cs_bot
+        await get_ai_cs_bot().stop()
     except Exception:
         pass
     set_service_ready(False)

@@ -11,6 +11,12 @@ from typing import List, Dict, Any, Optional
 import aiohttp
 import websockets
 
+try:
+    import websockets.exceptions
+    ConnectionClosedError = websockets.exceptions.ConnectionClosedError
+except (ImportError, AttributeError, ModuleNotFoundError):
+    ConnectionClosedError = getattr(getattr(websockets, "exceptions", None), "ConnectionClosedError", Exception)
+
 from configer import get_config_value
 
 from .download_handler import DownloadHandler
@@ -112,13 +118,13 @@ class AsyncAria2Client:
                     method_name = result['method']
                     if method_name == 'aria2.onDownloadStart':
                         await self.download_handler.on_download_start(result, self.tell_status)
-                    elif method_name == 'aria2.onDownloadComplete':
+                    elif method_name in ('aria2.onDownloadComplete', 'aria2.onBtDownloadComplete'):
                         await self.download_handler.on_download_complete(result, self.tell_status)
                     elif method_name == 'aria2.onDownloadError':
                         await self.download_handler.on_download_error(result, self.tell_status)
                     elif method_name == 'aria2.onDownloadPause':
                         await self.download_handler.on_download_pause(result, self.tell_status)
-        except websockets.exceptions.ConnectionClosedError:
+        except ConnectionClosedError:
             logger.info("WebSocket连接已关闭")
             await self.stop_polling()
             asyncio.ensure_future(self.connect())
@@ -422,6 +428,20 @@ class AsyncAria2Client:
             
             # 根据aria2状态触发相应处理
             if status == 'active':
+                # 检查是否为 BT 下载且已完成下载（正处于做种状态 seeder == 'true' 或已下载完成）
+                is_bt = 'bittorrent' in aria2_status
+                is_seeder = aria2_status.get('seeder') == 'true'
+                completed_len = int(aria2_status.get('completedLength', 0) or 0)
+                total_len = int(aria2_status.get('totalLength', 0) or 0)
+                if is_bt and (is_seeder or (total_len > 0 and completed_len >= total_len)):
+                    logger.info(f"[同步] ✅ 检测到 BT 任务 {gid[:8]}... 已完成下载 (做种中: {is_seeder}, {completed_len}/{total_len})，触发完成事件")
+                    event = {
+                        'method': 'aria2.onBtDownloadComplete',
+                        'params': [{'gid': gid}]
+                    }
+                    await self.download_handler.on_download_complete(event, self.tell_status)
+                    return
+
                 # 任务正在下载
                 # 如果数据库状态是 paused，说明任务从暂停恢复
                 if db_status == 'paused':

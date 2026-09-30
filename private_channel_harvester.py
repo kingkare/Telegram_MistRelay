@@ -1,3 +1,4 @@
+import pyrogram_patch
 """
 Telegram 私密/受限频道采集与无痕洗白转存引擎 (Private & Restricted Channel Harvester)
 ====================================================================================
@@ -514,12 +515,43 @@ async def fetch_and_expand_post(
     return album_msgs, group_id_str, primary_caption
 
 
-def get_write_bot_client(preferred_bot: Any = None) -> Any:
-    """获取具备 BIN_CHANNEL 写入权限的 Bot 客户端（优先调度物理时延最低的 DC 分区）"""
+async def ensure_peer_cached(client: Any, chat_id: Any):
+    """确保 Pyrogram 客户端已解析目标频道的 access_hash。若未解析，尝试根据用户名预热。"""
+    if client is None or not chat_id:
+        return
+    try:
+        if hasattr(client, "resolve_peer"):
+            await client.resolve_peer(chat_id)
+            return
+    except Exception:
+        pass
+
+    try:
+        import db
+        uname = db.get_channel_username_by_chat_id(chat_id)
+        if uname and hasattr(client, "get_chat"):
+            clean_uname = uname.lstrip("@")
+            if not clean_uname.startswith("channel_"):
+                await client.get_chat(f"@{clean_uname}")
+                logger.info(f"成功通过 @{clean_uname} 预热 Pyrogram Peer 缓存: {chat_id}")
+    except Exception as e:
+        logger.debug(f"预热 Pyrogram Peer 缓存失败 ({chat_id}): {e}")
+
+
+def get_write_bot_client(preferred_bot: Any = None, target_bin: Any = None) -> Any:
+    """获取具备写入权限的 Bot 客户端。若目标为租户专属频道，优先调度已提权的主控 StreamBot。"""
     if preferred_bot is not None:
         return preferred_bot
     try:
         import WebStreamer.bot as bot_mod
+        from WebStreamer.vars import Var
+
+        default_bin = getattr(Var, "BIN_CHANNEL", None)
+        if target_bin and default_bin and str(target_bin) != str(default_bin):
+            stream_bot = getattr(bot_mod, "StreamBot", None)
+            if stream_bot and is_client_ready(stream_bot):
+                return stream_bot
+
         write_indices = getattr(bot_mod, "channel_write_clients", set())
         multi_clients = getattr(bot_mod, "multi_clients", {})
         work_loads = getattr(bot_mod, "work_loads", {})
@@ -530,7 +562,6 @@ def get_write_bot_client(preferred_bot: Any = None) -> Any:
                 if i in multi_clients and is_client_ready(multi_clients[i])
             ]
             if valid:
-                # 物理时延评分: DC1(67ms)=0.0, DC3(80ms)=0.2, DC2/DC4(140ms)=1.0, DC5(170ms)=2.5, 未知=1.5
                 def _calc_score(idx: int) -> float:
                     st = bot_runtime.get(idx, {}) if isinstance(bot_runtime, dict) else {}
                     hdc = st.get("home_dc")
@@ -1136,7 +1167,9 @@ async def harvest_single_message(
     if not target_bin:
         raise ValueError("BIN_CHANNEL 未配置，无法转存媒体到网盘")
 
-    write_bot = get_write_bot_client(bot_client)
+    write_bot = get_write_bot_client(bot_client, target_bin=target_bin)
+    if write_bot is not None:
+        await ensure_peer_cached(write_bot, target_bin)
     if write_bot is None and user_client is None:
         raise RuntimeError("无可用的 Bot 或协议号客户端执行转存")
 
@@ -1384,7 +1417,7 @@ async def harvest_single_message(
             )
             try:
                 from thumbnail_worker import get_thumbnail_worker
-                get_thumbnail_worker().enqueue(log_msg.id)
+                get_thumbnail_worker().enqueue(log_msg.id, chat_id=target_bin)
             except Exception:
                 pass
         except Exception as db_err:
@@ -1438,7 +1471,9 @@ async def harvest_media_group(
     if not target_bin:
         raise ValueError("BIN_CHANNEL 未配置，无法转存媒体到网盘")
 
-    write_bot = get_write_bot_client(bot_client)
+    write_bot = get_write_bot_client(bot_client, target_bin=target_bin)
+    if write_bot is not None:
+        await ensure_peer_cached(write_bot, target_bin)
     if write_bot is None and user_client is None:
         raise RuntimeError("无可用的 Bot 或协议号客户端执行转存")
 
@@ -1868,7 +1903,7 @@ async def harvest_media_group(
                     )
                     try:
                         from thumbnail_worker import get_thumbnail_worker
-                        get_thumbnail_worker().enqueue(log_msg.id)
+                        get_thumbnail_worker().enqueue(log_msg.id, chat_id=target_bin)
                     except Exception:
                         pass
                 except Exception as db_err:
@@ -1956,6 +1991,8 @@ class HarvesterTaskManager:
             "logs": [],
             "results": [],
             "account_phone": None,
+            "owner_uid": None,
+            "owner_role": None,
             "error": None,
         }
 
@@ -1992,10 +2029,15 @@ class HarvesterTaskManager:
         invite_link: Optional[str] = None,
         account_id: Optional[int] = None,
         rebrand_enabled: bool = True,
+        bin_channel: Optional[Union[int, str]] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        owner_uid: Optional[int] = None,
+        owner_role: Optional[str] = None,
     ) -> Dict[str, Any]:
         if self._state["status"] == "running" and self._task and not self._task.done():
             return {"success": False, "error": "当前已有采集任务正在执行中，请等待完成或先取消"}
+        if owner_role and owner_role != "admin" and not bin_channel:
+            return {"success": False, "error": "普通租户未分配专属存储频道，无法执行采集任务"}
 
         targets, invite_links = parse_telegram_post_links(links_text, default_invite=invite_link)
         if not targets:
@@ -2021,6 +2063,8 @@ class HarvesterTaskManager:
             "logs": [],
             "results": [],
             "account_phone": None,
+            "owner_uid": owner_uid,
+            "owner_role": owner_role,
             "error": None,
         }
 
@@ -2032,6 +2076,7 @@ class HarvesterTaskManager:
                 invite_links=invite_links,
                 account_id=account_id,
                 rebrand_enabled=rebrand_enabled,
+                bin_channel=bin_channel,
                 progress_callback=progress_callback,
             )
         )
@@ -2062,6 +2107,7 @@ class HarvesterTaskManager:
         target_reader: Any,
         chat_entity: Any,
         rebrand_enabled: bool,
+        bin_channel: Optional[Union[int, str]] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ):
         """处理相册媒体组（整组并发拉取 ➔ copy_media_group / send_media_group 聚合重传）"""
@@ -2119,13 +2165,14 @@ class HarvesterTaskManager:
         def _report_speed(text: str):
             self._state["speed_text"] = text
 
+        target_bin = bin_channel or Var.BIN_CHANNEL
         album_results = await harvest_media_group(
             album_msgs=valid_msgs,
             group_id_str=group_id_str,
             primary_caption=primary_caption,
             user_client=user_client,
             bot_client=write_bot,
-            bin_channel=Var.BIN_CHANNEL,
+            bin_channel=target_bin,
             rebrand_enabled=rebrand_enabled,
             chat_target=chat_entity,
             dl_client=target_reader,
@@ -2163,6 +2210,7 @@ class HarvesterTaskManager:
         dl_client: Any = None,
         dl_bot_idx: Optional[int] = None,
         chat_target: Any = None,
+        bin_channel: Optional[Union[int, str]] = None,
     ):
         """处理单个已确认包含媒体的消息项（含下载/上传实时速率跟踪与入库）"""
         msg_id = getattr(msg, "id", 0)
@@ -2239,11 +2287,12 @@ class HarvesterTaskManager:
                 last_up_ts = now
                 last_up_bytes = current
 
+        target_bin = bin_channel or Var.BIN_CHANNEL
         res = await harvest_single_message(
             msg=msg,
             user_client=user_client,
             bot_client=write_bot,
-            bin_channel=Var.BIN_CHANNEL,
+            bin_channel=target_bin,
             rebrand_enabled=rebrand_enabled,
             progress_cb=_on_dl_progress,
             upload_progress_cb=_on_up_progress,
@@ -2274,11 +2323,14 @@ class HarvesterTaskManager:
         invite_links: List[str],
         account_id: Optional[int],
         rebrand_enabled: bool,
+        bin_channel: Optional[Union[int, str]] = None,
         progress_callback: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ):
         user_client = None
         using_telethon = False
-        write_bot = get_write_bot_client()
+        write_bot = get_write_bot_client(target_bin=bin_channel)
+        if write_bot is not None and bin_channel:
+            await ensure_peer_cached(write_bot, bin_channel)
 
         has_private_target = any(t.is_private for t in targets)
         need_protocol_account = bool(has_private_target or invite_links)
@@ -2500,6 +2552,7 @@ class HarvesterTaskManager:
                                     target_reader=target_reader,
                                     chat_entity=chat_entity,
                                     rebrand_enabled=rebrand_enabled,
+                                    bin_channel=bin_channel,
                                     progress_callback=progress_callback,
                                 )
                             except asyncio.CancelledError:
@@ -2585,6 +2638,7 @@ class HarvesterTaskManager:
                             dl_client=cur_bot,
                             dl_bot_idx=cur_bot_idx,
                             chat_target=chat_entity,
+                            bin_channel=bin_channel,
                         )
 
                     except asyncio.CancelledError:

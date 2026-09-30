@@ -1,3 +1,4 @@
+import pyrogram_patch
 """
 缩略图生成器
 
@@ -216,8 +217,8 @@ class ThumbnailGenerator:
             # 使用 ffmpeg 提取第1秒的帧并转换为WebP
             cmd = [
                 'ffmpeg',
-                '-i', str(source_path),
                 '-ss', '00:00:01',  # 跳到第1秒
+                '-i', str(source_path),
                 '-vframes', '1',    # 只提取1帧
                 '-vf', f'scale={self.thumbnail_size[0]}:-1',  # 缩放,保持宽高比
                 '-c:v', 'libwebp',  # 使用WebP编码器
@@ -234,11 +235,11 @@ class ThumbnailGenerator:
             )
             
             if result.returncode != 0:
-                logger.error(f"ffmpeg 执行失败: {result.stderr}")
+                logger.warning(f"本地样本视频帧提取未命中 ({source_path.name}): {result.stderr[-200:] if result.stderr else ''}")
                 return False
             
             if not output_path.exists() or output_path.stat().st_size == 0:
-                logger.error(f"视频缩略图生成失败: 输出文件不存在或为空")
+                logger.warning("视频缩略图生成失败: 输出文件不存在或为空")
                 return False
             
             logger.info(f"视频缩略图生成成功: {output_path}")
@@ -250,12 +251,49 @@ class ThumbnailGenerator:
         except Exception as e:
             logger.error(f"生成视频缩略图失败: {e}", exc_info=True)
             return False
-    
+
+    def generate_video_thumbnail_from_url(self, stream_url: str, output_path: Path, timeout: int = 25) -> bool:
+        """
+        通过支持 HTTP Range 的本地流直链提取视频缩略图，
+        完美解决 MP4 moov 索引位于文件尾部导致前 12MB 样本无法解析的问题。
+        """
+        try:
+            logger.info(f"通过 HTTP Range 流提取视频缩略图: {output_path.name}")
+            cmd = [
+                'ffmpeg',
+                '-ss', '00:00:01',
+                '-i', stream_url,
+                '-vframes', '1',
+                '-vf', f'scale={self.thumbnail_size[0]}:-1',
+                '-c:v', 'libwebp',
+                '-quality', '85',
+                '-y',
+                str(output_path),
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 64:
+                logger.info(f"HTTP Range 视频缩略图生成成功: {output_path}")
+                return True
+            logger.error(f"HTTP Range ffmpeg 执行失败: {result.stderr[-300:] if result.stderr else ''}")
+            return False
+        except subprocess.TimeoutExpired:
+            logger.error("HTTP Range 生成视频缩略图超时")
+            return False
+        except Exception as e:
+            logger.error(f"HTTP Range 生成视频缩略图失败: {e}", exc_info=True)
+            return False
+
     def generate_thumbnail(
         self, 
         remote_name: str,
         file_path: str,
-        source_local_path: Path
+        source_local_path: Path,
+        stream_url: Optional[str] = None,
     ) -> Optional[Path]:
         """
         生成缩略图(自动判断文件类型)
@@ -264,6 +302,7 @@ class ThumbnailGenerator:
             remote_name: remote 名称
             file_path: 云盘文件路径
             source_local_path: 文件在 VFS 挂载点的本地路径
+            stream_url: 可选的本地 HTTP Range 流地址(当 MP4 moov 在文件尾部时回退使用)
             
         Returns:
             缩略图路径,或 None(失败)
@@ -274,26 +313,28 @@ class ThumbnailGenerator:
             logger.info(f"缓存命中: {file_path}")
             return cached
         
-        # 检查源文件是否存在
-        if not source_local_path.exists():
-            logger.error(f"源文件不存在: {source_local_path}")
-            return None
-        
         # 获取输出路径
         output_path = self._get_cache_path(remote_name, file_path)
         
         # 根据文件类型生成缩略图
         success = False
-        if (
+        has_local = source_local_path is not None and source_local_path.exists() and source_local_path.stat().st_size > 0
+        if has_local and (
             self._is_image_content(source_local_path)
             or self._is_image(str(source_local_path))
             or self._is_image(file_path)
         ):
             success = self.generate_image_thumbnail(source_local_path, output_path)
         elif self._is_video(file_path):
-            success = self.generate_video_thumbnail(source_local_path, output_path)
+            if has_local:
+                success = self.generate_video_thumbnail(source_local_path, output_path)
+            if not success and stream_url:
+                success = self.generate_video_thumbnail_from_url(stream_url, output_path)
         else:
-            logger.warning(f"不支持的文件类型: {file_path}")
+            if not has_local:
+                logger.error(f"源文件不存在: {source_local_path}")
+            else:
+                logger.warning(f"不支持的文件类型: {file_path}")
             return None
         
         if success and output_path.exists() and output_path.stat().st_size > 64:
@@ -341,3 +382,47 @@ def get_thumbnail_generator() -> ThumbnailGenerator:
     if _thumbnail_generator is None:
         _thumbnail_generator = ThumbnailGenerator()
     return _thumbnail_generator
+
+def remove_cached_telegram_thumbnail(
+    message_id: int,
+    file_name: Optional[str] = None,
+    chat_id: Optional[int] = None,
+) -> bool:
+    """
+    移除指定 Telegram 媒体的 WebP 缩略图缓存并清理内存 LRU
+    """
+    try:
+        generator = get_thumbnail_generator()
+        default_bin = None
+        try:
+            from WebStreamer.vars import Var
+            default_bin = getattr(Var, 'BIN_CHANNEL', None)
+        except Exception:
+            pass
+
+        fname = file_name or ''
+        keys_to_check = []
+        if chat_id is not None and str(chat_id) != str(default_bin):
+            keys_to_check.append(f'{chat_id}_{message_id}_{fname}')
+        keys_to_check.append(f'{message_id}_{fname}')
+
+        removed = False
+        for k in keys_to_check:
+            try:
+                cache_path = generator._get_cache_path('telegram', k)
+                if cache_path.exists():
+                    cache_path.unlink(missing_ok=True)
+                    removed = True
+            except Exception:
+                pass
+
+        if hasattr(generator, '_get_cached_path'):
+            try:
+                generator._get_cached_path.cache_clear()
+            except Exception:
+                pass
+        return removed
+    except Exception as e:
+        logger.debug(f'移除 Telegram 缩略图缓存异常: {e}')
+        return False
+

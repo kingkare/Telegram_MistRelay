@@ -53,6 +53,29 @@ class DownloadHandler:
         """
         gid = result['params'][0]['gid']
         logger.info(f"===========下载 开始 任务id:{gid}")
+        try:
+            task_info = await tell_status_func(gid)
+            following_gid = task_info.get("following") if isinstance(task_info, dict) else None
+            if following_gid:
+                import db
+                parent_did = db.get_download_id_by_gid(following_gid)
+                child_did = db.get_download_id_by_gid(gid)
+                if parent_did and not child_did:
+                    parent_dl = db.get_download_by_id(parent_did)
+                    if parent_dl:
+                        db.create_download(
+                            file_unique_id=f"aria2_{gid}",
+                            gid=gid,
+                            source_url=parent_dl.get("source_url") or "",
+                            user_id=parent_dl.get("user_id"),
+                            target_channel_id=parent_dl.get("target_channel_id"),
+                        )
+                        logger.info(
+                            f"[任务继承] GID {gid} 成功继承父元数据任务 {following_gid} 租户 "
+                            f"(user_id={parent_dl.get('user_id')}, target_channel_id={parent_dl.get('target_channel_id')})"
+                        )
+        except Exception as inherit_err:
+            logger.debug(f"[任务继承] 检查父任务失败: {inherit_err}")
         if self.bot:
             # 不发送初始消息，直接启动进度检查任务
             # 进度检查任务会在第一次运行时发送消息
@@ -225,6 +248,29 @@ class DownloadHandler:
             logger.error(f"更新任务完成跟踪状态失败: {e}")
         
         tellStatus = await tell_status_func(gid)
+        followed_by = tellStatus.get("followedBy") if isinstance(tellStatus, dict) else None
+        if followed_by and isinstance(followed_by, list):
+            try:
+                import db
+                parent_did = db.get_download_id_by_gid(gid)
+                if parent_did:
+                    parent_dl = db.get_download_by_id(parent_did)
+                    if parent_dl:
+                        for child_gid in followed_by:
+                            if not db.get_download_id_by_gid(child_gid):
+                                db.create_download(
+                                    file_unique_id=f"aria2_{child_gid}",
+                                    gid=child_gid,
+                                    source_url=parent_dl.get("source_url") or "",
+                                    user_id=parent_dl.get("user_id"),
+                                    target_channel_id=parent_dl.get("target_channel_id"),
+                                )
+                                logger.info(
+                                    f"[任务继承] 子任务 {child_gid} 成功继承父任务 {gid} 租户 "
+                                    f"(user_id={parent_dl.get('user_id')}, target_channel_id={parent_dl.get('target_channel_id')})"
+                                )
+            except Exception as inherit_err:
+                logger.debug(f"[任务继承] followedBy 继承失败: {inherit_err}")
         files = tellStatus['files']
         
         # 获取保存的消息对象
@@ -232,13 +278,20 @@ class DownloadHandler:
         
         for file in files:
             path = file['path']
-            if self.bot:
-                # 处理元数据文件
-                if '[METADATA]' in path:
-                    if os.path.exists(path):
+            # 处理元数据文件
+            if '[METADATA]' in path:
+                if os.path.exists(path):
+                    try:
                         os.unlink(path)
-                    return
-                
+                    except OSError:
+                        pass
+                try:
+                    mark_download_completed(gid, path, 0)
+                except Exception as db_e:
+                    logger.debug(f"更新元数据任务完成状态出错: {db_e}")
+                return
+
+            if self.bot or self.upload_handler:
                 # 检查文件是否存在，如果不存在则尝试查找实际文件
                 actual_path = path
                 if not os.path.exists(path):
@@ -349,7 +402,7 @@ class DownloadHandler:
 
                 logger.info(f"[上传选择] UP_TELEGRAM={up_telegram}（第三方网盘已废弃）")
 
-                if up_telegram:
+                if up_telegram and self.upload_handler:
                     # 创建上传记录
                     upload_id = None
                     try:

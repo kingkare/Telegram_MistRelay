@@ -7,11 +7,18 @@ if "aiohttp" not in sys.modules:
     web_module = types.ModuleType("aiohttp.web")
 
     class Response:
-        def __init__(self, *, status=200, body=None, text=None, headers=None):
+        def __init__(self, *, status=200, body=None, text=None, headers=None, content_type=None, **kwargs):
+            self.content_type = content_type or "text/plain" 
             self.status = status
-            self.body = body
-            self.text = text
+            self.text = text if text is not None else (body if isinstance(body, str) else None)
+            self.body = body if body is not None else text
             self.headers = headers or {}
+
+        async def prepare(self, request):
+            return self
+
+        async def write(self, data):
+            pass
 
     class FileResponse(Response):
         def __init__(self, path, headers=None):
@@ -42,10 +49,10 @@ if "aiohttp" not in sys.modules:
     web_module.HTTPNotFound = HTTPException
     web_module.HTTPForbidden = HTTPException
     web_module.HTTPInternalServerError = HTTPException
-    def _mock_json_response(data, status=200):
+    def _mock_json_response(data, status=200, headers=None, **kwargs):
         import json
         text_val = json.dumps(data, ensure_ascii=False) if isinstance(data, (dict, list)) else str(data)
-        return Response(status=status, body=data, text=text_val)
+        return Response(status=status, body=data, text=text_val, headers=headers)
     web_module.json_response = _mock_json_response
     web_module.middleware = lambda func: func
     aiohttp_module.web = web_module
@@ -65,11 +72,30 @@ if "pyrogram" not in sys.modules:
     pyrogram_module = types.ModuleType("pyrogram")
     pyrogram_module.__path__ = []
 
+    class DummyDispatcher:
+        def __init__(self):
+            self.groups = {}
+        def add_handler(self, handler, group=0):
+            if group not in self.groups:
+                self.groups[group] = []
+            self.groups[group].append(handler)
+
     class DummyClient:
         def __init__(self, *args, **kwargs):
-            pass
-        def on_message(self, *args, **kwargs):
-            return lambda func: func
+            self.dispatcher = DummyDispatcher()
+            self.is_connected = False
+            self.me = None
+        def add_handler(self, handler, group=0):
+            self.dispatcher.add_handler(handler, group)
+        @classmethod
+        def on_message(cls, *args, **kwargs):
+            group = kwargs.get('group', 0)
+            def decorator(func):
+                if not hasattr(func, 'handlers'):
+                    func.handlers = []
+                func.handlers.append((SimpleNamespace(callback=func), group))
+                return func
+            return decorator
         def on_callback_query(self, *args, **kwargs):
             return lambda func: func
         async def copy_message(self, *args, **kwargs):
@@ -125,9 +151,32 @@ if "pyrogram" not in sys.modules:
     pyrogram_types = types.ModuleType("pyrogram.types")
     pyrogram_types.Message = SimpleNamespace
     pyrogram_types.Chat = SimpleNamespace
-    pyrogram_types.User = SimpleNamespace
-    pyrogram_types.InlineKeyboardMarkup = SimpleNamespace
-    pyrogram_types.InlineKeyboardButton = SimpleNamespace
+    class DummyUser(SimpleNamespace):
+        @staticmethod
+        def _parse(cli, u):
+            return u
+    pyrogram_types.User = DummyUser
+    class DummyInlineKeyboardButton:
+        def __init__(self, text="", url=None, callback_data=None, **kwargs):
+            self.text = text
+            self.url = url
+            self.callback_data = callback_data
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class DummyInlineKeyboardMarkup:
+        def __init__(self, inline_keyboard=None, **kwargs):
+            if inline_keyboard is None:
+                self.inline_keyboard = kwargs.get("inline_keyboard", [])
+            else:
+                self.inline_keyboard = inline_keyboard
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    pyrogram_types.InlineKeyboardMarkup = DummyInlineKeyboardMarkup
+    pyrogram_types.InlineKeyboardButton = DummyInlineKeyboardButton
+    pyrogram_types.ReplyKeyboardRemove = SimpleNamespace
+    pyrogram_types.BotCommand = SimpleNamespace
 
     class DummyInputMedia:
         def __init__(self, media=None, **kwargs):
@@ -156,7 +205,23 @@ if "pyrogram" not in sys.modules:
     
     pyrogram_raw = types.ModuleType("pyrogram.raw")
     pyrogram_raw.__path__ = []
-    pyrogram_raw.functions = SimpleNamespace(upload=SimpleNamespace(GetFile=SimpleNamespace, SaveFilePart=SimpleNamespace, SaveBigFilePart=SimpleNamespace), auth=SimpleNamespace(ExportAuthorization=SimpleNamespace, ImportAuthorization=SimpleNamespace))
+    class GetUsers:
+        def __init__(self, *args, **kwargs): pass
+    pyrogram_raw.functions = SimpleNamespace(
+        users=SimpleNamespace(GetUsers=GetUsers),
+        upload=SimpleNamespace(GetFile=SimpleNamespace, SaveFilePart=SimpleNamespace, SaveBigFilePart=SimpleNamespace),
+        auth=SimpleNamespace(
+            ExportAuthorization=SimpleNamespace,
+            ImportAuthorization=SimpleNamespace,
+            ResetAuthorizations=type("ResetAuthorizations", (SimpleNamespace,), {}),
+        ),
+        account=SimpleNamespace(
+            GetPassword=type("GetPassword", (SimpleNamespace,), {}),
+            DeclinePasswordReset=type("DeclinePasswordReset", (SimpleNamespace,), {}),
+            GetAuthorizations=type("GetAuthorizations", (SimpleNamespace,), {}),
+            ResetAuthorization=type("ResetAuthorization", (SimpleNamespace,), {}),
+        ),
+    )
     
     pyrogram_raw_types = types.ModuleType("pyrogram.raw.types")
     pyrogram_raw_types.__path__ = []
@@ -166,6 +231,7 @@ if "pyrogram" not in sys.modules:
     pyrogram_raw_types.InputStickerSetThumb = SimpleNamespace
     pyrogram_raw_types.InputFile = SimpleNamespace
     pyrogram_raw_types.InputFileBig = SimpleNamespace
+    pyrogram_raw_types.InputUserSelf = SimpleNamespace
     upload_file_cls = type("UploadFile", (), {})
     pyrogram_raw_types.upload = SimpleNamespace(File=upload_file_cls)
     pyrogram_raw.types = pyrogram_raw_types

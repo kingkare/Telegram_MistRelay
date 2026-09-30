@@ -52,5 +52,16 @@ class DatabaseIntegrityTests(unittest.TestCase):
         self.assertEqual(violations, [])
 
 
+    def test_test_mode_blocks_mutations_on_production_path(self):
+        """验证在测试模式下针对生产路径的所有写入/删除操作均被 SQLite Authorizer 拦截"""
+        with patch.object(db, "is_production_db_path", return_value=True),              patch.object(db, "is_testing_environment", return_value=True):
+            conn = db.get_connection()
+            try:
+                with self.assertRaises(sqlite3.DatabaseError):
+                    conn.execute("DELETE FROM tg_media WHERE 1=0")
+            finally:
+                conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

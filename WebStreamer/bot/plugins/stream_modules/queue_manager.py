@@ -154,10 +154,10 @@ async def message_queue_processor():
             if message_concurrent_semaphore:
                 await message_concurrent_semaphore.acquire()
 
-            # 创建异步任务来处理消息（不阻塞队列处理器）
-            async def process_single_message():
+            # 创建异步任务来处理消息（不阻塞队列处理器，参数绑定避免循环闭包捕获漂移）
+            async def process_single_message(current_item=queue_item):
                 try:
-                    await _process_message_item(queue_item, aria2_client)
+                    await _process_message_item(current_item, aria2_client)
                 finally:
                     # 释放信号量
                     if message_concurrent_semaphore:
@@ -167,7 +167,7 @@ async def message_queue_processor():
 
             # 在后台处理消息（不等待完成）
             loop = asyncio.get_event_loop()
-            loop.create_task(process_single_message())
+            loop.create_task(process_single_message(queue_item))
             
         except Exception as e:
             logger.error(f"消息队列处理器出错: {e}", exc_info=True)
@@ -470,9 +470,12 @@ def enqueue_message_task(task_func, *args, **kwargs):
                 
                 # 记录队列项信息
                 try:
+                    from_user = getattr(message_obj, 'from_user', None)
+                    from_user_id = getattr(from_user, 'id', None) if from_user else None
                     queue_item_tracker[queue_id] = {
                         'message_id': message_obj.id,
                         'chat_id': message_obj.chat.id,
+                        'from_user_id': from_user_id,
                         'title': title,
                         'type': 'media_group' if is_media_group else 'single',
                         'media_group_total': media_group_total,
@@ -517,9 +520,9 @@ def enqueue_message_task(task_func, *args, **kwargs):
         return False
 
 
-async def get_queue_status():
+async def get_queue_status(chat_id: int | None = None, tg_user_id: int | None = None, filter_for_tenant: bool = False):
     """
-    获取消息队列状态
+    获取消息队列状态（支持多租户按专属频道或 Telegram 用户 ID 过滤）
     
     Returns:
         dict: 包含队列状态信息的字典
@@ -539,12 +542,26 @@ async def get_queue_status():
             'max_concurrent_messages': 5
         }
     
+    def _matches_tenant(item: dict) -> bool:
+        if not filter_for_tenant:
+            return True
+        i_chat = item.get('chat_id')
+        i_from = item.get('from_user_id')
+        if chat_id is not None and i_chat is not None and str(i_chat) == str(chat_id):
+            return True
+        if tg_user_id is not None:
+            if i_from is not None and str(i_from) == str(tg_user_id):
+                return True
+            if i_chat is not None and str(i_chat) == str(tg_user_id):
+                return True
+        return False
+
     try:
         async with queue_tracker_lock:
             # 获取当前正在处理的项目列表
             processing_items = []
             for queue_id, item_info in queue_item_tracker.items():
-                if item_info['status'] == 'processing':
+                if item_info['status'] == 'processing' and _matches_tenant(item_info):
                     processing_items.append({
                         'queue_id': queue_id,
                         'title': item_info['title'],
@@ -557,12 +574,14 @@ async def get_queue_status():
             # 获取当前正在处理的项目（兼容旧代码）
             current_item = None
             if current_processing_queue_id and current_processing_queue_id in queue_item_tracker:
-                current_item = queue_item_tracker[current_processing_queue_id].copy()
+                raw_curr = queue_item_tracker[current_processing_queue_id]
+                if _matches_tenant(raw_curr):
+                    current_item = raw_curr.copy()
             
             # 获取等待中的项目
             waiting_items = []
             for queue_id, item_info in queue_item_tracker.items():
-                if item_info['status'] == 'waiting':
+                if item_info['status'] == 'waiting' and _matches_tenant(item_info):
                     waiting_items.append({
                         'queue_id': queue_id,
                         'title': item_info['title'],
@@ -575,8 +594,11 @@ async def get_queue_status():
             waiting_items.sort(key=lambda x: x['added_at'])
             processing_items.sort(key=lambda x: x['added_at'])
             
-            # 获取队列大小
-            queue_size = message_processing_queue.qsize() if message_processing_queue else 0
+            # 获取队列大小（租户视角使用过滤后的等待数）
+            if filter_for_tenant:
+                queue_size = len(waiting_items)
+            else:
+                queue_size = message_processing_queue.qsize() if message_processing_queue else 0
             
             # 获取最大并发消息数配置
             try:

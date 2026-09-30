@@ -1,3 +1,4 @@
+import pyrogram_patch
 # This file is a part of TG-FileStreamBot
 # Coding : Jyothis Jayanth [@EverythingSuckz]
 
@@ -13,8 +14,8 @@ import logging
 import asyncio
 from collections import defaultdict
 from urllib.parse import quote_plus
-from pyrogram import filters, errors
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram import Client, filters, errors
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from pyrogram.enums.parse_mode import ParseMode
 
 from configer import get_config_value
@@ -31,12 +32,99 @@ MAX_PENDING_MEDIA_GROUPS = 100
 MAX_MEDIA_GROUP_ITEMS = 20
 
 
+async def ensure_peer_cached(client, chat_id: int | str):
+    """确保 Pyrogram 客户端已解析目标频道的 access_hash。若未解析，通过公开 username 预热。"""
+    if client is None or not chat_id:
+        return
+    try:
+        numeric_chat_id = int(chat_id)
+    except (ValueError, TypeError):
+        numeric_chat_id = chat_id
+
+    try:
+        if hasattr(client, "resolve_peer"):
+            await client.resolve_peer(numeric_chat_id)
+            return
+    except Exception:
+        pass
+
+    try:
+        import db
+        uname = db.get_channel_username_by_chat_id(numeric_chat_id)
+        if uname and hasattr(client, "get_chat"):
+            clean_uname = uname.lstrip("@")
+            if not clean_uname.startswith("channel_"):
+                await client.get_chat(f"@{clean_uname}")
+                logger.info(f"成功通过 @{clean_uname} 预热 Pyrogram Peer 缓存: {numeric_chat_id}")
+                return
+        if hasattr(client, "get_chat"):
+            await client.get_chat(numeric_chat_id)
+    except Exception as e:
+        logger.debug(f"预热 Pyrogram Peer 缓存失败 ({numeric_chat_id}): {e}")
+
+
+def _extract_user_id(message: Message) -> int | None:
+    from_user = getattr(message, "from_user", None)
+    if from_user and getattr(from_user, "id", None):
+        return from_user.id
+    chat = getattr(message, "chat", None)
+    if chat and str(getattr(chat, "type", "")).endswith("PRIVATE"):
+        return getattr(chat, "id", None)
+    return None
+
+
 def is_allowed_user(message: Message) -> bool:
-    """Authorize only immutable numeric Telegram user IDs, failing closed."""
-    if not Var.ALLOWED_USERS or not getattr(message, "from_user", None):
+    """Authorize immutable numeric Telegram user IDs from config or registered tenants."""
+    uid = _extract_user_id(message)
+    if not uid:
         return False
-    user_id = str(message.from_user.id)
-    return user_id in Var.ALLOWED_USERS
+    user_id = str(uid)
+    if Var.ALLOWED_USERS and user_id in Var.ALLOWED_USERS:
+        return True
+    try:
+        from configer import get_config_value
+        admin_id = get_config_value("ADMIN_ID")
+        if admin_id and int(uid) == int(admin_id):
+            return True
+    except Exception:
+        pass
+    try:
+        import db
+        db_u = db.get_user_by_tg_id(uid)
+        if db_u:
+            if db_u.get("role") == "admin" or db_u.get("bin_channel_id"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def get_target_bin_channel_for_message(message: Message):
+    """获取消息对应的目标存储频道（普通租户严格使用专属频道，仅管理员/系统授权用户允许回退全局 BIN_CHANNEL）"""
+    uid = _extract_user_id(message)
+    if uid:
+        try:
+            import db
+            db_u = db.get_user_by_tg_id(uid)
+            if db_u:
+                if db_u.get("bin_channel_id"):
+                    return db_u["bin_channel_id"]
+                if db_u.get("role") == "admin":
+                    return Var.BIN_CHANNEL
+                return None
+        except Exception:
+            pass
+
+        try:
+            from configer import get_config_value
+            admin_id = get_config_value("ADMIN_ID")
+            if admin_id and int(uid) == int(admin_id):
+                return Var.BIN_CHANNEL
+        except Exception:
+            pass
+        if Var.ALLOWED_USERS and str(uid) in Var.ALLOWED_USERS:
+            return Var.BIN_CHANNEL
+    return None
 
 
 async def process_media_group(messages: list, queue_reply_msg=None):
@@ -61,12 +149,41 @@ async def process_media_group(messages: list, queue_reply_msg=None):
     
     # 权限检查
     if not is_allowed_user(first_msg):
+        try:
+            reply_fn = getattr(first_msg, "reply_text", None) or getattr(first_msg, "reply", None)
+            if reply_fn:
+                await reply_fn(
+                    "👋 <b>欢迎使用 MistRelay 极速云盘</b>\n\n"
+                    "您当前尚未开通专属云盘空间，媒体组无法自动入库。\n"
+                    "👉 请发送 /register 获取 6 位注册验证码，前往网页端一键开通专属存储频道！",
+                    quote=True,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+        except Exception:
+            pass
         return
     
-    # BIN_CHANNEL检查
-    if not Var.BIN_CHANNEL:
-        logger.warning(f"BIN_CHANNEL未配置，无法为 {first_msg.from_user.first_name} 生成直链")
+    user_display = (
+        getattr(getattr(first_msg, "from_user", None), "first_name", None)
+        or getattr(getattr(first_msg, "chat", None), "title", None)
+        or "用户"
+    )
+    # 目标存储频道检查
+    target_bin = get_target_bin_channel_for_message(first_msg)
+    if not target_bin:
+        logger.warning(f"目标存储频道未配置或租户未绑定专属频道，无法为 {user_display} 生成直链")
+        try:
+            await first_msg.reply(
+                "⚠️ 您尚未分配或开通专属存储频道，媒体组无法转存到 TG 网盘。\n"
+                "请联系管理员分配专属存储空间或使用 /register 重新绑定。",
+                quote=True,
+            )
+        except Exception:
+            pass
         return
+
+    await ensure_peer_cached(StreamBot, target_bin)
     
     try:
         rebrand_enabled = bool(get_config_value("FORWARD_REBRAND_ENABLED", True))
@@ -81,104 +198,156 @@ async def process_media_group(messages: list, queue_reply_msg=None):
 
         # 1. 尝试无痕复制入库（抹除“转发自”标识并应用配文清洗）
         if rebrand_enabled:
+            # 优先使用 send_media_group 直接发布内存媒体对象，避免 copy_media_group 内部 get_messages 失败
             try:
-                captions = [
-                    clean_and_rebrand_caption(
+                from pyrogram.types import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
+                multi_media = []
+                for i, msg in enumerate(messages):
+                    c_caption = clean_and_rebrand_caption(
                         msg.caption,
                         target_channel=target_channel,
                         signature=signature,
                         custom_rules=custom_rules,
                     ) if (msg.caption or (i == 0 and signature)) else (msg.caption or "")
-                    for i, msg in enumerate(messages)
-                ]
-                copied_msgs = await StreamBot.copy_media_group(
-                    chat_id=Var.BIN_CHANNEL,
-                    from_chat_id=chat_id,
-                    message_id=messages[0].id,
-                    captions=captions,
-                )
-                if isinstance(copied_msgs, list):
-                    for i, log_msg in enumerate(copied_msgs):
-                        if i < len(messages):
-                            forwarded_messages.append((messages[i], log_msg))
-                elif copied_msgs:
-                    forwarded_messages.append((messages[0], copied_msgs))
-            except Exception as copy_grp_err:
-                logger.warning(f"copy_media_group 无痕发布失败: {copy_grp_err}，尝试逐条 copy_message")
+
+                    if msg.photo:
+                        multi_media.append(InputMediaPhoto(msg.photo.file_id, caption=c_caption))
+                    elif msg.video:
+                        multi_media.append(InputMediaVideo(msg.video.file_id, caption=c_caption))
+                    elif msg.audio:
+                        multi_media.append(InputMediaAudio(msg.audio.file_id, caption=c_caption))
+                    elif msg.document:
+                        multi_media.append(InputMediaDocument(msg.document.file_id, caption=c_caption))
+
+                if multi_media and len(multi_media) == len(messages):
+                    copied_msgs = await StreamBot.send_media_group(
+                        chat_id=target_bin,
+                        media=multi_media,
+                    )
+                    if isinstance(copied_msgs, list):
+                        for i, log_msg in enumerate(copied_msgs):
+                            if i < len(messages):
+                                forwarded_messages.append((messages[i], log_msg))
+                    elif copied_msgs:
+                        forwarded_messages.append((messages[0], copied_msgs))
+            except Exception as send_grp_err:
+                logger.warning(f"send_media_group 无痕发布失败: {send_grp_err}，尝试 copy_media_group")
                 try:
-                    for msg in messages:
-                        c_caption = clean_and_rebrand_caption(
+                    captions = [
+                        clean_and_rebrand_caption(
                             msg.caption,
                             target_channel=target_channel,
                             signature=signature,
                             custom_rules=custom_rules,
-                        ) if msg.caption else msg.caption
-                        c_msg = await StreamBot.copy_message(
-                            chat_id=Var.BIN_CHANNEL,
-                            from_chat_id=chat_id,
-                            message_id=msg.id,
-                            caption=c_caption,
-                        )
-                        forwarded_messages.append((msg, c_msg))
-                except Exception as copy_each_err:
-                    logger.warning(f"逐条 copy_message 也失败: {copy_each_err}，回退到 forward")
-                    forwarded_messages = []
+                        ) if (msg.caption or (i == 0 and signature)) else (msg.caption or "")
+                        for i, msg in enumerate(messages)
+                    ]
+                    copied_msgs = await StreamBot.copy_media_group(
+                        chat_id=target_bin,
+                        from_chat_id=chat_id,
+                        message_id=messages[0].id,
+                        captions=captions,
+                    )
+                    if isinstance(copied_msgs, list):
+                        for i, log_msg in enumerate(copied_msgs):
+                            if i < len(messages):
+                                forwarded_messages.append((messages[i], log_msg))
+                    elif copied_msgs:
+                        forwarded_messages.append((messages[0], copied_msgs))
+                except Exception as copy_grp_err:
+                    logger.warning(f"copy_media_group 无痕发布失败: {copy_grp_err}，尝试逐条 copy")
+                    try:
+                        for msg in messages:
+                            c_caption = clean_and_rebrand_caption(
+                                msg.caption,
+                                target_channel=target_channel,
+                                signature=signature,
+                                custom_rules=custom_rules,
+                            ) if msg.caption else msg.caption
+                            try:
+                                c_msg = await msg.copy(
+                                    chat_id=target_bin,
+                                    caption=c_caption,
+                                )
+                            except Exception:
+                                c_msg = await StreamBot.copy_message(
+                                    chat_id=target_bin,
+                                    from_chat_id=chat_id,
+                                    message_id=msg.id,
+                                    caption=c_caption,
+                                )
+                            forwarded_messages.append((msg, c_msg))
+                    except Exception as copy_each_err:
+                        logger.warning(f"逐条 copy 也失败: {copy_each_err}，回退到 forward")
+                        forwarded_messages = []
 
         # 2. 若未启用无痕洗白或复制异常，安全回退到原转发
         if not forwarded_messages:
             try:
                 forwarded_msgs = await StreamBot.forward_messages(
-                    chat_id=Var.BIN_CHANNEL,
+                    chat_id=target_bin,
                     from_chat_id=chat_id,
-                    message_ids=message_ids
+                    message_ids=message_ids,
                 )
                 if isinstance(forwarded_msgs, list):
                     for i, log_msg in enumerate(forwarded_msgs):
                         if i < len(messages):
                             forwarded_messages.append((messages[i], log_msg))
-                else:
+                elif forwarded_msgs:
                     forwarded_messages.append((messages[0], forwarded_msgs))
-            except Exception as e:
-                logger.error(f"转发媒体组失败: {e}", exc_info=True)
+            except Exception as forward_err:
+                logger.warning(f"forward_messages 失败: {forward_err}，尝试逐条 forward")
                 for msg in messages:
                     try:
-                        log_msg = await msg.forward(chat_id=Var.BIN_CHANNEL)
+                        log_msg = await msg.forward(chat_id=target_bin)
                         forwarded_messages.append((msg, log_msg))
-                    except Exception as e2:
-                        logger.error(f"转发单条消息失败: {e2}", exc_info=True)
-        
-        if not forwarded_messages:
-            return
-        
-        # 为每个媒体文件生成直链，并把已保存到频道的消息写入 tg_media
-        stream_links = []
+                    except Exception as e:
+                        logger.error(f"逐条转发消息失败: {e}", exc_info=True)
 
+        if not forwarded_messages:
+            logger.error("所有消息转发/发布均失败")
+            try:
+                await first_msg.reply(
+                    "❌ <b>处理失败</b>\n\n无法将媒体文件保存到 TG 网盘，请稍后重试",
+                    quote=True,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+            return []
+
+        # 3. 处理转发成功的消息，保存到数据库并生成直链
+        stream_links = []
         for original_msg, log_msg in forwarded_messages:
             try:
-                raw_file_name = get_name(original_msg)
+                if isinstance(log_msg, list) and log_msg:
+                    log_msg = log_msg[0]
+                if not log_msg:
+                    continue
+                log_media = getattr(log_msg, log_msg.media.value, None) if getattr(log_msg, "media", None) else None
+                raw_name = get_name(original_msg)
                 cleaned_file_name = clean_drive_filename(
-                    raw_file_name,
+                    raw_name,
                     clean_enabled=clean_filenames,
                     custom_rules=custom_rules,
-                ) if clean_filenames else raw_file_name
+                ) if clean_filenames else raw_name
 
-                raw_caption = getattr(original_msg, "caption", None)
-                cleaned_caption = clean_and_rebrand_caption(
-                    raw_caption,
-                    target_channel=target_channel,
-                    signature=signature,
-                    custom_rules=custom_rules,
-                ) if rebrand_enabled and raw_caption else getattr(log_msg, "caption", None)
-
-                file_hash = get_hash(log_msg, Var.HASH_LENGTH)
-                stream_link = f"{Var.URL}{log_msg.id}/{quote_plus(cleaned_file_name)}?hash={file_hash}"
-                short_link = f"{Var.URL}{file_hash}{log_msg.id}"
                 file_name = cleaned_file_name
-                log_media = getattr(log_msg, log_msg.media.value, None) if getattr(log_msg, "media", None) else None
-                file_unique_id = None
+                file_hash = get_hash(log_msg, Var.HASH_LENGTH)
+                stream_link = f"{Var.URL}{log_msg.id}/{quote_plus(file_name)}?hash={file_hash}"
+                short_link = f"{Var.URL}{file_hash}{log_msg.id}"
 
+                file_unique_id = None
                 if log_media:
                     try:
+                        raw_caption = getattr(original_msg, "caption", None)
+                        cleaned_caption = clean_and_rebrand_caption(
+                            raw_caption,
+                            target_channel=target_channel,
+                            signature=signature,
+                            custom_rules=custom_rules,
+                        ) if rebrand_enabled else raw_caption
+
                         file_unique_id = save_tg_media(
                             log_msg,
                             log_media,
@@ -187,23 +356,23 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                         )
                         try:
                             from thumbnail_worker import get_thumbnail_worker
-                            get_thumbnail_worker().enqueue(log_msg.id)
+                            get_thumbnail_worker().enqueue(log_msg.id, file_name=cleaned_file_name, chat_id=target_bin)
                         except Exception:
                             pass
                     except Exception as db_e:
                         logger.error(f"记录频道媒体到数据库失败: {db_e}", exc_info=True)
 
                 link_entry = {
-                    'name': file_name,
-                    'full_link': stream_link,
-                    'short_link': short_link,
-                    'original_msg': original_msg,
-                    'log_msg': log_msg,
-                    'log_media': log_media,
-                    'file_unique_id': file_unique_id,
+                    "name": file_name,
+                    "full_link": stream_link,
+                    "short_link": short_link,
+                    "original_msg": original_msg,
+                    "log_msg": log_msg,
+                    "log_media": log_media,
+                    "file_unique_id": file_unique_id,
                 }
                 stream_links.append(link_entry)
-                logger.info(f"媒体已保存到TG网盘并生成直链： {stream_link} for {first_msg.from_user.first_name}")
+                logger.info(f"媒体已保存到TG网盘并生成直链： {stream_link} for {user_display}")
                     
             except Exception as e:
                 logger.error(f"生成直链失败: {e}", exc_info=True)
@@ -217,9 +386,9 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                 f"🌐 <b>完整链接:</b>\n<code>{link_info['full_link']}</code>\n\n"
                 f"🔗 <b>短链接:</b>\n<code>{link_info['short_link']}</code>"
             )
-            main_link = link_info['full_link']
+            main_link = link_info["full_link"]
         else:
-            saved_count = sum(1 for item in stream_links if item.get('file_unique_id'))
+            saved_count = sum(1 for item in stream_links if item.get("file_unique_id"))
             reply_text = (
                 f"☁️ <b>媒体组已保存到 TG 网盘</b>\n\n"
                 f"📊 <b>统计信息:</b>\n"
@@ -234,7 +403,7 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                     f"   <code>{link_info['full_link']}</code>\n"
                     f"   <i>TG 网盘</i>\n\n"
                 )
-            main_link = stream_links[0]['full_link'] if stream_links else None
+            main_link = stream_links[0]["full_link"] if stream_links else None
         
         task_gids = []
         
@@ -273,6 +442,21 @@ async def process_media_group(messages: list, queue_reply_msg=None):
                     )
                 except Exception as e:
                     logger.debug(f"更新队列通知消息失败: {e}")
+            else:
+                try:
+                    fallback_text = (
+                        "✅ <b>已收到您的消息</b>\n\n"
+                        "☁️ 媒体组已保存到 TG 网盘\n"
+                        f"📊 共 {len(stream_links)} 个文件\n"
+                        "✅ 处理完成"
+                    )
+                    await first_msg.reply_text(
+                        fallback_text,
+                        quote=True,
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception as e:
+                    logger.debug(f"直接回复媒体组保存通知失败: {e}")
             
             logger.info(f"已处理媒体组（不发送直链信息）：共 {len(stream_links)} 个文件，已保存到TG网盘")
         
@@ -281,8 +465,8 @@ async def process_media_group(messages: list, queue_reply_msg=None):
         logger.error(f"处理媒体组失败: {e}", exc_info=True)
         try:
             error_reply = (
-                f'❌ <b>处理失败</b>\n\n'
-                f'⚠️ 处理媒体组时出错，请稍后重试'
+                f"❌ <b>处理失败</b>\n\n"
+                f"⚠️ 处理媒体组时出错，请稍后重试"
             )
             await first_msg.reply(error_reply, quote=True, parse_mode=ParseMode.HTML)
         except Exception:
@@ -310,15 +494,27 @@ async def process_single_media(m: Message, queue_reply_msg=None):
     # 权限检查
     if not is_allowed_user(m):
         permission_msg = (
-            f'🚫 <b>权限不足</b>\n\n'
-            f'⚠️ 你没有权限使用这个机器人'
+            f"🚫 <b>权限不足</b>\n\n"
+            f"⚠️ 你没有权限使用这个机器人"
         )
         return await m.reply(permission_msg, quote=True, parse_mode=ParseMode.HTML)
     
-    # BIN_CHANNEL检查
-    if not Var.BIN_CHANNEL:
-        logger.warning(f"BIN_CHANNEL未配置，无法为 {m.from_user.first_name} 生成直链")
-        return await m.reply("直链功能未配置，请在配置文件中设置 BIN_CHANNEL", quote=True)
+    user_display = (
+        getattr(getattr(m, "from_user", None), "first_name", None)
+        or getattr(getattr(m, "chat", None), "title", None)
+        or "用户"
+    )
+    # 目标存储频道检查
+    target_bin = get_target_bin_channel_for_message(m)
+    if not target_bin:
+        logger.warning(f"目标存储频道未配置或租户未绑定专属频道，无法为 {user_display} 生成直链")
+        return await m.reply(
+            "⚠️ 您尚未分配或开通专属存储频道，文件无法转存到 TG 网盘。\n"
+            "请联系管理员分配专属存储空间或使用 /register 重新绑定。",
+            quote=True,
+        )
+
+    await ensure_peer_cached(StreamBot, target_bin)
     
     try:
         rebrand_enabled = bool(get_config_value("FORWARD_REBRAND_ENABLED", True))
@@ -345,17 +541,46 @@ async def process_single_media(m: Message, queue_reply_msg=None):
         log_msg = None
         if rebrand_enabled:
             try:
-                log_msg = await StreamBot.copy_message(
-                    chat_id=Var.BIN_CHANNEL,
-                    from_chat_id=m.chat.id,
-                    message_id=m.id,
-                    caption=cleaned_caption,
-                )
+                try:
+                    log_msg = await m.copy(
+                        chat_id=target_bin,
+                        caption=cleaned_caption,
+                    )
+                except Exception as m_copy_err:
+                    logger.debug(f"m.copy 失败: {m_copy_err}，尝试 StreamBot.copy_message")
+                    log_msg = await StreamBot.copy_message(
+                        chat_id=target_bin,
+                        from_chat_id=m.chat.id,
+                        message_id=m.id,
+                        caption=cleaned_caption,
+                    )
             except Exception as copy_err:
-                logger.warning(f"copy_message 无痕发布失败: {copy_err}，回退到 forward")
-                log_msg = await m.forward(chat_id=Var.BIN_CHANNEL)
+                logger.warning(f"无痕发布失败: {copy_err}，回退到 forward")
+                try:
+                    log_msg = await StreamBot.forward_messages(
+                        chat_id=target_bin,
+                        from_chat_id=m.chat.id,
+                        message_ids=m.id,
+                    )
+                except Exception:
+                    log_msg = await m.forward(chat_id=target_bin)
         else:
-            log_msg = await m.forward(chat_id=Var.BIN_CHANNEL)
+            try:
+                log_msg = await StreamBot.forward_messages(
+                    chat_id=target_bin,
+                    from_chat_id=m.chat.id,
+                    message_ids=m.id,
+                )
+            except Exception:
+                log_msg = await m.forward(chat_id=target_bin)
+
+        if isinstance(log_msg, list) and log_msg:
+            log_msg = log_msg[0]
+
+        if not log_msg:
+            logger.error("消息转发/发布失败: log_msg is None")
+            await m.reply("无法将媒体文件保存到 TG 网盘，请稍后重试", quote=True)
+            return []
 
         log_media = getattr(log_msg, log_msg.media.value, None) if getattr(log_msg, "media", None) else None
         saved_file_unique_id = None
@@ -369,7 +594,7 @@ async def process_single_media(m: Message, queue_reply_msg=None):
                 )
                 try:
                     from thumbnail_worker import get_thumbnail_worker
-                    get_thumbnail_worker().enqueue(log_msg.id)
+                    get_thumbnail_worker().enqueue(log_msg.id, file_name=cleaned_file_name, chat_id=target_bin)
                 except Exception:
                     pass
             except Exception as db_e:
@@ -379,7 +604,7 @@ async def process_single_media(m: Message, queue_reply_msg=None):
         stream_link = f"{Var.URL}{log_msg.id}/{quote_plus(cleaned_file_name)}?hash={file_hash}"
         short_link = f"{Var.URL}{file_hash}{log_msg.id}"
         
-        logger.info(f"媒体已保存到TG网盘并生成直链： {stream_link} for {m.from_user.first_name}")
+        logger.info(f"媒体已保存到TG网盘并生成直链： {stream_link} for {user_display}")
         
         # 返回直链给用户（如果启用了发送直链信息）
         if Var.SEND_STREAM_LINK:
@@ -419,6 +644,20 @@ async def process_single_media(m: Message, queue_reply_msg=None):
                     )
                 except Exception as e:
                     logger.debug(f"更新队列通知消息失败: {e}")
+            else:
+                try:
+                    fallback_text = (
+                        "✅ <b>已收到您的消息</b>\n\n"
+                        "☁️ 文件已保存到 TG 网盘\n"
+                        "✅ 处理完成"
+                    )
+                    await m.reply_text(
+                        fallback_text,
+                        quote=True,
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception as e:
+                    logger.debug(f"直接回复单文件保存通知失败: {e}")
             
             logger.info(f"已处理文件（不发送直链信息）：{cleaned_file_name}，已保存到TG网盘")
         
@@ -429,7 +668,7 @@ async def process_single_media(m: Message, queue_reply_msg=None):
         return []
 
 
-@StreamBot.on_message(
+@Client.on_message(
     filters.private
     & (
         filters.document
@@ -457,6 +696,20 @@ async def media_receive_handler(_, m: Message):
             "拒绝未授权 Telegram 媒体入队 user_id=%s",
             getattr(getattr(m, "from_user", None), "id", None),
         )
+        try:
+            reply_fn = getattr(m, "reply_text", None) or getattr(m, "reply", None)
+            if reply_fn:
+                await reply_fn(
+                    "👋 <b>欢迎使用 MistRelay 极速云盘</b>\n\n"
+                    "您当前尚未开通专属云盘空间，媒体文件无法自动入库。\n"
+                    "👉 请发送 /register 获取 6 位注册验证码，前往网页端一键开通专属存储频道！\n\n"
+                    "💡 开通后直接向我发送或转发媒体，即可极速入库并生成直链。",
+                    quote=True,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+        except Exception as e:
+            logger.debug(f"向未授权用户发送提示失败: {e}")
         return
 
     from .queue_manager import enqueue_message_task
@@ -476,7 +729,7 @@ async def media_receive_handler(_, m: Message):
             media_group_tasks[group_id].cancel()
         
         async def delayed_process():
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
             if group_id in media_group_cache:
                 messages = media_group_cache.pop(group_id)
                 messages.sort(key=lambda x: x.id)
@@ -492,10 +745,10 @@ async def media_receive_handler(_, m: Message):
             await m.reply("消息队列已满，请稍后重试", quote=True)
 
 
-@StreamBot.on_message(
+@Client.on_message(
     filters.private
     & filters.text
-    & ~filters.command(["start", "help", "menu", "status"]),
+    & ~filters.command(["start", "help", "menu", "status", "register"]),
     group=5,
 )
 async def channel_link_receive_handler(_, m: Message):
@@ -514,10 +767,24 @@ async def channel_link_receive_handler(_, m: Message):
             "拒绝未授权用户发送频道采集链接 user_id=%s",
             getattr(getattr(m, "from_user", None), "id", None),
         )
+        try:
+            reply_fn = getattr(m, "reply_text", None) or getattr(m, "reply", None)
+            if reply_fn:
+                await reply_fn(
+                    "👋 <b>欢迎使用 MistRelay 极速云盘</b>\n\n"
+                    "您当前尚未开通专属云盘空间，无法执行频道采集破除任务。\n"
+                    "👉 请发送 /register 获取 6 位注册验证码，前往网页端一键开通专属存储频道！",
+                    quote=True,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+        except Exception as e:
+            logger.debug(f"向未授权用户发送提示失败: {e}")
         return
 
-    if not Var.BIN_CHANNEL:
-        await m.reply("❌ BIN_CHANNEL 未配置，无法保存媒体到 TG 网盘", quote=True)
+    target_bin = get_target_bin_channel_for_message(m) or Var.BIN_CHANNEL
+    if not target_bin:
+        await m.reply("❌ 目标存储频道未配置，无法保存媒体到 TG 网盘", quote=True)
         return
 
     from private_channel_harvester import parse_telegram_post_links, HarvesterTaskManager
@@ -614,3 +881,206 @@ async def channel_link_receive_handler(_, m: Message):
             )
         except Exception:
             pass
+
+
+@Client.on_message(
+    filters.private
+    & filters.command(["register"]),
+    group=1,
+)
+async def user_register_command_handler(_, m: Message):
+    """
+    处理用户私聊发送 /register 获取 6 位注册验证码并探测归属 DC 区域，同时清除旧版残留键盘
+    """
+    import secrets as _secrets
+    import db
+    from botfather_creator import detect_user_dc_id
+
+    from_user = getattr(m, "from_user", None)
+    tg_uid = getattr(from_user, "id", None) or (m.chat.id if getattr(m, "chat", None) else None)
+    if not tg_uid:
+        return
+
+    tg_uname = getattr(from_user, "username", None) or getattr(getattr(m, "chat", None), "username", None)
+    tg_fname = getattr(from_user, "first_name", None) or getattr(getattr(m, "chat", None), "first_name", None) or "User"
+
+    existing_u = db.get_user_by_tg_id(tg_uid)
+    if existing_u and existing_u.get("bin_channel_id"):
+        chan_handle = existing_u.get("bin_channel_username") or str(existing_u.get("bin_channel_id"))
+        if not str(chan_handle).startswith("@") and not str(chan_handle).startswith("-"):
+            chan_handle = f"@{chan_handle}"
+        await m.reply_text(
+            f"✅ <b>您已注册并开通 MistRelay 专属云盘</b>\n\n"
+            f"👤 <b>登录账号:</b> <code>{existing_u.get('username')}</code>\n"
+            f"🌐 <b>所属区域:</b> <code>DC{existing_u.get('dc_id') or 5}</code>\n"
+            f"📡 <b>专属存储频道:</b> {chan_handle}\n\n"
+            f"💡 您可以直接向我转发任意媒体或发送受限频道链接，文件将 100% 物理隔离保存在您的专属频道中！\n"
+            f"📖 发送 /help 可随时查看详细功能与使用指南。",
+            quote=True,
+            parse_mode=ParseMode.HTML,
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    if not bool(db.get_config("ALLOW_USER_REGISTRATION", True)):
+        await m.reply_text(
+            "🚫 <b>当前系统已关闭自助注册</b>\n\n"
+            "如需开通专属云盘空间，请联系系统管理员在后台为您手动创建账号。",
+            quote=True,
+            parse_mode=ParseMode.HTML,
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    detected_dc = detect_user_dc_id(from_user)
+    code = f"{_secrets.randbelow(900000) + 100000}"
+    db.create_tg_register_code(
+        code=code,
+        tg_user_id=tg_uid,
+        tg_username=tg_uname,
+        tg_first_name=tg_fname,
+        detected_dc_id=detected_dc,
+        expires_minutes=10,
+    )
+
+    dc_names = {
+        1: "DC1 (美国/迈阿密)",
+        2: "DC2 (欧洲/阿姆斯特丹)",
+        3: "DC3 (美国/迈阿密)",
+        4: "DC4 (欧洲/阿姆斯特丹)",
+        5: "DC5 (亚太/新加坡)",
+    }
+    dc_desc = dc_names.get(detected_dc, f"DC{detected_dc}")
+
+    reply_html = (
+        f"🎉 <b>MistRelay 专属云盘注册验证码</b>\n\n"
+        f"🔑 <b>您的 6 位验证码:</b> <code>{code}</code>\n"
+        f"⏳ <i>有效期 10 分钟，请勿泄露给他人</i>\n\n"
+        f"📊 <b>Telegram 账号识别结果:</b>\n"
+        f"  • <b>TG ID:</b> <code>{tg_uid}</code>\n"
+        f"  • <b>匹配数据中心:</b> <code>{dc_desc}</code>\n"
+        f"  • <b>昵称:</b> {tg_fname}\n\n"
+        f"🚀 <b>下一步:</b>\n"
+        f"请返回 MistRelay 网页端「Telegram 验证码注册」页，填入上方 6 位验证码。系统将自动调配同区 (<b>DC{detected_dc}</b>) 协议号为您创建物理隔离的专属存储频道！"
+    )
+    await m.reply_text(
+        reply_html,
+        quote=True,
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@Client.on_message(
+    filters.private
+    & filters.command(["start"]),
+    group=2,
+)
+async def start_command_handler(client, m: Message):
+    """处理 /start 或 /start register 指令并清除旧版残留键盘"""
+    import db
+    text = (m.text or "").strip()
+    if "register" in text.lower():
+        return await user_register_command_handler(client, m)
+
+    from_user = getattr(m, "from_user", None)
+    if not is_allowed_user(m):
+        await m.reply_text(
+            "👋 <b>欢迎使用 MistRelay 极速云盘</b>\n\n"
+            "您当前尚未开通专属云盘空间。\n"
+            "👉 请发送 /register 获取 6 位注册验证码，前往网页端一键开通与您 Telegram 账号同 DC 区域的专属存储频道！\n\n"
+            "💡 发送 /help 可随时查看详细功能与使用指南。",
+            quote=True,
+            parse_mode=ParseMode.HTML,
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    chan_info = ""
+    uid = getattr(from_user, "id", None) or (m.chat.id if getattr(m, "chat", None) else None)
+    if uid:
+        existing_u = db.get_user_by_tg_id(uid)
+        if existing_u and existing_u.get("bin_channel_id"):
+            chan_handle = existing_u.get("bin_channel_username") or str(existing_u.get("bin_channel_id"))
+            if not str(chan_handle).startswith("@") and not str(chan_handle).startswith("-"):
+                chan_handle = f"@{chan_handle}"
+            chan_info = (
+                f"\n👤 <b>登录账号:</b> <code>{existing_u.get('username')}</code>\n"
+                f"🌐 <b>所属区域:</b> <code>DC{existing_u.get('dc_id') or 5}</code>\n"
+                f"📡 <b>专属存储频道:</b> {chan_handle}\n"
+            )
+
+    await m.reply_text(
+        f"🚀 <b>MistRelay 云盘服务已就绪</b>\n{chan_info}\n"
+        "• <b>媒体入库:</b> 直接向我发送/转发视频、图片或文件，秒存入库并生成直链；\n"
+        "• <b>受限破除:</b> 直接发送私密/受限频道帖子链接，全自动破除限制并归档；\n"
+        "• <b>离线下载:</b> 发送磁力链接 (magnet:) 或种子文件 (.torrent) 自动离线下载；\n"
+        "• <b>使用指南:</b> 发送 /help 查看完整使用说明；\n"
+        "• <b>空间绑定:</b> 发送 /register 查看或绑定专属存储频道。",
+        quote=True,
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@Client.on_message(
+    filters.private
+    & filters.command(["help"]),
+    group=3,
+)
+async def help_command_handler(_, m: Message):
+    """处理 /help 指令，展示现代化云盘与下载功能使用指南并清除旧版键盘"""
+    help_text = (
+        "📖 <b>MistRelay 极速云盘使用指南</b>\n\n"
+        "<b>☁️ 1. 媒体秒存与极速直链</b>\n"
+        "• 直接向本机器人发送或转发任何视频、音频、图片或文档；\n"
+        "• 系统将自动无痕归档至您的专属存储频道，并生成多 Bot 聚合串流直链与在线播放地址。\n\n"
+        "<b>🔓 2. 受限/私密频道资源破除采集</b>\n"
+        "• 直接发送 Telegram 帖子链接（支持 <code>https://t.me/...</code> 公开或私密链接）；\n"
+        "• 针对禁止转发/限制下载频道，全自动调动 55+ Bot 集群极速拉取并洗白重传。\n\n"
+        "<b>📥 3. 离线下载投递</b>\n"
+        "• 发送普通 HTTP/HTTPS 文件下载链接；\n"
+        "• 发送磁力链接（<code>magnet:?xt=...</code>）；\n"
+        "• 发送 <code>.torrent</code> 种子文件；\n"
+        "• Aria2 离线下载完成后将自动秒传至您的专属存储频道。\n\n"
+        "<b>👤 4. 账号与专属频道</b>\n"
+        "• <code>/register</code> - 获取注册验证码或查看已绑定的同 DC 专属存储频道；\n"
+        "• <code>/start</code> - 查看服务运行状态与快速入口。"
+    )
+    await m.reply_text(
+        help_text,
+        quote=True,
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+STREAM_HANDLERS = [
+    (user_register_command_handler, 1),
+    (start_command_handler, 2),
+    (help_command_handler, 3),
+    (media_receive_handler, 4),
+    (channel_link_receive_handler, 5),
+]
+
+
+def register_stream_handlers(client: Client) -> None:
+    """确保 Stream 插件的所有消息处理器被正确注册到 client.dispatcher 中（防丢 Handler 保护）"""
+    if not client or not getattr(client, "dispatcher", None):
+        return
+    for func, target_group in STREAM_HANDLERS:
+        handlers_to_add = getattr(func, "handlers", None)
+        if not handlers_to_add:
+            continue
+        for handler, group in handlers_to_add:
+            effective_group = group if group is not None else target_group
+            existing = client.dispatcher.groups.get(effective_group, [])
+            already_registered = any(
+                getattr(h, "callback", None) == func
+                for h in existing
+            )
+            if not already_registered:
+                client.add_handler(handler, effective_group)
+                logger.info(
+                    f"已为客户端 {getattr(client, 'name', 'bot')} 注册处理器 {func.__name__} (group {effective_group})"
+                )

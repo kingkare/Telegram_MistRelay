@@ -27,6 +27,29 @@ from .constants import (
 
 logger = logging.getLogger(__name__)
 
+async def ensure_peer_cached(client, chat_id: int | str):
+    """确保 Pyrogram 客户端已解析目标频道的 access_hash。若未解析，尝试根据用户名预热。"""
+    if client is None or not chat_id:
+        return
+    try:
+        if hasattr(client, "resolve_peer"):
+            await client.resolve_peer(chat_id)
+            return
+    except Exception:
+        pass
+
+    try:
+        import db
+        uname = db.get_channel_username_by_chat_id(chat_id)
+        if uname and hasattr(client, "get_chat"):
+            clean_uname = uname.lstrip("@")
+            if not clean_uname.startswith("channel_"):
+                await client.get_chat(f"@{clean_uname}")
+                logger.info(f"成功通过 @{clean_uname} 预热 Pyrogram Peer 缓存: {chat_id}")
+    except Exception as e:
+        logger.debug(f"预热 Pyrogram Peer 缓存失败 ({chat_id}): {e}")
+
+
 class UploadHandler:
     """处理文件上传到Telegram频道网盘"""
 
@@ -51,8 +74,42 @@ class UploadHandler:
             pass
         return self.bot
 
-    def _get_upload_chat_id(self):
-        """TG drive uploads must land in BIN_CHANNEL so stream/delete APIs work."""
+    def _get_upload_chat_id(self, upload_id=None, gid=None):
+        """TG drive uploads land in user target_channel_id if specified, otherwise BIN_CHANNEL (only for admin/system)."""
+        dl = None
+        if upload_id or gid:
+            try:
+                import db
+                if upload_id:
+                    up = db.get_upload_by_id(upload_id)
+                    if up and up.get("download_id"):
+                        dl = db.get_download_by_id(up["download_id"])
+                elif gid:
+                    did = db.get_download_id_by_gid(gid)
+                    if did:
+                        dl = db.get_download_by_id(did)
+            except Exception as e:
+                logger.debug(f"查询下载任务目标频道失败: {e}")
+
+        if dl:
+            if dl.get("target_channel_id"):
+                return int(dl["target_channel_id"])
+            if dl.get("user_id"):
+                try:
+                    import db
+                    u = db.get_user_by_id(dl["user_id"])
+                    if u:
+                        if u.get("bin_channel_id"):
+                            return int(u["bin_channel_id"])
+                        if u.get("role") != "admin":
+                            raise RuntimeError(
+                                f"普通租户 (user_id={dl['user_id']}) 尚未分配专属存储频道，严禁上传至全局默认频道 BIN_CHANNEL"
+                            )
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    logger.debug(f"查询下载任务所属用户专属频道失败: {e}")
+
         target = get_config_value('BIN_CHANNEL', None)
         try:
             return int(target) if target not in (None, '') else None
@@ -86,6 +143,12 @@ class UploadHandler:
                 message_id = getattr(message, "id", None)
                 if message_id is None:
                     message_id = getattr(message, "message_id", None)
+                if message_id:
+                    try:
+                        from thumbnail_worker import get_thumbnail_worker
+                        get_thumbnail_worker().enqueue(message_id, chat_id=chat_id)
+                    except Exception:
+                        pass
                 if chat_id and message_id:
                     return f"telegram://{chat_id}/{message_id}"
         except Exception as e:
@@ -153,12 +216,24 @@ class UploadHandler:
                     logger.warning(f"操作失败(已忽略): {e}")
                     pass
 
+            try:
+                upload_chat_id = self._get_upload_chat_id(upload_id=upload_id, gid=gid)
+            except RuntimeError as target_err:
+                logger.error(f"解析目标存储频道失败: {target_err}")
+                if upload_id:
+                    mark_upload_failed(upload_id, 'config_error', str(target_err), 'NO_DEDICATED_CHANNEL')
+                return
+
+            default_bin = get_config_value('BIN_CHANNEL', None)
+            is_dedicated_channel = bool(
+                upload_chat_id and default_bin and str(upload_chat_id) != str(default_bin)
+            )
+
             client_index = None
-            # 选择上传客户端（使用负载均衡）
             upload_client = None
 
-            if pyrogram_clients and len(pyrogram_clients) > 0:
-                # 使用Pyrogram写权限负载均衡（严格按写权限筛选，防止免加频道的只读Bot上传报403）
+            if not is_dedicated_channel and pyrogram_clients and len(pyrogram_clients) > 0:
+                # 仅上传到全局公用 BIN_CHANNEL 时才在多客户端间负载均衡；专属频道由已提权的主控 Bot 上传
                 import aria2_client.constants as a2_const
                 write_candidates = getattr(a2_const, "channel_write_clients", None) or channel_write_clients
                 if not write_candidates and 0 in pyrogram_clients:
@@ -181,18 +256,21 @@ class UploadHandler:
                     upload_work_loads[client_index] = upload_work_loads.get(client_index, 0) + 1
                     logger.info(f"使用Pyrogram写权限客户端 {client_index} 上传文件（上传负载: {upload_work_loads[client_index]}）")
 
-            # 如果没有Pyrogram客户端，使用主 bot（重试上传路径可能没有传入 bot）
             if upload_client is None:
                 upload_client = self._get_fallback_bot()
-                logger.info("使用主bot上传文件（未启用多客户端）")
+                logger.info(f"使用主控 StreamBot 上传文件 (目标频道: {upload_chat_id})")
 
-            upload_chat_id = self._get_upload_chat_id()
             if upload_client is None or not upload_chat_id:
-                error_text = "Telegram上传客户端或BIN_CHANNEL未初始化"
+                error_text = "Telegram上传客户端或存储频道未初始化"
                 logger.error(error_text)
                 if upload_id:
                     mark_upload_failed(upload_id, 'config_error', error_text, 'NO_TELEGRAM_TARGET')
                 return
+
+            try:
+                await ensure_peer_cached(upload_client, upload_chat_id)
+            except Exception as cache_err:
+                logger.debug(f"Peer 预热已尝试: {cache_err}")
 
             # 静默处理：不再发送Telegram消息，上传开始状态通过WebSocket推送
             # WebSocket推送已在 mark_upload_started 中实现

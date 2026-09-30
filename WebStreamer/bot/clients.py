@@ -1,3 +1,4 @@
+import pyrogram_patch
 # This file is a part of TG-FileStreamBot
 # Coding : Jyothis Jayanth [@EverythingSuckz]
 
@@ -227,6 +228,13 @@ async def register_primary_streambot():
                 "username": getattr(StreamBot, "username", "") or "",
                 "last_error": str(e),
             }
+
+    try:
+        from WebStreamer.bot.plugins.stream_modules.media_processor import register_stream_handlers
+        register_stream_handlers(StreamBot)
+    except Exception as reg_err:
+        logger.warning(f"主客户端 StreamBot 注册消息处理器警告: {reg_err}")
+
     return True
 
 
@@ -413,6 +421,15 @@ async def client_health_check():
             
             # 验证连接是否正常
             await client.get_me()
+
+            # 如果是主客户端 (index == 0)，确保 Stream 消息处理器被正确恢复注册！
+            if index == 0:
+                try:
+                    from WebStreamer.bot.plugins.stream_modules.media_processor import register_stream_handlers
+                    register_stream_handlers(client)
+                    logger.info("主客户端 0 重连后已成功恢复并验证 Stream 消息处理器")
+                except Exception as reg_err:
+                    logger.error(f"主客户端 0 重连后恢复处理器失败: {reg_err}", exc_info=True)
             
             logger.info(f"客户端 {index} 重新连接成功")
             return True

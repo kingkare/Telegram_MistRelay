@@ -29,7 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 
 # Install dependencies in a temporary prefix that can be copied to a non-root image.
-RUN pip3 --no-cache-dir install --prefix=/install -r /app/requirements.txt
+RUN pip3 --no-cache-dir install --prefix=/install -r /app/requirements.txt &&     sed -i 's/MIN_CHANNEL_ID = -1002147483647/MIN_CHANNEL_ID = -100999999999999/g' /install/lib/python3.11/site-packages/pyrogram/utils.py &&     sed -i 's/MIN_CHAT_ID = -2147483647/MIN_CHAT_ID = -999999999999/g' /install/lib/python3.11/site-packages/pyrogram/utils.py
 
 FROM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
 
@@ -38,6 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     aria2 \
     ffmpeg \
+    openssh-client \
+    sshpass \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -53,7 +55,8 @@ WORKDIR /app
 # Copy the rest of the application files
 # 前端已通过多阶段构建集成到镜像中
 COPY activation_preflight.py app.py async_aria2_client.py bootstrap_legacy.py configer.py db.py util.py monitor.py log_config.py auth.py download_cleanup.py legacy_config.py path_security.py request_security.py rotate_credentials.py security_validation.py service_runtime.py requirements.txt start.sh ./
-COPY thumbnail_generator.py thumbnail_worker.py cache_manager.py session_adapter.py botfather_creator.py private_channel_harvester.py ./
+COPY thumbnail_generator.py thumbnail_worker.py cache_manager.py session_adapter.py botfather_creator.py private_channel_harvester.py backup_manager.py channel_migrator.py edge_node_manager.py vps_deployer.py pyrogram_patch.py ai_customer_service.py telegram_user_uploader.py ./
+COPY edge_worker/ ./edge_worker/
 COPY aria2_client/ ./aria2_client/
 COPY WebStreamer/ ./WebStreamer/
 

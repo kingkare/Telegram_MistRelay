@@ -1,3 +1,4 @@
+import secrets
 """
 SQLite 数据库模块
 =================
@@ -45,12 +46,20 @@ SQLite 数据库模块
 """
 
 import os
+import sys
+import re
+import tempfile
+from typing import Optional, Dict, Any, List
+import ipaddress
 import sqlite3
+import hashlib
+import hmac
+import base64
 import json
 import logging
 import stat
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from legacy_config import (
     legacy_config_path,
@@ -62,7 +71,12 @@ from legacy_config import (
 logger = logging.getLogger(__name__)
 
 # 数据库路径：优先使用环境变量，否则使用 /app/db/downloads.db（确保在挂载的卷中）
-_default_db_path = os.path.join("/app/db", "downloads.db")
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_repo_db_dir = os.path.join(_script_dir, "db")
+if os.path.exists(_repo_db_dir):
+    _default_db_path = os.path.join(_repo_db_dir, "downloads.db")
+else:
+    _default_db_path = os.path.join("/app/db", "downloads.db")
 DB_PATH = os.environ.get("MISTRELAY_DB_PATH", _default_db_path)
 
 # 确保数据库目录存在
@@ -74,6 +88,39 @@ if _db_dir and not os.path.exists(_db_dir):
 def _now_iso() -> str:
     """返回UTC时间的ISO8601格式字符串，带'Z'后缀表示UTC时区"""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def get_default_edge_domain(ip: str) -> str:
+    """
+    根据 IPv4/IPv6 地址自动生成标准 sslip.io 泛解析域名。
+    例如: 16.162.23.244 -> edge.16-162-23-244.sslip.io
+    若输入已经是自定义域名则保留原域名；若为空或环回/私网地址则返回空。
+    """
+    if not ip or not isinstance(ip, str):
+        return ""
+    clean_ip = ip.strip().lower()
+    if not clean_ip:
+        return ""
+    if any(c.isalpha() for c in clean_ip) and not clean_ip.startswith("127."):
+        if clean_ip in ("localhost", "local"):
+            return ""
+        return clean_ip
+    try:
+        ip_obj = ipaddress.ip_address(clean_ip)
+        if ip_obj.is_loopback:
+            return ""
+        if isinstance(ip_obj, ipaddress.IPv4Address):
+            dashed = str(ip_obj).replace(".", "-")
+            return f"edge.{dashed}.sslip.io"
+        elif isinstance(ip_obj, ipaddress.IPv6Address):
+            dashed = str(ip_obj).replace(":", "-")
+            return f"edge.{dashed}.sslip.io"
+    except ValueError:
+        pass
+    if "." in clean_ip and not any(c.isalpha() for c in clean_ip):
+        dashed = clean_ip.replace(".", "-")
+        return f"edge.{dashed}.sslip.io"
+    return ""
 
 
 def _format_message_date(msg_date) -> str:
@@ -92,12 +139,75 @@ def _format_message_date(msg_date) -> str:
     return iso_str + 'Z'
 
 
+def is_production_db_path(path: Optional[str] = None) -> bool:
+    """检查给定的数据库路径是否指向真实的生产数据库"""
+    target = os.path.abspath(path or DB_PATH)
+    # 临时目录、内存数据库或包含 _test / sandbox 的路径视为非生产沙箱
+    temp_dir = tempfile.gettempdir()
+    if target.startswith(temp_dir) or "tmp" in target.lower() or "_test" in target or "sandbox" in target:
+        return False
+    prod_candidates = [
+        os.path.abspath(os.path.join(_script_dir, "db", "downloads.db")),
+        os.path.abspath("/app/db/downloads.db"),
+        os.path.abspath("/root/MistRelay-dev/db/downloads.db"),
+    ]
+    return target in prod_candidates
+
+
+def is_testing_environment() -> bool:
+    """检测当前运行时是否处于测试模式"""
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("MISTRELAY_TEST_MODE") == "1":
+        return True
+    if "pytest" in sys.modules:
+        return True
+    return False
+
+
+def _test_mode_authorizer(action, arg1, arg2, dbname, source):
+    """
+    SQLite 引擎层内核级只读防护 Authorizer 回调函数。
+    当处于测试模式且目标连接为生产数据库时，强行拦截所有破坏性 / 写入性 SQL 操作。
+    """
+    DENIED_ACTIONS = (
+        sqlite3.SQLITE_DELETE,
+        sqlite3.SQLITE_DROP_TABLE,
+        sqlite3.SQLITE_DROP_INDEX,
+        sqlite3.SQLITE_DROP_TEMP_TABLE,
+        sqlite3.SQLITE_DROP_TEMP_INDEX,
+        sqlite3.SQLITE_DROP_TRIGGER,
+        sqlite3.SQLITE_DROP_VIEW,
+        sqlite3.SQLITE_INSERT,
+        sqlite3.SQLITE_UPDATE,
+        sqlite3.SQLITE_ALTER_TABLE,
+    )
+    if action in DENIED_ACTIONS:
+        logger.critical(
+            f"CRITICAL SAFETY VIOLATION BLOCKED: Refused test-mode mutating action ({action}) "
+            f"on production database '{DB_PATH}'! Tests must use an isolated sandbox database."
+        )
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
 def get_connection():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA cache_size=-64000;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    conn.execute("PRAGMA mmap_size=268435456;")
     conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA foreign_keys=ON;")
+
+    # 铁律防护：若在测试环境中且连接目标是生产库，强行安装 authorizer 阻断所有写入和删除
+    if is_testing_environment() and is_production_db_path(DB_PATH):
+        logger.warning(
+            f"SAFETY GUARD ENGAGED: Connection opened to production database '{DB_PATH}' during testing! "
+            f"Mutating queries will be blocked by SQLite authorizer."
+        )
+        conn.set_authorizer(_test_mode_authorizer)
+
     return conn
 
 
@@ -156,7 +266,13 @@ def init_db():
             """
         )
         cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tg_media_chat_msg ON tg_media (chat_id, message_id)"
+            "CREATE INDEX IF NOT EXISTS idx_tg_media_chat_message ON tg_media (chat_id, message_id)"
+        )
+        cur.execute(
+            "DROP INDEX IF EXISTS idx_tg_media_chat_msg"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tg_media_chat_date ON tg_media (chat_id, message_date DESC)"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_tg_media_media_group ON tg_media (media_group_id)"
@@ -301,6 +417,62 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions (user_id)"
         )
 
+        # users 表多租户扩展字段迁移
+        for col_name, col_type in [
+            ("tg_user_id", "INTEGER"),
+            ("tg_username", "TEXT"),
+            ("tg_first_name", "TEXT"),
+            ("dc_id", "INTEGER"),
+            ("bin_channel_id", "INTEGER"),
+            ("bin_channel_username", "TEXT"),
+            ("creator_account_id", "INTEGER"),
+            ("extra_channels", "TEXT DEFAULT '[]'"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}")
+            except sqlite3.OperationalError:
+                pass
+
+        try:
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tg_user_id ON users (tg_user_id) WHERE tg_user_id IS NOT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        # Telegram 注册验证码表
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tg_register_codes (
+                code TEXT PRIMARY KEY,
+                tg_user_id INTEGER NOT NULL,
+                tg_username TEXT,
+                tg_first_name TEXT,
+                detected_dc_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used INTEGER DEFAULT 0
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tg_reg_codes_user ON tg_register_codes (tg_user_id)"
+        )
+
+        # downloads 表扩展字段迁移 (多租户隔离)
+        for col_name, col_type in [
+            ("user_id", "INTEGER"),
+            ("target_channel_id", "INTEGER"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE downloads ADD COLUMN {col_name} {col_type}")
+            except sqlite3.OperationalError:
+                pass
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_downloads_user_id ON downloads (user_id)"
+        )
+
         # Telegram 协议号资产池表
         cur.execute(
             """
@@ -335,6 +507,13 @@ def init_db():
             ("last_error", "TEXT"),
             ("api_id", "INTEGER"),
             ("api_hash", "TEXT"),
+            ("two_fa_password", "TEXT"),
+            ("two_fa_hint", "TEXT"),
+            ("has_two_fa", "INTEGER DEFAULT 0"),
+            ("local_otp_token", "TEXT"),
+            ("is_taken_over", "INTEGER DEFAULT 0"),
+            ("taken_over_at", "TEXT"),
+            ("bot_usernames", "TEXT"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE tg_protocol_accounts ADD COLUMN {col_name} {col_type}")
@@ -344,6 +523,197 @@ def init_db():
         # Older releases created this now-unused index table but did not enable
         # SQLite foreign keys. Preserve its records while applying the declared
         # ON DELETE SET NULL result to already-orphaned links.
+        # 为缺失 local_otp_token 的历史协议号补齐专属安全接码 Token
+        try:
+            missing_tokens = cur.execute(
+                "SELECT id FROM tg_protocol_accounts WHERE local_otp_token IS NULL OR local_otp_token = \x27\x27"
+            ).fetchall()
+            for r in missing_tokens:
+                cur.execute(
+                    "UPDATE tg_protocol_accounts SET local_otp_token = ? WHERE id = ?",
+                    (secrets.token_hex(16), r[0]),
+                )
+        except Exception:
+            pass
+
+        # 为存量协议号自愈补齐历史号商 2FA 原密码 (避免修改 2FA 时因缺失旧密码受阻)
+        try:
+            legacy_2fa_map = {
+                "+16813086196": "qq1122",
+                "+959757485895": "8899",
+                "+18048484620": "qq1122",
+            }
+            cur.execute(
+                """
+                UPDATE tg_protocol_accounts
+                   SET two_fa_password = 'z4422404', has_two_fa = 1
+                 WHERE (two_fa_password IS NULL OR two_fa_password = '')
+                   AND (phone LIKE '+1941%' OR phone LIKE '+1940%')
+                """
+            )
+            for p, pwd in legacy_2fa_map.items():
+                cur.execute(
+                    """
+                    UPDATE tg_protocol_accounts
+                       SET two_fa_password = ?, has_two_fa = 1
+                     WHERE phone = ? AND (two_fa_password IS NULL OR two_fa_password = '')
+                    """,
+                    (pwd, p),
+                )
+        except Exception:
+            pass
+
+        # 自动回填已完成本机接码 + 专属 2FA 强密码的协议号为已接管状态
+        try:
+            cur.execute(
+                """
+                UPDATE tg_protocol_accounts
+                   SET is_taken_over = 1
+                 WHERE COALESCE(is_taken_over, 0) = 0
+                   AND code_url LIKE '/api/telegram/botfather/otp/%'
+                   AND two_fa_password IS NOT NULL
+                   AND two_fa_password NOT IN ('', 'z4422404', 'qq1122', '8899', '123456', '666888', '888888', '112233')
+                """
+            )
+        except Exception:
+            pass
+
+        # 边缘推流分流节点表 (多租户 VPS Edge Worker)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS edge_nodes (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id         INTEGER NOT NULL,
+                node_name         TEXT NOT NULL,
+                ip                TEXT,
+                port              INTEGER NOT NULL DEFAULT 8090,
+                ssh_host          TEXT,
+                ssh_port          INTEGER NOT NULL DEFAULT 22,
+                ssh_user          TEXT NOT NULL DEFAULT 'root',
+                ssh_password_enc  TEXT,
+                domain            TEXT,
+                use_ssl           INTEGER NOT NULL DEFAULT 0,
+                auth_secret       TEXT NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'offline',
+                deploy_log        TEXT,
+                allow_shared_pool INTEGER NOT NULL DEFAULT 0,
+                metrics           TEXT,
+                benchmark_data    TEXT DEFAULT '{}',
+                target_dc_id      INTEGER,
+                assigned_bot_token TEXT,
+                assigned_bot_username TEXT,
+                allow_bot_pool    INTEGER NOT NULL DEFAULT 1,
+                last_seen_at      TEXT,
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_edge_nodes_tenant ON edge_nodes (tenant_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_edge_nodes_status ON edge_nodes (status)"
+        )
+
+        cur.execute("PRAGMA table_info(edge_nodes)")
+        _edge_cols = {row[1] for row in cur.fetchall()}
+        if "benchmark_data" not in _edge_cols:
+            try:
+                cur.execute("ALTER TABLE edge_nodes ADD COLUMN benchmark_data TEXT DEFAULT '{}'")
+            except Exception:
+                pass
+        for col_name, col_type in (
+            ("target_dc_id", "INTEGER DEFAULT NULL"),
+            ("assigned_bot_token", "TEXT DEFAULT NULL"),
+            ("assigned_bot_username", "TEXT DEFAULT NULL"),
+            ("allow_bot_pool", "INTEGER NOT NULL DEFAULT 1"),
+            ("target_bot_count", "INTEGER DEFAULT NULL"),
+        ):
+            if col_name not in _edge_cols:
+                try:
+                    cur.execute(f"ALTER TABLE edge_nodes ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
+
+        # 存量边缘节点平滑自愈迁移：为缺失 domain 或 domain 等于裸 IP 的节点自动补齐 sslip.io 域名并启用 SSL
+        try:
+            cur.execute("SELECT id, ip, domain, use_ssl FROM edge_nodes WHERE ip IS NOT NULL AND ip != ''")
+            for r in cur.fetchall():
+                node_id = r[0]
+                node_ip = (r[1] or "").strip()
+                node_dom = (r[2] or "").strip()
+                node_ssl = r[3]
+                if not node_dom or node_dom == node_ip:
+                    auto_dom = get_default_edge_domain(node_ip)
+                    if auto_dom:
+                        cur.execute(
+                            "UPDATE edge_nodes SET domain = ?, use_ssl = 1, updated_at = ? WHERE id = ?",
+                            (auto_dom, _now_iso(), node_id),
+                        )
+        except Exception as e:
+            logger.debug(f"边缘节点存量迁移跳过: {e}")
+
+        # 存量边缘节点数据中心 (DC) 亲和归属自动推导自愈
+        try:
+            cur.execute("SELECT id, node_name, ip, benchmark_data, target_dc_id FROM edge_nodes")
+            for r in cur.fetchall():
+                nid, nname, nip, nbench, cur_dc = r[0], r[1] or "", r[2] or "", r[3] or "{}", r[4]
+                if cur_dc is not None:
+                    continue
+                assigned_dc = 5
+                try:
+                    parsed_b = json.loads(nbench) if isinstance(nbench, str) else nbench
+                    fastest = (parsed_b or {}).get("fastest_dc") or {}
+                    fid = fastest.get("id")
+                    if fid in (1, 3):
+                        assigned_dc = 1
+                    elif fid in (2, 4):
+                        assigned_dc = 4
+                    elif fid == 5:
+                        assigned_dc = 5
+                    else:
+                        lower_name = (nname + " " + nip).lower()
+                        if any(k in lower_name for k in ("美", "us", "america", "rn-")):
+                            assigned_dc = 1
+                        elif any(k in lower_name for k in ("欧", "eu", "de", "fr", "uk")):
+                            assigned_dc = 4
+                        else:
+                            assigned_dc = 5
+                except Exception:
+                    pass
+                cur.execute(
+                    "UPDATE edge_nodes SET target_dc_id = ?, updated_at = ? WHERE id = ?",
+                    (assigned_dc, _now_iso(), nid),
+                )
+        except Exception as e:
+            logger.debug(f"边缘节点 DC 归属自愈跳过: {e}")
+
+        # 边缘节点一键脚本安装配对 Token 表
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS edge_node_tokens (
+                token             TEXT PRIMARY KEY,
+                tenant_id         INTEGER NOT NULL,
+                node_name         TEXT NOT NULL,
+                domain            TEXT,
+                port              INTEGER NOT NULL DEFAULT 8090,
+                use_ssl           INTEGER NOT NULL DEFAULT 0,
+                allow_shared_pool INTEGER NOT NULL DEFAULT 0,
+                node_id           INTEGER,
+                expires_at        TEXT NOT NULL,
+                used              INTEGER NOT NULL DEFAULT 0,
+                created_at        TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_edge_tokens_tenant ON edge_node_tokens (tenant_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_edge_tokens_node ON edge_node_tokens (node_id)"
+        )
+
         has_legacy_channel_files = cur.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tg_channel_files'"
         ).fetchone()
@@ -484,6 +854,18 @@ def save_tg_media(message, media=None, custom_file_name=None, custom_caption=Non
     thumbs_json = "[]"
 
     with db_cursor() as cur:
+        # 多租户兼容：若相同 file_unique_id 存在于不同 chat_id 频道，追加 @chat_id 后缀以隔离存储
+        final_unique_id = file_unique_id
+        cur.execute(
+            "SELECT chat_id FROM tg_media WHERE file_unique_id = ?",
+            (file_unique_id,),
+        )
+        existing_row = cur.fetchone()
+        if existing_row:
+            existing_chat = existing_row[0] if isinstance(existing_row, (list, tuple)) else existing_row["chat_id"]
+            if str(existing_chat) != str(chat_id):
+                final_unique_id = f"{file_unique_id}@{chat_id}"
+
         cur.execute(
             """
             INSERT INTO tg_media (
@@ -520,7 +902,7 @@ def save_tg_media(message, media=None, custom_file_name=None, custom_caption=Non
                 thumbs = excluded.thumbs
             """,
             (
-                file_unique_id,
+                final_unique_id,
                 chat_id,
                 message_id,
                 getattr(from_user, "id", None),
@@ -542,21 +924,38 @@ def save_tg_media(message, media=None, custom_file_name=None, custom_caption=Non
             ),
         )
 
-    return file_unique_id
+    return final_unique_id
 
 
-def create_download(file_unique_id: str, gid: str | None, source_url: str | None) -> int:
-    """创建一条下载记录，返回 downloads.id。"""
+def create_download(
+    file_unique_id: str,
+    gid: str | None,
+    source_url: str | None,
+    user_id: int | None = None,
+    target_channel_id: int | None = None,
+) -> int:
+    """创建一条下载记录，返回 downloads.id。支持按用户和目标频道进行租户绑定。"""
     now = _now_iso()
     with db_cursor() as cur:
+        cur.execute("SELECT 1 FROM tg_media WHERE file_unique_id = ?", (file_unique_id,))
+        if not cur.fetchone():
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO tg_media (
+                    file_unique_id, chat_id, message_id, file_id, message_date
+                ) VALUES (?, ?, 0, ?, ?)
+                """,
+                (file_unique_id, target_channel_id or 0, file_unique_id, now),
+            )
         cur.execute(
             """
             INSERT INTO downloads (
                 file_unique_id, gid, source_url, status,
+                user_id, target_channel_id,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, 'pending', ?, ?)
+            ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
             """,
-            (file_unique_id, gid, source_url, now, now),
+            (file_unique_id, gid, source_url, user_id, target_channel_id, now, now),
         )
         download_id = cur.lastrowid
     # 如果有 gid，推送 WebSocket 更新（新记录通知）
@@ -648,6 +1047,7 @@ def _notify_ws_download_update(gid: str):
                     asyncio.create_task(ws_manager.send_download_update({
                         "gid": gid,
                         "download_id": download_id,
+                        "user_id": download.get('user_id'),
                         "status": download.get('status'),
                         "completed_length": download.get('completed_length'),
                         "total_length": download.get('total_length'),
@@ -667,6 +1067,8 @@ def _notify_ws_upload_update(upload_id: int):
         
         upload = get_upload_by_id(upload_id)
         if upload:
+            dl_id = upload.get('download_id')
+            dl_rec = get_download_by_id(dl_id) if dl_id else None
             loop = None
             try:
                 loop = asyncio.get_event_loop()
@@ -677,7 +1079,8 @@ def _notify_ws_upload_update(upload_id: int):
             if loop and not loop.is_closed():
                 asyncio.create_task(ws_manager.send_upload_update({
                     "upload_id": upload_id,
-                    "download_id": upload.get('download_id'),
+                    "download_id": dl_id,
+                    "user_id": dl_rec.get('user_id') if dl_rec else None,
                     "status": upload.get('status'),
                     "uploaded_size": upload.get('uploaded_size'),
                     "total_size": upload.get('total_size'),
@@ -696,6 +1099,8 @@ def _notify_ws_cleanup_update(upload_id: int):
         
         upload = get_upload_by_id(upload_id)
         if upload:
+            dl_id = upload.get('download_id')
+            dl_rec = get_download_by_id(dl_id) if dl_id else None
             loop = None
             try:
                 loop = asyncio.get_event_loop()
@@ -706,7 +1111,8 @@ def _notify_ws_cleanup_update(upload_id: int):
             if loop and not loop.is_closed():
                 asyncio.create_task(ws_manager.send_cleanup_update({
                     "upload_id": upload_id,
-                    "download_id": upload.get('download_id'),
+                    "download_id": dl_id,
+                    "user_id": dl_rec.get('user_id') if dl_rec else None,
                     "cleaned_at": upload.get('cleaned_at'),
                 }))
     except Exception as e:
@@ -714,12 +1120,12 @@ def _notify_ws_cleanup_update(upload_id: int):
 
 
 def _notify_ws_statistics_update():
-    """通过 WebSocket 推送统计信息更新（异步，不阻塞）"""
+    """通过 WebSocket 推送统计信息更新（异步，不阻塞，按角色隔离推送）"""
     try:
         from WebStreamer.server.ws_manager import ws_manager
         import asyncio
         
-        # 获取统计信息
+        # 获取全局统计信息（推送给管理员）
         download_stats = get_download_statistics()
         upload_stats = get_upload_statistics()
         
@@ -735,6 +1141,19 @@ def _notify_ws_statistics_update():
                 "downloads": download_stats,
                 "uploads": upload_stats,
             }))
+            if hasattr(ws_manager, "get_connected_tenant_user_ids"):
+                for uid in ws_manager.get_connected_tenant_user_ids():
+                    u_dl_stats = get_download_statistics(user_id=uid)
+                    u_up_stats = get_upload_statistics(user_id=uid)
+                    asyncio.create_task(
+                        ws_manager.send_statistics_update(
+                            {
+                                "downloads": u_dl_stats,
+                                "uploads": u_up_stats,
+                            },
+                            target_user_id=uid,
+                        )
+                    )
     except Exception as e:
         # 静默失败，不影响主流程
         pass
@@ -877,16 +1296,19 @@ def update_download_progress(gid: str, completed_length: int | None = None,
     _notify_ws_download_update(gid)
 
 
-def fetch_recent_downloads(limit: int = 100):
+def fetch_recent_downloads(limit: int = 100, user_id: int | None = None):
     """
     查询最近的下载记录（按创建时间倒序），包含部分 Telegram 媒体字段和上传信息，
-    用于 Web 管理页面展示。
+    用于 Web 管理页面展示。支持按 user_id 租户过滤。
     """
+    where_sql = "WHERE d.user_id = ?" if user_id is not None else ""
+    params = [int(user_id), limit] if user_id is not None else [limit]
+
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT
                 d.id,
                 d.gid,
@@ -928,10 +1350,11 @@ def fetch_recent_downloads(limit: int = 100):
               ON d.file_unique_id = m.file_unique_id
             LEFT JOIN uploads AS u
               ON u.download_id = d.id
+            {where_sql}
             ORDER BY d.created_at DESC, u.created_at DESC
             LIMIT ?
             """,
-            (limit,),
+            tuple(params),
         )
         rows = cur.fetchall()
         # 将结果转换为字典，并处理多个上传记录的情况
@@ -1002,12 +1425,12 @@ def fetch_recent_downloads(limit: int = 100):
         return list(result_dict.values())
 
 
-def fetch_downloads_grouped(limit: int = 100):
+def fetch_downloads_grouped(limit: int = 100, user_id: int | None = None):
     """
-    查询下载记录并按消息分组。
+    查询下载记录并按消息分组。支持按 user_id 租户过滤。
     返回格式：按消息组（media_group_id 或 chat_id+message_id）分组的数据
     """
-    records = fetch_recent_downloads(limit)
+    records = fetch_recent_downloads(limit, user_id=user_id)
     
     # 按消息分组
     groups: dict[str, list] = {}
@@ -1673,7 +2096,7 @@ def get_upload_by_id(upload_id: int):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT u.*, d.local_path, d.status as download_status
+            SELECT u.*, d.local_path, d.status as download_status, d.user_id as user_id
             FROM uploads AS u
             LEFT JOIN downloads AS d ON u.download_id = d.id
             WHERE u.id = ?
@@ -1701,14 +2124,15 @@ def get_uploads_by_download(download_id: int):
         return [dict(row) for row in rows]
 
 
-def fetch_recent_uploads(limit: int = 100, status: str = None, upload_target: str = None):
+def fetch_recent_uploads(limit: int = 100, status: str = None, upload_target: str = None, user_id: int | None = None):
     """
-    查询最近的上传记录（按创建时间倒序）。
+    查询最近的上传记录（按创建时间倒序）。支持租户按 user_id 过滤。
     
     Args:
         limit: 返回记录数量限制
         status: 可选，按状态过滤
         upload_target: 可选，按上传目标过滤
+        user_id: 可选，按所属租户 user_id 过滤
     
     Returns:
         上传记录列表
@@ -1727,6 +2151,10 @@ def fetch_recent_uploads(limit: int = 100, status: str = None, upload_target: st
         if upload_target:
             conditions.append("u.upload_target = ?")
             params.append(upload_target)
+
+        if user_id is not None:
+            conditions.append("d.user_id = ?")
+            params.append(int(user_id))
         
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
@@ -1738,6 +2166,7 @@ def fetch_recent_uploads(limit: int = 100, status: str = None, upload_target: st
                 d.local_path,
                 d.status as download_status,
                 d.gid,
+                d.user_id,
                 m.file_name,
                 m.file_size,
                 m.chat_id,
@@ -1755,53 +2184,80 @@ def fetch_recent_uploads(limit: int = 100, status: str = None, upload_target: st
         return [dict(row) for row in rows]
 
 
-def count_uploads_by_status():
-    """统计各状态的上传数量。"""
+def count_uploads_by_status(user_id: int | None = None):
+    """统计各状态的上传数量。支持租户按 user_id 过滤。"""
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT status, COUNT(*) as count
-            FROM uploads
-            GROUP BY status
-            """
-        )
+        if user_id is not None:
+            cur.execute(
+                """
+                SELECT u.status, COUNT(*) as count
+                FROM uploads AS u
+                INNER JOIN downloads AS d ON u.download_id = d.id
+                WHERE d.user_id = ?
+                GROUP BY u.status
+                """,
+                (int(user_id),),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT status, COUNT(*) as count
+                FROM uploads
+                GROUP BY status
+                """
+            )
         rows = cur.fetchall()
         return {row['status']: row['count'] for row in rows}
 
 
-def count_uploads_by_failure_reason():
-    """统计各失败原因的数量。"""
+def count_uploads_by_failure_reason(user_id: int | None = None):
+    """统计各失败原因的数量。支持租户按 user_id 过滤。"""
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT failure_reason, COUNT(*) as count
-            FROM uploads
-            WHERE status = 'failed' AND failure_reason IS NOT NULL
-            GROUP BY failure_reason
-            """
-        )
+        if user_id is not None:
+            cur.execute(
+                """
+                SELECT u.failure_reason, COUNT(*) as count
+                FROM uploads AS u
+                INNER JOIN downloads AS d ON u.download_id = d.id
+                WHERE u.status = 'failed' AND u.failure_reason IS NOT NULL AND d.user_id = ?
+                GROUP BY u.failure_reason
+                """,
+                (int(user_id),),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT failure_reason, COUNT(*) as count
+                FROM uploads
+                WHERE status = 'failed' AND failure_reason IS NOT NULL
+                GROUP BY failure_reason
+                """
+            )
         rows = cur.fetchall()
         return {row['failure_reason']: row['count'] for row in rows}
 
 
-def get_download_statistics():
+def get_download_statistics(user_id: int | None = None):
     """
-    获取下载统计信息（按消息分组统计，而不是按下载记录统计）。
+    获取下载统计信息（按消息分组统计，而不是按下载记录统计）。支持租户按 user_id 过滤。
     
     Returns:
         包含各种统计数据的字典
     """
+    where_sql = "WHERE d.user_id = ?" if user_id is not None else ""
+    params = [int(user_id)] if user_id is not None else []
+
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         
         # 获取所有下载记录，包含消息分组和上传状态信息
         cur.execute(
-            """
+            f"""
             SELECT
                 d.id,
                 d.status,
@@ -1816,7 +2272,9 @@ def get_download_statistics():
             FROM downloads AS d
             LEFT JOIN tg_media AS m ON d.file_unique_id = m.file_unique_id
             LEFT JOIN uploads AS u ON u.download_id = d.id
-            """
+            {where_sql}
+            """,
+            tuple(params),
         )
         rows = cur.fetchall()
 
@@ -1929,21 +2387,50 @@ def get_download_statistics():
         return stats
 
 
-def delete_all_downloads():
+def delete_all_downloads(user_id: int | None = None):
     """
     删除所有下载记录、上传记录和关联的 Telegram 媒体记录。
-    
-    注意：
-    - 外键约束在 downloads 表上（downloads.file_unique_id 引用 tg_media.file_unique_id），
-      所以删除 downloads 不会自动删除 tg_media。我们需要手动删除所有 tg_media 记录。
-    - uploads 表有外键约束（uploads.download_id 引用 downloads.id ON DELETE CASCADE），
-      删除 downloads 时会自动级联删除 uploads，但为了确保完整性，我们也显式删除。
-    
-    Returns:
-        包含删除记录数的字典
+    当传入 user_id 时，仅删除属于该租户的下载、上传及不再被其他下载引用的媒体记录。
     """
     with db_conn() as conn:
         cur = conn.cursor()
+
+        if user_id is not None:
+            uid = int(user_id)
+            cur.execute(
+                "SELECT DISTINCT file_unique_id FROM downloads WHERE user_id = ? AND file_unique_id IS NOT NULL",
+                (uid,),
+            )
+            file_unique_ids = [row[0] for row in cur.fetchall() if row[0]]
+
+            cur.execute("SELECT COUNT(*) FROM downloads WHERE user_id = ?", (uid,))
+            download_count = cur.fetchone()[0]
+
+            cur.execute(
+                "SELECT COUNT(*) FROM uploads WHERE download_id IN (SELECT id FROM downloads WHERE user_id = ?)",
+                (uid,),
+            )
+            upload_count = cur.fetchone()[0]
+
+            cur.execute(
+                "DELETE FROM uploads WHERE download_id IN (SELECT id FROM downloads WHERE user_id = ?)",
+                (uid,),
+            )
+            cur.execute("DELETE FROM downloads WHERE user_id = ?", (uid,))
+
+            media_count = 0
+            for fuid in file_unique_ids:
+                cur.execute("SELECT COUNT(*) FROM downloads WHERE file_unique_id = ?", (fuid,))
+                if cur.fetchone()[0] == 0:
+                    cur.execute("DELETE FROM tg_media WHERE file_unique_id = ?", (fuid,))
+                    media_count += cur.rowcount
+
+            conn.commit()
+            return {
+                'deleted_downloads': download_count,
+                'deleted_uploads': upload_count,
+                'deleted_media': media_count,
+            }
         
         # 先统计要删除的记录数
         cur.execute("SELECT COUNT(*) FROM downloads")
@@ -2057,9 +2544,9 @@ def delete_download_record(download_id: int, delete_local_file: bool = True):
         }
 
 
-def get_upload_statistics():
+def get_upload_statistics(user_id: int | None = None):
     """
-    获取上传统计信息。
+    获取上传统计信息。支持租户按 user_id 过滤。
     
     Returns:
         包含各种统计数据的字典
@@ -2068,49 +2555,99 @@ def get_upload_statistics():
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         
-        # 统计各状态的数量
-        cur.execute(
-            """
-            SELECT status, COUNT(*) as count
-            FROM uploads
-            GROUP BY status
-            """
-        )
-        status_counts = {row['status']: row['count'] for row in cur.fetchall()}
-        
-        # 统计已清理的数量
-        cur.execute(
-            """
-            SELECT COUNT(*) as count
-            FROM uploads
-            WHERE cleaned_at IS NOT NULL
-            """
-        )
-        cleaned_count = cur.fetchone()['count']
-        
-        # 总体统计
-        cur.execute(
-            """
-            SELECT
-                SUM(total_size) as total_size,
-                SUM(uploaded_size) as uploaded_size
-            FROM uploads
-            """
-        )
-        size_stats = dict(cur.fetchone())
-        
-        # 按目标统计
-        cur.execute(
-            """
-            SELECT upload_target, COUNT(*) as count
-            FROM uploads
-            GROUP BY upload_target
-            """
-        )
-        by_target = {row['upload_target']: row['count'] for row in cur.fetchall()}
+        if user_id is not None:
+            uid = int(user_id)
+            cur.execute(
+                """
+                SELECT u.status, COUNT(*) as count
+                FROM uploads AS u
+                INNER JOIN downloads AS d ON u.download_id = d.id
+                WHERE d.user_id = ?
+                GROUP BY u.status
+                """,
+                (uid,),
+            )
+            status_counts = {row['status']: row['count'] for row in cur.fetchall()}
+
+            cur.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM uploads AS u
+                INNER JOIN downloads AS d ON u.download_id = d.id
+                WHERE u.cleaned_at IS NOT NULL AND d.user_id = ?
+                """,
+                (uid,),
+            )
+            cleaned_count = cur.fetchone()['count']
+
+            cur.execute(
+                """
+                SELECT
+                    SUM(u.total_size) as total_size,
+                    SUM(u.uploaded_size) as uploaded_size
+                FROM uploads AS u
+                INNER JOIN downloads AS d ON u.download_id = d.id
+                WHERE d.user_id = ?
+                """,
+                (uid,),
+            )
+            size_stats = dict(cur.fetchone())
+
+            cur.execute(
+                """
+                SELECT u.upload_target, COUNT(*) as count
+                FROM uploads AS u
+                INNER JOIN downloads AS d ON u.download_id = d.id
+                WHERE d.user_id = ?
+                GROUP BY u.upload_target
+                """,
+                (uid,),
+            )
+            by_target = {row['upload_target']: row['count'] for row in cur.fetchall()}
+        else:
+            # 统计各状态的数量
+            cur.execute(
+                """
+                SELECT status, COUNT(*) as count
+                FROM uploads
+                GROUP BY status
+                """
+            )
+            status_counts = {row['status']: row['count'] for row in cur.fetchall()}
+            
+            # 统计已清理的数量
+            cur.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM uploads
+                WHERE cleaned_at IS NOT NULL
+                """
+            )
+            cleaned_count = cur.fetchone()['count']
+            
+            # 总体统计
+            cur.execute(
+                """
+                SELECT
+                    SUM(total_size) as total_size,
+                    SUM(uploaded_size) as uploaded_size
+                FROM uploads
+                """
+            )
+            size_stats = dict(cur.fetchone())
+            
+            # 按目标统计
+            cur.execute(
+                """
+                SELECT upload_target, COUNT(*) as count
+                FROM uploads
+                GROUP BY upload_target
+                """
+            )
+            by_target = {row['upload_target']: row['count'] for row in cur.fetchall()}
         
         # 失败原因统计
-        by_failure_reason = count_uploads_by_failure_reason()
+        by_failure_reason = count_uploads_by_failure_reason(user_id=user_id)
         
         return {
             'total': sum(status_counts.values()),
@@ -2290,9 +2827,11 @@ def browse_tg_media(
     sort_by: str = 'message_date',
     sort_desc: bool = True,
     media_group_id: str = None,
+    chat_id: int | None = None,
+    chat_ids: list[int] | None = None,
 ) -> dict:
     """
-    分页浏览 tg_media 表中的媒体文件。
+    分页浏览 tg_media 表中的媒体文件。支持单频道隔离或多频道联合挂载查询。
 
     默认将 media_group_id 聚合成虚拟文件夹；传入 media_group_id 时返回组内真实文件。
     """
@@ -2300,8 +2839,22 @@ def browse_tg_media(
     if sort_by not in allowed_sort:
         sort_by = 'message_date'
 
-    conditions = []
+    conditions = ["message_id > 0"]
     params: list = []
+
+    target_cids = []
+    if chat_ids is not None:
+        target_cids = [int(c) for c in chat_ids if c is not None]
+    elif chat_id is not None:
+        target_cids = [int(chat_id)]
+
+    if len(target_cids) == 1:
+        conditions.append("chat_id = ?")
+        params.append(target_cids[0])
+    elif len(target_cids) > 1:
+        placeholders = ",".join(["?"] * len(target_cids))
+        conditions.append(f"chat_id IN ({placeholders})")
+        params.extend(target_cids)
 
     if media_group_id:
         conditions.append("media_group_id = ?")
@@ -2331,6 +2884,51 @@ def browse_tg_media(
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     offset = (page - 1) * page_size
 
+    if media_group_id:
+        with db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+
+            cur.execute(f"SELECT COUNT(*) as cnt FROM tg_media {where}", tuple(params))
+            count_row = cur.fetchone()
+            total = count_row['cnt'] if count_row else 0
+
+            order_col = {
+                'file_size': 'COALESCE(file_size, 0)',
+                'file_name': 'LOWER(COALESCE(file_name, ""))',
+                'message_date': 'COALESCE(message_date, "")',
+            }.get(sort_by, 'COALESCE(message_date, "")')
+            order_dir = 'DESC' if sort_desc else 'ASC'
+
+            cur.execute(
+                f"""
+                SELECT
+                    file_unique_id, chat_id, message_id, file_id,
+                    file_name, mime_type, file_size,
+                    duration, width, height,
+                    caption, message_date,
+                    media_group_id, supports_streaming
+                FROM tg_media
+                {where}
+                ORDER BY {order_col} {order_dir}
+                LIMIT ? OFFSET ?
+                """,
+                tuple(params) + (page_size, offset),
+            )
+            items = [dict(r) for r in cur.fetchall()]
+
+        for item in items:
+            item['entry_type'] = 'file'
+
+        return {
+            'items': items,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'grouped': False,
+            'media_group_id': media_group_id,
+        }
+
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -2349,21 +2947,6 @@ def browse_tg_media(
             tuple(params),
         )
         rows = [dict(r) for r in cur.fetchall()]
-
-    if media_group_id:
-        items = rows
-        for item in items:
-            item['entry_type'] = 'file'
-        items.sort(key=lambda item: _tg_media_sort_value(item, sort_by), reverse=sort_desc)
-        total = len(items)
-        return {
-            'items': items[offset:offset + page_size],
-            'total': total,
-            'page': page,
-            'page_size': page_size,
-            'grouped': False,
-            'media_group_id': media_group_id,
-        }
 
     entries: list[dict] = []
     groups: dict[str, list[dict]] = {}
@@ -2437,20 +3020,36 @@ def _tg_media_sort_value(item: dict, sort_by: str):
     return item.get('message_date') or ''
 
 
-def get_tg_media_stats() -> dict:
-    """统计 tg_media 表的概览信息。"""
+def get_tg_media_stats(chat_id: int | None = None, chat_ids: list[int] | None = None) -> dict:
+    """统计 tg_media 表的概览信息。支持按单个 chat_id 或多频道 chat_ids 进行租户频道隔离。"""
+    conditions = ["message_id > 0"]
+    params = []
+
+    target_cids = []
+    if chat_ids is not None:
+        target_cids = [int(c) for c in chat_ids if c is not None]
+    elif chat_id is not None:
+        target_cids = [int(chat_id)]
+
+    if len(target_cids) == 1:
+        conditions.append("chat_id = ?")
+        params.append(target_cids[0])
+    elif len(target_cids) > 1:
+        placeholders = ",".join(["?"] * len(target_cids))
+        conditions.append(f"chat_id IN ({placeholders})")
+        params.extend(target_cids)
+
+    where_sql = f"WHERE {' AND '.join(conditions)}"
+
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
-        cur.execute("SELECT COUNT(*) as cnt, COALESCE(SUM(file_size),0) as total_size FROM tg_media")
-        row = cur.fetchone()
-        total_count = row['cnt']
-        total_size = row['total_size']
-
         cur.execute(
-            """
+            f"""
             SELECT
+                COUNT(*) as cnt,
+                COALESCE(SUM(file_size), 0) as total_size,
                 SUM(CASE WHEN mime_type LIKE 'video/%' THEN 1 ELSE 0 END) as videos,
                 SUM(CASE WHEN mime_type LIKE 'image/%' THEN 1 ELSE 0 END) as images,
                 SUM(CASE WHEN mime_type LIKE 'audio/%' THEN 1 ELSE 0 END) as audios,
@@ -2458,25 +3057,48 @@ def get_tg_media_stats() -> dict:
                           AND mime_type NOT LIKE 'image/%'
                           AND mime_type NOT LIKE 'audio/%' THEN 1 ELSE 0 END) as documents
             FROM tg_media
-            """
+            {where_sql}
+            """,
+            tuple(params),
         )
-        type_row = cur.fetchone()
+        row = cur.fetchone()
 
     return {
-        'total_count': total_count,
-        'total_size': total_size,
-        'videos': type_row['videos'] or 0,
-        'images': type_row['images'] or 0,
-        'audios': type_row['audios'] or 0,
-        'documents': type_row['documents'] or 0,
+        'total_count': (row['cnt'] if row else 0) or 0,
+        'total_size': (row['total_size'] if row else 0) or 0,
+        'videos': (row['videos'] if row else 0) or 0,
+        'images': (row['images'] if row else 0) or 0,
+        'audios': (row['audios'] if row else 0) or 0,
+        'documents': (row['documents'] if row else 0) or 0,
     }
 
 
-def get_tg_media_record_by_message_id(message_id: int) -> dict | None:
-    """根据频道消息 ID 获取单条 tg_media 记录。"""
+def get_tg_media_record_by_message_id(
+    message_id: int,
+    chat_id: int | None = None,
+    secure_hash: str | None = None,
+    hash_len: int = 6,
+) -> dict | None:
+    """根据频道消息 ID 获取单条 tg_media 记录。支持按 chat_id 或 secure_hash 跨频道精确匹配。"""
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
+        if chat_id is not None:
+            cur.execute(
+                """
+                SELECT
+                    file_unique_id, chat_id, message_id, file_id,
+                    file_name, mime_type, file_size, duration,
+                    width, height, caption, message_date,
+                    media_group_id, supports_streaming, thumbs
+                FROM tg_media
+                WHERE message_id = ? AND chat_id = ?
+                """,
+                (message_id, int(chat_id)),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
         cur.execute(
             """
             SELECT
@@ -2489,51 +3111,80 @@ def get_tg_media_record_by_message_id(message_id: int) -> dict | None:
             """,
             (message_id,),
         )
-        row = cur.fetchone()
-        return dict(row) if row else None
+        rows = [dict(r) for r in cur.fetchall()]
+        if not rows:
+            return None
+        if len(rows) == 1 or not secure_hash:
+            return rows[0]
+
+        import hashlib
+        for r in rows:
+            uid = r.get("file_unique_id", "")
+            raw_uid = uid.split("@")[0]
+            h1 = hashlib.sha256(uid.encode("utf-8")).hexdigest()[:hash_len]
+            h2 = hashlib.sha256(raw_uid.encode("utf-8")).hexdigest()[:hash_len]
+            if secure_hash in (h1, h2):
+                return r
+        return rows[0]
 
 
-def get_tg_media_records_by_media_group(media_group_id: str) -> list[dict]:
-    """根据 Telegram 媒体组 ID 获取对应 tg_media 记录。"""
+def get_tg_media_records_by_media_group(media_group_id: str, chat_id: int | None = None) -> list[dict]:
+    """根据 Telegram 媒体组 ID 获取对应 tg_media 记录。支持按 chat_id 过滤。"""
+    conditions = ["media_group_id = ?"]
+    params = [media_group_id]
+    if chat_id is not None:
+        conditions.append("chat_id = ?")
+        params.append(int(chat_id))
+
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT
                 file_unique_id, chat_id, message_id, file_id,
                 file_name, mime_type, file_size, duration,
                 width, height, caption, message_date,
                 media_group_id, supports_streaming, thumbs
             FROM tg_media
-            WHERE media_group_id = ?
+            WHERE {' AND '.join(conditions)}
             ORDER BY message_id ASC
             """,
-            (media_group_id,),
+            tuple(params),
         )
         return [dict(row) for row in cur.fetchall()]
 
 
-def list_all_tg_media_records() -> list[dict]:
-    """列出全部 tg_media 记录，用于批量清理 tg 网盘及缩略图预热。"""
+def list_all_tg_media_records(chat_id: int | None = None) -> list[dict]:
+    """列出全部 tg_media 记录，用于批量清理 tg 网盘及缩略图预热。支持按 chat_id 过滤。"""
+    conditions = ["message_id > 0"]
+    params = []
+    if chat_id is not None:
+        conditions.append("chat_id = ?")
+        params.append(int(chat_id))
+    where_sql = f"WHERE {' AND '.join(conditions)}"
+
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute(
-            """
+            f"""
             SELECT
                 file_unique_id, chat_id, message_id, file_name,
                 mime_type, file_size, file_id, media_group_id, message_date
             FROM tg_media
+            {where_sql}
             ORDER BY message_id ASC
-            """
+            """,
+            tuple(params),
         )
         return [dict(row) for row in cur.fetchall()]
 
 
-def delete_tg_media_records(file_unique_ids: list[str]) -> dict:
+def delete_tg_media_records(file_unique_ids: list[str], chat_id: int | None = None) -> dict:
     """
     删除指定 tg_media 记录及其关联的 downloads/uploads 记录。
+    支持按 chat_id 进行安全所有权校验（防止跨租户误删）。
 
     注意：
     - 这里只清理数据库记录，不删除本地文件。
@@ -2551,6 +3202,17 @@ def delete_tg_media_records(file_unique_ids: list[str]) -> dict:
 
     with db_conn() as conn:
         cur = conn.cursor()
+
+        if chat_id is not None:
+            cur.execute(
+                f"SELECT file_unique_id FROM tg_media WHERE file_unique_id IN ({placeholders}) AND chat_id = ?",
+                tuple(ids + [int(chat_id)]),
+            )
+            filtered_ids = [r[0] for r in cur.fetchall()]
+            if not filtered_ids:
+                return {'deleted_media': 0, 'deleted_downloads': 0, 'deleted_uploads': 0}
+            ids = filtered_ids
+            placeholders = ','.join('?' for _ in ids)
 
         cur.execute(
             f"SELECT COUNT(*) FROM tg_media WHERE file_unique_id IN ({placeholders})",
@@ -2579,6 +3241,19 @@ def delete_tg_media_records(file_unique_ids: list[str]) -> dict:
             )
 
         cur.execute(
+            f"SELECT message_id, file_name, chat_id FROM tg_media WHERE file_unique_id IN ({placeholders})",
+            tuple(ids),
+        )
+        records_to_clean = cur.fetchall()
+        if records_to_clean:
+            try:
+                from thumbnail_generator import remove_cached_telegram_thumbnail
+                for rec_row in records_to_clean:
+                    remove_cached_telegram_thumbnail(rec_row[0], rec_row[1], rec_row[2])
+            except Exception:
+                pass
+
+        cur.execute(
             f"DELETE FROM downloads WHERE file_unique_id IN ({placeholders})",
             tuple(ids),
         )
@@ -2594,20 +3269,569 @@ def delete_tg_media_records(file_unique_ids: list[str]) -> dict:
     }
 
 
+def parse_extra_channels(val: Any) -> list[int]:
+    """安全解析用户的 extra_channels 字段为整数列表"""
+    if not val:
+        return []
+    if isinstance(val, (list, tuple, set)):
+        res = []
+        for x in val:
+            try:
+                res.append(int(x))
+            except (ValueError, TypeError):
+                pass
+        return sorted(list(set(res)))
+    if isinstance(val, str):
+        val = val.strip()
+        if not val or val in ("[]", "null", "None"):
+            return []
+        try:
+            data = json.loads(val)
+            if isinstance(data, list):
+                return parse_extra_channels(data)
+        except Exception:
+            parts = [p.strip() for p in val.split(",") if p.strip()]
+            return parse_extra_channels(parts)
+    return []
+
+
+def get_user_all_channel_ids(user: dict | int | None) -> list[int]:
+    """获取用户关联的全部有效存储频道 ID 列表（当前主频道 bin_channel_id + 历史 extra_channels）"""
+    if user is None:
+        return []
+    if isinstance(user, int):
+        user = get_user_by_id(user)
+        if not user:
+            return []
+    res = []
+    main_cid = user.get("bin_channel_id")
+    if main_cid is not None:
+        try:
+            res.append(int(main_cid))
+        except (ValueError, TypeError):
+            pass
+    extras = parse_extra_channels(user.get("extra_channels"))
+    for cid in extras:
+        if cid not in res:
+            res.append(cid)
+    return res
+
+
+def append_user_extra_channel(user_id: int, channel_id: int | str) -> list[int]:
+    """向指定用户的 extra_channels 追加一个历史频道 ID（幂等去重）"""
+    try:
+        cid = int(channel_id)
+    except (ValueError, TypeError):
+        return []
+
+    user = get_user_by_id(user_id)
+    if not user:
+        return []
+
+    current_extras = parse_extra_channels(user.get("extra_channels"))
+    if cid not in current_extras:
+        current_extras.append(cid)
+        update_user_record(user_id, extra_channels=json.dumps(current_extras))
+
+    return current_extras
+
+
+def remove_user_extra_channel(user_id: int, channel_id: int | str) -> list[int]:
+    """从指定用户的 extra_channels 移除一个历史频道 ID"""
+    try:
+        cid = int(channel_id)
+    except (ValueError, TypeError):
+        return []
+
+    user = get_user_by_id(user_id)
+    if not user:
+        return []
+
+    current_extras = parse_extra_channels(user.get("extra_channels"))
+    if cid in current_extras:
+        current_extras.remove(cid)
+        update_user_record(user_id, extra_channels=json.dumps(current_extras))
+
+    return current_extras
+
+
 def get_user_by_username(username: str) -> dict | None:
     with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute("SELECT * FROM users WHERE username = ?", (username,))
         row = cur.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        res = dict(row)
+        if "extra_channels" in res:
+            res["extra_channels"] = parse_extra_channels(res["extra_channels"])
+        return res
 
 
 def get_user_by_id(user_id: int) -> dict | None:
     with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute("SELECT id, username, role, created_at, updated_at FROM users WHERE id = ?", (user_id,))
+        cur.execute(
+            """
+            SELECT id, username, role, tg_user_id, tg_username, tg_first_name,
+                   dc_id, bin_channel_id, bin_channel_username, creator_account_id,
+                   extra_channels,
+                   created_at, updated_at
+            FROM users WHERE id = ?
+            """,
+            (user_id,),
+        )
         row = cur.fetchone()
+        if not row:
+            return None
+        res = dict(row)
+        res["extra_channels"] = parse_extra_channels(res.get("extra_channels"))
+        return res
+
+
+def get_channel_username_by_chat_id(chat_id: int | str) -> str | None:
+    """根据 chat_id 查询专属存储频道的公开 username"""
+    if not chat_id:
+        return None
+    try:
+        cid = int(chat_id)
+    except (ValueError, TypeError):
+        return None
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT bin_channel_username FROM users WHERE bin_channel_id = ?",
+            (cid,),
+        )
+        row = cur.fetchone()
+        if row and row["bin_channel_username"]:
+            return row["bin_channel_username"]
+        return None
+
+
+def create_tg_register_code(
+    code: str,
+    tg_user_id: int,
+    tg_username: str | None,
+    tg_first_name: str | None,
+    detected_dc_id: int,
+    expires_minutes: int = 10,
+) -> dict:
+    """创建或更新 Telegram 用户的 6 位注册验证码"""
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=expires_minutes)
+    created_at = _now_iso()
+    expires_at = expires.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    with db_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO tg_register_codes (
+                code, tg_user_id, tg_username, tg_first_name,
+                detected_dc_id, created_at, expires_at, used
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            """,
+            (str(code).strip(), int(tg_user_id), tg_username, tg_first_name, int(detected_dc_id), created_at, expires_at),
+        )
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tg_register_codes WHERE code = ?", (str(code).strip(),)
+        ).fetchone()
+        return dict(row)
+
+
+def get_tg_register_code(code: str) -> dict | None:
+    """查询指定注册验证码信息"""
+    if not code:
+        return None
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tg_register_codes WHERE code = ?", (str(code).strip(),)
+        ).fetchone()
         return dict(row) if row else None
+
+
+def verify_and_consume_tg_register_code(code: str) -> dict | None:
+    """核销注册验证码。如果有效且未过期未被使用，标记为已用并返回记录"""
+    if not code:
+        return None
+    now = _now_iso()
+    code_str = str(code).strip()
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT * FROM tg_register_codes
+             WHERE code = ?
+               AND used = 0
+               AND expires_at > ?
+            """,
+            (code_str, now),
+        ).fetchone()
+        if not row:
+            return None
+        rec = dict(row)
+        conn.execute(
+            "UPDATE tg_register_codes SET used = 1 WHERE code = ?",
+            (code_str,),
+        )
+        return rec
+
+
+def create_tenant_user(
+    username: str,
+    password_hash: str,
+    tg_user_id: int | None = None,
+    tg_username: str | None = None,
+    tg_first_name: str | None = None,
+    dc_id: int | None = None,
+    bin_channel_id: int | None = None,
+    bin_channel_username: str | None = None,
+    creator_account_id: int | None = None,
+    role: str = "user",
+) -> dict:
+    """创建绑专属频道的租户用户"""
+    now = _now_iso()
+    tg_uid_val = int(tg_user_id) if tg_user_id is not None else None
+    dc_id_val = int(dc_id) if dc_id is not None else None
+    bin_cid_val = int(bin_channel_id) if bin_channel_id is not None else None
+    creator_id_val = int(creator_account_id) if creator_account_id is not None else None
+
+    with db_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO users (
+                username, password_hash, role, tg_user_id, tg_username, tg_first_name,
+                dc_id, bin_channel_id, bin_channel_username, creator_account_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                username, password_hash, role, tg_uid_val, tg_username, tg_first_name,
+                dc_id_val, bin_cid_val, bin_channel_username, creator_id_val,
+                now, now,
+            ),
+        )
+        user_id = cur.lastrowid
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        return dict(row)
+
+
+def get_user_by_tg_id(tg_user_id: int) -> dict | None:
+    """根据 Telegram User ID 查询绑定的系统用户"""
+    if not tg_user_id:
+        return None
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM users WHERE tg_user_id = ?", (int(tg_user_id),)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_users() -> list[dict]:
+    """列出系统中所有用户及其租户绑定信息、存储频道容量统计（密码哈希已脱敏）"""
+    now = _now_iso()
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT u.id, u.username, u.role, u.tg_user_id, u.tg_username, u.tg_first_name,
+                   u.dc_id, u.bin_channel_id, u.bin_channel_username, u.creator_account_id,
+                   u.extra_channels,
+                   u.created_at, u.updated_at,
+                   p.phone AS creator_phone,
+                   p.status AS creator_account_status
+            FROM users u
+            LEFT JOIN tg_protocol_accounts p ON p.id = u.creator_account_id
+            ORDER BY u.id ASC
+            """
+        ).fetchall()
+
+        # Global BIN_CHANNEL fallback for admin without dedicated channel
+        global_bin = None
+        try:
+            cfg_row = conn.execute("SELECT value FROM config_settings WHERE key = 'BIN_CHANNEL'").fetchone()
+            if cfg_row and cfg_row["value"]:
+                global_bin = int(cfg_row["value"])
+        except Exception:
+            pass
+
+        # Pre-aggregate tg_media stats by chat_id
+        media_stats_rows = conn.execute(
+            """
+            SELECT chat_id,
+                   COUNT(*) AS media_count,
+                   COALESCE(SUM(file_size), 0) AS total_size,
+                   SUM(CASE WHEN mime_type LIKE 'video/%' THEN 1 ELSE 0 END) AS video_count,
+                   SUM(CASE WHEN mime_type LIKE 'image/%' THEN 1 ELSE 0 END) AS image_count
+            FROM tg_media
+            GROUP BY chat_id
+            """
+        ).fetchall()
+        media_by_chat = {}
+        for mr in media_stats_rows:
+            cid = mr["chat_id"]
+            if cid is not None:
+                try:
+                    media_by_chat[int(cid)] = dict(mr)
+                except (ValueError, TypeError):
+                    media_by_chat[str(cid)] = dict(mr)
+
+        # Pre-aggregate downloads by user_id
+        dl_rows = conn.execute(
+            "SELECT user_id, COUNT(*) AS dl_count FROM downloads WHERE user_id IS NOT NULL GROUP BY user_id"
+        ).fetchall()
+        dl_by_user = {int(r["user_id"]): int(r["dl_count"]) for r in dl_rows if r["user_id"] is not None}
+
+        # Pre-aggregate active sessions by user_id
+        sess_rows = conn.execute(
+            "SELECT user_id, COUNT(*) AS sess_count FROM auth_sessions WHERE revoked_at IS NULL AND expires_at > ? GROUP BY user_id",
+            (now,),
+        ).fetchall()
+        sess_by_user = {int(r["user_id"]): int(r["sess_count"]) for r in sess_rows if r["user_id"] is not None}
+
+        result = []
+        for r in rows:
+            item = dict(r)
+            uid = item["id"]
+            target_chats = []
+            if item.get("bin_channel_id"):
+                try:
+                    target_chats.append(int(item["bin_channel_id"]))
+                except (ValueError, TypeError):
+                    pass
+            elif item.get("role") == "admin" and global_bin:
+                target_chats.append(int(global_bin))
+            for ex in parse_extra_channels(item.get("extra_channels")):
+                if ex not in target_chats:
+                    target_chats.append(ex)
+
+            m_count = 0
+            t_size = 0
+            v_count = 0
+            i_count = 0
+            for cid in target_chats:
+                mstat = media_by_chat.get(cid)
+                if mstat:
+                    m_count += int(mstat["media_count"] or 0)
+                    t_size += int(mstat["total_size"] or 0)
+                    v_count += int(mstat["video_count"] or 0)
+                    i_count += int(mstat["image_count"] or 0)
+
+            item["media_count"] = m_count
+            item["total_size"] = t_size
+            item["video_count"] = v_count
+            item["image_count"] = i_count
+            item["extra_channels"] = parse_extra_channels(item.get("extra_channels"))
+            item["download_count"] = dl_by_user.get(uid, 0)
+            item["active_sessions"] = sess_by_user.get(uid, 0)
+            if not item.get("bin_channel_id"):
+                item["creator_status"] = "none"
+            elif not item.get("creator_account_id"):
+                item["creator_status"] = "untracked"
+            else:
+                acc_status = str(item.get("creator_account_status") or "").lower()
+                if acc_status in ("active", "ready", "ok", "limit_reached", "cooling_down"):
+                    item["creator_status"] = "healthy"
+                else:
+                    item["creator_status"] = "warning"
+            result.append(item)
+        return result
+
+
+def update_user_record(user_id: int, **fields) -> dict | None:
+    """更新用户字段（支持修改角色、绑定频道、TG 信息、历史 extra_channels 等）"""
+    allowed_keys = {
+        "username", "role", "tg_user_id", "tg_username", "tg_first_name",
+        "dc_id", "bin_channel_id", "bin_channel_username", "creator_account_id",
+        "extra_channels",
+    }
+    updates = {}
+    for k, v in fields.items():
+        if k in allowed_keys:
+            if k == "extra_channels":
+                if isinstance(v, (list, tuple, set)):
+                    updates[k] = json.dumps(sorted(list(set(int(x) for x in v if x is not None))))
+                else:
+                    updates[k] = str(v)
+            else:
+                updates[k] = v
+    if not updates:
+        return get_user_by_id(user_id)
+    updates["updated_at"] = _now_iso()
+    set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
+    params = list(updates.values()) + [int(user_id)]
+    with db_conn() as conn:
+        conn.execute(f"UPDATE users SET {set_clause} WHERE id = ?", tuple(params))
+    return get_user_by_id(user_id)
+
+
+def delete_user_record(user_id: int, delete_media_records: bool = False) -> dict:
+    """删除指定用户，并可选清理其专属频道下的数据库记录与离线下载记录"""
+    target = get_user_by_id(user_id)
+    if not target:
+        raise ValueError("用户不存在")
+
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        if target.get("role") == "admin":
+            admin_cnt = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'").fetchone()[0]
+            if admin_cnt <= 1:
+                raise ValueError("不能删除系统中唯一的管理员账号")
+
+        now = _now_iso()
+        conn.execute(
+            "UPDATE auth_sessions SET revoked_at = ?, revoked_reason = 'user_deleted' WHERE user_id = ? AND revoked_at IS NULL",
+            (now, int(user_id)),
+        )
+        conn.execute("DELETE FROM auth_sessions WHERE user_id = ?", (int(user_id),))
+
+        # 级联清理该租户名下的所有边缘节点与绑定的安装 Token
+        conn.execute("DELETE FROM edge_node_tokens WHERE tenant_id = ?", (int(user_id),))
+        conn.execute("DELETE FROM edge_nodes WHERE tenant_id = ?", (int(user_id),))
+
+        deleted_media = 0
+        deleted_downloads = 0
+        if delete_media_records:
+            cur_d_ids = conn.execute("SELECT id FROM downloads WHERE user_id = ?", (int(user_id),)).fetchall()
+            if cur_d_ids:
+                dids = [r[0] for r in cur_d_ids]
+                ph = ",".join("?" for _ in dids)
+                conn.execute(f"DELETE FROM uploads WHERE download_id IN ({ph})", tuple(dids))
+
+            cur_d = conn.execute("DELETE FROM downloads WHERE user_id = ?", (int(user_id),))
+            deleted_downloads = cur_d.rowcount
+            if target.get("bin_channel_id"):
+                cid = int(target["bin_channel_id"])
+                cur_m_rows = conn.execute("SELECT file_unique_id, message_id, file_name, chat_id FROM tg_media WHERE chat_id = ?", (cid,)).fetchall()
+                if cur_m_rows:
+                    try:
+                        from thumbnail_generator import remove_cached_telegram_thumbnail
+                        for mr in cur_m_rows:
+                            remove_cached_telegram_thumbnail(mr["message_id"], mr["file_name"], mr["chat_id"])
+                    except Exception:
+                        pass
+                    fuids = [r["file_unique_id"] for r in cur_m_rows]
+                    ph = ",".join("?" for _ in fuids)
+                    conn.execute(f"DELETE FROM downloads WHERE file_unique_id IN ({ph})", tuple(fuids))
+
+                try:
+                    conn.execute("DELETE FROM tg_channel_files WHERE storage_channel_id = ?", (cid,))
+                except Exception:
+                    pass
+
+                cur_m = conn.execute("DELETE FROM tg_media WHERE chat_id = ?", (cid,))
+                deleted_media = cur_m.rowcount
+        else:
+            conn.execute("UPDATE downloads SET user_id = NULL WHERE user_id = ?", (int(user_id),))
+
+        conn.execute("DELETE FROM users WHERE id = ?", (int(user_id),))
+        return {
+            "deleted_user_id": int(user_id),
+            "deleted_username": target.get("username"),
+            "deleted_media": deleted_media,
+            "deleted_downloads": deleted_downloads,
+        }
+
+
+def fetch_channel_media_records(chat_id: int) -> list[dict]:
+    """查询指定频道下的全部有效媒体记录，按 message_id 升序排列供无损平移使用"""
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT * FROM tg_media
+            WHERE chat_id = ? AND message_id > 0
+            ORDER BY message_id ASC
+            """,
+            (int(chat_id),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def remap_single_media_pointer(
+    old_chat_id: int,
+    old_msg_id: int,
+    new_chat_id: int,
+    new_msg_id: int,
+    new_file_id: str | None = None,
+) -> bool:
+    """原子更新单条媒体的 (chat_id, message_id) 指针"""
+    with db_conn() as conn:
+        updates = ["chat_id = ?", "message_id = ?"]
+        params: list = [int(new_chat_id), int(new_msg_id)]
+        if new_file_id:
+            updates.append("file_id = ?")
+            params.append(str(new_file_id))
+        params.extend([int(old_chat_id), int(old_msg_id)])
+        cur = conn.execute(
+            f"UPDATE tg_media SET {', '.join(updates)} WHERE chat_id = ? AND message_id = ?",
+            tuple(params),
+        )
+        try:
+            conn.execute(
+                "UPDATE tg_channel_files SET chat_id = ?, message_id = ? WHERE chat_id = ? AND message_id = ?",
+                (int(new_chat_id), int(new_msg_id), int(old_chat_id), int(old_msg_id)),
+            )
+        except Exception:
+            pass
+        return cur.rowcount > 0
+
+
+def finalize_channel_migration(
+    user_id: int,
+    old_chat_id: int,
+    new_chat_id: int,
+    new_username: str | None = None,
+    new_dc_id: int | None = None,
+    new_creator_id: int | None = None,
+) -> dict | None:
+    """完成租户专属频道迁移，原子更新用户专属频道绑定及关联下载任务的目标频道"""
+    now = _now_iso()
+    with db_conn() as conn:
+        fields = [
+            "bin_channel_id = ?",
+            "updated_at = ?",
+        ]
+        params: list = [int(new_chat_id), now]
+        if new_username is not None:
+            fields.append("bin_channel_username = ?")
+            params.append(str(new_username))
+        if new_dc_id is not None:
+            fields.append("dc_id = ?")
+            params.append(int(new_dc_id))
+        if new_creator_id is not None:
+            fields.append("creator_account_id = ?")
+            params.append(int(new_creator_id))
+        params.append(int(user_id))
+        conn.execute(
+            f"UPDATE users SET {', '.join(fields)} WHERE id = ?",
+            tuple(params),
+        )
+        conn.execute(
+            "UPDATE downloads SET target_channel_id = ? WHERE user_id = ? AND target_channel_id = ?",
+            (int(new_chat_id), int(user_id), int(old_chat_id)),
+        )
+    return get_user_by_id(user_id)
+
+
+def list_tg_register_codes(limit: int = 20) -> list[dict]:
+    """查询最近生成的 Telegram 注册验证码记录"""
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM tg_register_codes ORDER BY created_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def update_user_password(user_id: int, new_password_hash: str):
@@ -2811,11 +4035,34 @@ def cleanup_expired_auth_sessions(now: str | None = None) -> int:
         return cur.rowcount
 
 
-def list_users() -> list:
+def cleanup_expired_edge_node_tokens(now: str | None = None) -> int:
+    """清理已过期且未使用的边缘节点安装 Token"""
+    cutoff = now or _now_iso()
     with db_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, username, role, created_at, updated_at FROM users ORDER BY id")
-        return [dict(r) for r in cur.fetchall()]
+        cur = conn.execute(
+            "DELETE FROM edge_node_tokens WHERE expires_at <= ? AND (used = 0 OR used IS NULL)",
+            (cutoff,),
+        )
+        return cur.rowcount
+
+
+def cleanup_expired_tg_register_codes(now: str | None = None, days_for_used: int = 7) -> int:
+    """清理过期或已核销超过指定天数的注册验证码"""
+    cutoff = now or _now_iso()
+    used_cutoff = (datetime.now(timezone.utc) - timedelta(days=days_for_used)).isoformat()
+    with db_conn() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM tg_register_codes
+             WHERE (expires_at <= ? AND (used = 0 OR used IS NULL))
+                OR (used = 1 AND created_at <= ?)
+            """,
+            (cutoff, used_cutoff),
+        )
+        return cur.rowcount
+
+
+
 
 
 # ==================== 协议号资产池 CRUD ====================
@@ -2830,8 +4077,13 @@ def upsert_protocol_account(
     remark: str | None = None,
     api_id: int | None = None,
     api_hash: str | None = None,
+    two_fa_password: str | None = None,
+    two_fa_hint: str | None = None,
+    has_two_fa: int | None = None,
+    local_otp_token: str | None = None,
 ) -> dict:
     """创建或更新协议号资产记录"""
+    import secrets
     now = _now_iso()
     with db_conn() as conn:
         conn.row_factory = sqlite3.Row
@@ -2847,6 +4099,10 @@ def upsert_protocol_account(
             new_code_url = code_url if code_url is not None else existing["code_url"]
             new_api_id = api_id if api_id is not None else existing["api_id"]
             new_api_hash = api_hash if api_hash is not None else existing["api_hash"]
+            new_two_fa_password = two_fa_password if two_fa_password is not None else existing["two_fa_password"]
+            new_two_fa_hint = two_fa_hint if two_fa_hint is not None else existing["two_fa_hint"]
+            new_has_two_fa = has_two_fa if has_two_fa is not None else existing["has_two_fa"]
+            new_otp_token = local_otp_token if local_otp_token is not None else (existing["local_otp_token"] or secrets.token_hex(16))
 
             conn.execute(
                 """
@@ -2859,17 +4115,27 @@ def upsert_protocol_account(
                        remark = ?,
                        api_id = ?,
                        api_hash = ?,
+                       two_fa_password = ?,
+                       two_fa_hint = ?,
+                       has_two_fa = ?,
+                       local_otp_token = ?,
                        last_used_at = ?
                  WHERE id = ?
                 """,
-                (session_data, session_type, new_code_url, new_bot_count, new_status, new_remark, new_api_id, new_api_hash, now, account_id),
+                (
+                    session_data, session_type, new_code_url, new_bot_count, new_status, new_remark,
+                    new_api_id, new_api_hash, new_two_fa_password, new_two_fa_hint, new_has_two_fa, new_otp_token, now, account_id
+                ),
             )
         else:
+            final_otp_token = local_otp_token or secrets.token_hex(16)
+            final_has_2fa = has_two_fa if has_two_fa is not None else (1 if two_fa_password else 0)
             cur = conn.execute(
                 """
                 INSERT INTO tg_protocol_accounts (
-                    phone, session_type, session_data, code_url, bot_count, status, remark, api_id, api_hash, created_at, last_used_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    phone, session_type, session_data, code_url, bot_count, status, remark,
+                    api_id, api_hash, two_fa_password, two_fa_hint, has_two_fa, local_otp_token, created_at, last_used_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     phone,
@@ -2881,6 +4147,10 @@ def upsert_protocol_account(
                     remark,
                     api_id,
                     api_hash,
+                    two_fa_password,
+                    two_fa_hint,
+                    final_has_2fa,
+                    final_otp_token,
                     now,
                     now,
                 ),
@@ -2927,7 +4197,9 @@ def update_protocol_account(account_id: int, **kwargs) -> bool:
     """更新指定协议号的属性"""
     allowed_keys = {
         "session_data", "session_type", "code_url", "bot_count", "status", "remark", "last_used_at",
-        "dc_id", "tg_user_id", "username", "first_name", "last_keepalive_at", "keepalive_ping_ms", "last_error", "api_id", "api_hash"
+        "dc_id", "tg_user_id", "username", "first_name", "last_keepalive_at", "keepalive_ping_ms", "last_error", "api_id", "api_hash",
+        "two_fa_password", "two_fa_hint", "has_two_fa", "local_otp_token",
+        "is_taken_over", "taken_over_at", "phone", "bot_usernames"
     }
     updates = []
     params = []
@@ -2946,10 +4218,814 @@ def update_protocol_account(account_id: int, **kwargs) -> bool:
         return cur.rowcount > 0
 
 
-def delete_protocol_account(account_id: int) -> bool:
-    """删除指定协议号资产"""
+def get_protocol_account_by_otp_token(token: str) -> dict | None:
+    """根据自主接码专属 Token 查询协议号资产"""
+    if not token or not str(token).strip():
+        return None
     with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tg_protocol_accounts WHERE local_otp_token = ?", (str(token).strip(),)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_protocol_account_tenant_aggregates() -> dict[int, dict]:
+    """返回所有协议号创建的租户专属存储频道统计及关联租户用户名列表 {creator_account_id: {"channel_count": int, "tenant_usernames": list[str]}}"""
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT creator_account_id, username, bin_channel_id
+            FROM users
+            WHERE creator_account_id IS NOT NULL AND bin_channel_id IS NOT NULL
+            """
+        ).fetchall()
+        result: dict[int, dict] = {}
+        for r in rows:
+            cid = int(r["creator_account_id"])
+            if cid not in result:
+                result[cid] = {"channel_count": 0, "tenant_usernames": []}
+            result[cid]["channel_count"] += 1
+            uname = r["username"]
+            if uname and uname not in result[cid]["tenant_usernames"]:
+                result[cid]["tenant_usernames"].append(uname)
+        return result
+
+
+def delete_protocol_account(account_id: int) -> bool:
+    """删除指定协议号资产，并将引用该协议号的租户创建者字段置空"""
+    with db_conn() as conn:
+        conn.execute("UPDATE users SET creator_account_id = NULL WHERE creator_account_id = ?", (int(account_id),))
         cur = conn.execute(
-            "DELETE FROM tg_protocol_accounts WHERE id = ?", (account_id,)
+            "DELETE FROM tg_protocol_accounts WHERE id = ?", (int(account_id),)
         )
         return cur.rowcount > 0
+
+
+
+# ----------------------------------------------------------------------
+# 多租户边缘推流分流节点 (Edge Streaming Worker) 与加密管理
+# ----------------------------------------------------------------------
+
+
+def get_user_by_bin_channel_id(bin_channel_id: int | str) -> dict | None:
+    """根据专属存储频道 ID 查询所属租户信息（支持主频道与历史 extra_channels）"""
+    if not bin_channel_id:
+        return None
+    try:
+        cid = int(bin_channel_id)
+    except (ValueError, TypeError):
+        return None
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, username, role, tg_user_id, tg_username, tg_first_name,
+                   dc_id, bin_channel_id, bin_channel_username, creator_account_id,
+                   extra_channels, created_at, updated_at
+            FROM users WHERE bin_channel_id = ?
+            """,
+            (cid,),
+        )
+        row = cur.fetchone()
+        if row:
+            res = dict(row)
+            res["extra_channels"] = parse_extra_channels(res.get("extra_channels"))
+            return res
+
+        # 回退：检查 extra_channels 包含该 cid 的租户
+        cur.execute("SELECT id, username, role, tg_user_id, tg_username, tg_first_name, dc_id, bin_channel_id, bin_channel_username, creator_account_id, extra_channels, created_at, updated_at FROM users WHERE extra_channels IS NOT NULL AND extra_channels != '[]'")
+        for u_row in cur.fetchall():
+            extras = parse_extra_channels(u_row["extra_channels"])
+            if cid in extras:
+                res = dict(u_row)
+                res["extra_channels"] = extras
+                return res
+        return None
+
+
+def _get_edge_encryption_key() -> bytes:
+    secret_env = os.environ.get("MISTRELAY_JWT_SECRET") or os.environ.get("MISTRELAY_SECRET_KEY")
+    if secret_env:
+        return hashlib.sha256(secret_env.encode("utf-8")).digest()
+    db_dir = os.path.dirname(DB_PATH)
+    key_file = os.path.join(db_dir, "jwt_signing.key")
+    try:
+        if os.path.exists(key_file):
+            with open(key_file, "r", encoding="utf-8") as f:
+                s = f.read().strip()
+                if s:
+                    return hashlib.sha256(s.encode("utf-8")).digest()
+    except Exception:
+        pass
+    return hashlib.sha256(b"mistrelay_default_edge_secret_v1").digest()
+
+
+def encrypt_ssh_password(password: str) -> str:
+    """对 SSH 密码进行防篡改对称加密 (HMAC-SHA256 CTR 流密码 + MAC 认证标签)"""
+    if not password:
+        return ""
+    key = _get_edge_encryption_key()
+    nonce = secrets.token_bytes(16)
+    data = password.encode("utf-8")
+    keystream = bytearray()
+    counter = 0
+    while len(keystream) < len(data):
+        block = hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest()
+        keystream.extend(block)
+        counter += 1
+    ciphertext = bytes(b ^ k for b, k in zip(data, keystream[:len(data)]))
+    mac = hmac.new(key, b"mac:" + nonce + ciphertext, hashlib.sha256).digest()[:16]
+    return base64.urlsafe_b64encode(nonce + mac + ciphertext).decode("ascii")
+
+
+def decrypt_ssh_password(encrypted_str: str) -> str:
+    """解密已加密的 SSH 密码"""
+    if not encrypted_str:
+        return ""
+    try:
+        raw_bytes = base64.urlsafe_b64decode(encrypted_str.encode("ascii"))
+        if len(raw_bytes) < 32:
+            return ""
+        key = _get_edge_encryption_key()
+        nonce = raw_bytes[:16]
+        mac = raw_bytes[16:32]
+        ciphertext = raw_bytes[32:]
+        expected_mac = hmac.new(key, b"mac:" + nonce + ciphertext, hashlib.sha256).digest()[:16]
+        if not hmac.compare_digest(mac, expected_mac):
+            logger.warning("SSH 密码解密失败：MAC 校验不匹配")
+            return ""
+        keystream = bytearray()
+        counter = 0
+        while len(keystream) < len(ciphertext):
+            block = hmac.new(key, nonce + counter.to_bytes(4, "big"), hashlib.sha256).digest()
+            keystream.extend(block)
+            counter += 1
+        plaintext = bytes(b ^ k for b, k in zip(ciphertext, keystream[:len(ciphertext)]))
+        return plaintext.decode("utf-8")
+    except Exception as e:
+        logger.warning(f"SSH 密码解密异常: {e}")
+        return ""
+
+
+def _format_edge_node_row(row: sqlite3.Row | dict, include_secrets: bool = False) -> dict:
+    d = dict(row)
+    raw_metrics = d.get("metrics")
+    default_metrics = {
+        "cpu": 0.0,
+        "mem": 0.0,
+        "active_streams": 0,
+        "net_rx": 0,
+        "net_tx": 0,
+        "total_bytes_served": 0,
+    }
+    if isinstance(raw_metrics, str) and raw_metrics.strip():
+        try:
+            parsed = json.loads(raw_metrics)
+            if isinstance(parsed, dict):
+                default_metrics.update(parsed)
+        except Exception:
+            pass
+    elif isinstance(raw_metrics, dict):
+        default_metrics.update(raw_metrics)
+    d["metrics"] = default_metrics
+
+    raw_bench = d.get("benchmark_data")
+    default_bench = {}
+    if isinstance(raw_bench, str) and raw_bench.strip():
+        try:
+            parsed_bench = json.loads(raw_bench)
+            if isinstance(parsed_bench, dict):
+                default_bench.update(parsed_bench)
+        except Exception:
+            pass
+    elif isinstance(raw_bench, dict):
+        default_bench.update(raw_bench)
+    d["benchmark_data"] = default_bench
+
+    d["use_ssl"] = bool(d.get("use_ssl"))
+    d["allow_shared_pool"] = bool(d.get("allow_shared_pool"))
+    d["allow_bot_pool"] = bool(d.get("allow_bot_pool", 1))
+    d["target_bot_count"] = d.get("target_bot_count")
+    d["target_dc_id"] = d.get("target_dc_id")
+    d["assigned_bot_token"] = d.get("assigned_bot_token") or ""
+    d["assigned_bot_username"] = d.get("assigned_bot_username") or ""
+    d["has_ssh_password"] = bool(d.get("ssh_password_enc"))
+    if include_secrets:
+        if d.get("ssh_password_enc"):
+            d["ssh_password"] = decrypt_ssh_password(d["ssh_password_enc"])
+        else:
+            d["ssh_password"] = ""
+    else:
+        d.pop("ssh_password_enc", None)
+        secret_val = d.get("auth_secret") or ""
+        d["auth_secret_masked"] = (secret_val[:6] + "****" + secret_val[-4:]) if len(secret_val) > 10 else "****"
+        d.pop("auth_secret", None)
+    return d
+
+
+def create_edge_node(
+    tenant_id: int,
+    node_name: str,
+    ip: str = "",
+    port: int = 8090,
+    ssh_host: str = "",
+    ssh_port: int = 22,
+    ssh_user: str = "root",
+    ssh_password: str = "",
+    domain: str = "",
+    use_ssl: bool = False,
+    allow_shared_pool: bool = False,
+    status: str = "offline",
+    auth_secret: str | None = None,
+    include_secrets: bool = False,
+    target_dc_id: int | None = None,
+    assigned_bot_token: str = "",
+    assigned_bot_username: str = "",
+    allow_bot_pool: bool = True,
+) -> dict:
+    now = _now_iso()
+    secret_val = auth_secret or secrets.token_hex(24)
+    enc_pwd = encrypt_ssh_password(ssh_password) if ssh_password else ""
+    actual_ip = (ip or ssh_host or "").strip()
+    actual_ssh_host = (ssh_host or ip or "").strip()
+    actual_domain = str(domain or "").strip()
+    actual_use_ssl = bool(use_ssl)
+    if not actual_domain and actual_ip:
+        actual_domain = get_default_edge_domain(actual_ip)
+        if actual_domain:
+            actual_use_ssl = True
+    elif actual_domain and not actual_use_ssl:
+        actual_use_ssl = True
+
+    with db_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO edge_nodes (
+                tenant_id, node_name, ip, port, ssh_host, ssh_port, ssh_user,
+                ssh_password_enc, domain, use_ssl, auth_secret, status,
+                deploy_log, allow_shared_pool, metrics, last_seen_at,
+                target_dc_id, assigned_bot_token, assigned_bot_username, allow_bot_pool,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(tenant_id),
+                str(node_name or "Edge Node").strip(),
+                actual_ip,
+                int(port or 8090),
+                actual_ssh_host,
+                int(ssh_port or 22),
+                str(ssh_user or "root").strip(),
+                enc_pwd,
+                actual_domain,
+                1 if actual_use_ssl else 0,
+                secret_val,
+                str(status or "offline"),
+                "",
+                1 if allow_shared_pool else 0,
+                json.dumps({"cpu": 0.0, "mem": 0.0, "active_streams": 0, "net_rx": 0, "net_tx": 0, "total_bytes_served": 0}),
+                now if status == "online" else None,
+                int(target_dc_id) if target_dc_id is not None else None,
+                str(assigned_bot_token or "").strip(),
+                str(assigned_bot_username or "").strip(),
+                1 if allow_bot_pool else 0,
+                now,
+                now,
+            ),
+        )
+        node_id = cur.lastrowid
+    return get_edge_node_by_id(node_id, include_secrets=include_secrets)
+
+
+def get_edge_node_by_id(node_id: int, include_secrets: bool = False) -> dict | None:
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT e.*, u.username AS tenant_username
+            FROM edge_nodes AS e
+            LEFT JOIN users AS u ON e.tenant_id = u.id
+            WHERE e.id = ?
+            """,
+            (int(node_id),),
+        ).fetchone()
+        return _format_edge_node_row(row, include_secrets=include_secrets) if row else None
+
+
+def get_edge_node_by_secret(auth_secret: str, include_secrets: bool = False) -> dict | None:
+    if not auth_secret or not str(auth_secret).strip():
+        return None
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT e.*, u.username AS tenant_username
+            FROM edge_nodes AS e
+            LEFT JOIN users AS u ON e.tenant_id = u.id
+            WHERE e.auth_secret = ?
+            """,
+            (str(auth_secret).strip(),),
+        ).fetchone()
+        return _format_edge_node_row(row, include_secrets=include_secrets) if row else None
+
+
+def list_edge_nodes(tenant_id: int | None = None, include_secrets: bool = False) -> list[dict]:
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        if tenant_id is not None:
+            rows = conn.execute(
+                """
+                SELECT e.*, u.username AS tenant_username
+                FROM edge_nodes AS e
+                LEFT JOIN users AS u ON e.tenant_id = u.id
+                WHERE e.tenant_id = ?
+                ORDER BY e.id DESC
+                """,
+                (int(tenant_id),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT e.*, u.username AS tenant_username
+                FROM edge_nodes AS e
+                LEFT JOIN users AS u ON e.tenant_id = u.id
+                ORDER BY e.id DESC
+                """
+            ).fetchall()
+        return [_format_edge_node_row(r, include_secrets=include_secrets) for r in rows]
+
+
+def update_edge_node(node_id: int, include_secrets: bool = False, **kwargs) -> dict | None:
+    allowed_fields = {
+        "node_name", "ip", "port", "ssh_host", "ssh_port", "ssh_user",
+        "ssh_password_enc", "domain", "use_ssl", "auth_secret", "status",
+        "deploy_log", "allow_shared_pool", "metrics", "benchmark_data", "last_seen_at",
+        "target_dc_id", "assigned_bot_token", "assigned_bot_username", "allow_bot_pool", "target_bot_count",
+    }
+    if "ssh_password" in kwargs:
+        pwd = kwargs.pop("ssh_password")
+        if pwd is not None:
+            kwargs["ssh_password_enc"] = encrypt_ssh_password(str(pwd)) if pwd else ""
+
+    updates = []
+    params = []
+    for k, v in kwargs.items():
+        if k not in allowed_fields:
+            continue
+        if k in ("use_ssl", "allow_shared_pool", "allow_bot_pool"):
+            v = 1 if v else 0
+        elif k in ("target_dc_id", "target_bot_count") and v not in (None, ""):
+            v = int(v)
+        elif k in ("metrics", "benchmark_data") and isinstance(v, dict):
+            v = json.dumps(v, ensure_ascii=False)
+        updates.append(f"{k} = ?")
+        params.append(v)
+
+    if not updates:
+        return get_edge_node_by_id(node_id, include_secrets=include_secrets)
+
+    updates.append("updated_at = ?")
+    params.append(_now_iso())
+    params.append(int(node_id))
+
+    with db_conn() as conn:
+        conn.execute(
+            f"UPDATE edge_nodes SET {', '.join(updates)} WHERE id = ?",
+            tuple(params),
+        )
+    return get_edge_node_by_id(node_id, include_secrets=include_secrets)
+
+
+def append_edge_node_deploy_log(node_id: int, line: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    formatted = f"[{ts}] {line.rstrip()}\n"
+    now = _now_iso()
+    with db_conn() as conn:
+        conn.execute(
+            """
+            UPDATE edge_nodes
+               SET deploy_log = COALESCE(deploy_log, '') || ?,
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (formatted, now, int(node_id)),
+        )
+
+
+def clear_edge_node_ssh_password(node_id: int) -> bool:
+    with db_conn() as conn:
+        cur = conn.execute(
+            "UPDATE edge_nodes SET ssh_password_enc = '', updated_at = ? WHERE id = ?",
+            (_now_iso(), int(node_id)),
+        )
+        return cur.rowcount > 0
+
+
+def delete_edge_node(node_id: int) -> bool:
+    with db_conn() as conn:
+        conn.execute("DELETE FROM edge_node_tokens WHERE node_id = ?", (int(node_id),))
+        cur = conn.execute("DELETE FROM edge_nodes WHERE id = ?", (int(node_id),))
+        return cur.rowcount > 0
+
+
+def _is_edge_node_fresh(node: dict, max_stale_seconds: int = 120) -> bool:
+    if node.get("status") != "online":
+        return False
+    if not (node.get("ip") or node.get("domain")):
+        return False
+    if max_stale_seconds <= 0:
+        return True
+    last_seen = node.get("last_seen_at")
+    if not last_seen:
+        return True
+    try:
+        dt = datetime.fromisoformat(str(last_seen).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - dt).total_seconds()
+        return age <= max_stale_seconds
+    except Exception:
+        return True
+
+
+def get_healthy_edge_node_for_tenant(
+    tenant_id: int | None = None,
+    max_stale_seconds: int = 120,
+    include_secrets: bool = True,
+) -> dict | None:
+    """
+    智能边缘节点优选策略：
+    1. 若指定了 tenant_id，优先从该租户名下状态为 online 的专属节点中选择负载最低的节点；
+    2. 若该租户无可用专属节点，则从开启了 allow_shared_pool = 1 的公共共享池中选择负载最低的健康节点；
+    3. 若均无可用节点，返回 None（由 Master 回源兜底直出）。
+    """
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        if tenant_id is not None:
+            rows = conn.execute(
+                """
+                SELECT e.*, u.username AS tenant_username
+                FROM edge_nodes AS e
+                LEFT JOIN users AS u ON e.tenant_id = u.id
+                WHERE e.tenant_id = ? AND e.status = 'online'
+                ORDER BY e.id ASC
+                """,
+                (int(tenant_id),),
+            ).fetchall()
+            candidates = [
+                _format_edge_node_row(r, include_secrets=include_secrets)
+                for r in rows
+            ]
+            healthy_dedicated = [
+                c for c in candidates if _is_edge_node_fresh(c, max_stale_seconds)
+            ]
+            if healthy_dedicated:
+                healthy_dedicated.sort(
+                    key=lambda x: (
+                        int((x.get("metrics") or {}).get("active_streams", 0)),
+                        int(x.get("id", 0)),
+                    )
+                )
+                return healthy_dedicated[0]
+
+        # 回退查找开启了公共池共享的在线节点
+        shared_rows = conn.execute(
+            """
+            SELECT e.*, u.username AS tenant_username
+            FROM edge_nodes AS e
+            LEFT JOIN users AS u ON e.tenant_id = u.id
+            WHERE e.allow_shared_pool = 1 AND e.status = 'online'
+            ORDER BY e.id ASC
+            """
+        ).fetchall()
+        shared_candidates = [
+            _format_edge_node_row(r, include_secrets=include_secrets)
+            for r in shared_rows
+        ]
+        healthy_shared = [
+            c for c in shared_candidates if _is_edge_node_fresh(c, max_stale_seconds)
+        ]
+        if healthy_shared:
+            healthy_shared.sort(
+                key=lambda x: (
+                    int((x.get("metrics") or {}).get("active_streams", 0)),
+                    int(x.get("id", 0)),
+                )
+            )
+            return healthy_shared[0]
+    return None
+
+
+def get_candidate_edge_nodes_for_tenant(
+    tenant_id: int | None = None,
+    max_stale_seconds: int = 120,
+    include_secrets: bool = True,
+) -> list[dict]:
+    """
+    获取满足多租户隔离约束的候选边缘节点列表（专属池优先，共享池兜底）：
+    1. 若 tenant_id 非空且存在健康的专属在线节点，返回专属在线节点列表；
+    2. 若租户无健康专属节点（或 tenant_id 为 None），返回公共共享池中健康的在线节点列表。
+    """
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        if tenant_id is not None:
+            rows = conn.execute(
+                """
+                SELECT e.*, u.username AS tenant_username
+                FROM edge_nodes AS e
+                LEFT JOIN users AS u ON e.tenant_id = u.id
+                WHERE e.tenant_id = ? AND e.status = 'online'
+                ORDER BY e.id ASC
+                """,
+                (int(tenant_id),),
+            ).fetchall()
+            candidates = [
+                _format_edge_node_row(r, include_secrets=include_secrets)
+                for r in rows
+            ]
+            healthy_dedicated = [
+                c for c in candidates if _is_edge_node_fresh(c, max_stale_seconds)
+            ]
+            if healthy_dedicated:
+                return healthy_dedicated
+
+        # 回退查找开启了公共池共享的在线节点
+        shared_rows = conn.execute(
+            """
+            SELECT e.*, u.username AS tenant_username
+            FROM edge_nodes AS e
+            LEFT JOIN users AS u ON e.tenant_id = u.id
+            WHERE e.allow_shared_pool = 1 AND e.status = 'online'
+            ORDER BY e.id ASC
+            """
+        ).fetchall()
+        shared_candidates = [
+            _format_edge_node_row(r, include_secrets=include_secrets)
+            for r in shared_rows
+        ]
+        return [
+            c for c in shared_candidates if _is_edge_node_fresh(c, max_stale_seconds)
+        ]
+
+
+def get_available_edge_nodes_for_user(
+    tenant_id: int | None = None,
+    is_admin: bool = False,
+    include_secrets: bool = False,
+) -> list[dict]:
+    """
+    获取用户在前端网盘可见/可选的全部可用边缘节点：
+    - 管理员：返回全部在线节点；
+    - 租户：返回该租户的专属在线节点 + 全部开启了公共共享池的在线节点（去重）。
+    """
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        if is_admin:
+            rows = conn.execute(
+                """
+                SELECT e.*, u.username AS tenant_username
+                FROM edge_nodes AS e
+                LEFT JOIN users AS u ON e.tenant_id = u.id
+                WHERE e.status = 'online'
+                ORDER BY e.id ASC
+                """
+            ).fetchall()
+        else:
+            tid = int(tenant_id or 0)
+            rows = conn.execute(
+                """
+                SELECT e.*, u.username AS tenant_username
+                FROM edge_nodes AS e
+                LEFT JOIN users AS u ON e.tenant_id = u.id
+                WHERE (e.tenant_id = ? OR e.allow_shared_pool = 1) AND e.status = 'online'
+                ORDER BY e.id ASC
+                """,
+                (tid,),
+            ).fetchall()
+
+        seen_ids = set()
+        result = []
+        for r in rows:
+            formatted = _format_edge_node_row(r, include_secrets=include_secrets)
+            if formatted["id"] not in seen_ids:
+                seen_ids.add(formatted["id"])
+                result.append(formatted)
+        return result
+
+
+def create_edge_node_token(
+    tenant_id: int,
+    node_name: str,
+    domain: str = "",
+    port: int = 8090,
+    use_ssl: bool = False,
+    allow_shared_pool: bool = False,
+    expires_minutes: int = 60,
+) -> dict:
+    token = secrets.token_urlsafe(24)
+    now_dt = datetime.now(timezone.utc)
+    exp_dt = now_dt + timedelta(minutes=max(5, int(expires_minutes)))
+    now_str = now_dt.isoformat()
+    exp_str = exp_dt.isoformat()
+    with db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO edge_node_tokens (
+                token, tenant_id, node_name, domain, port,
+                use_ssl, allow_shared_pool, node_id, expires_at, used, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, ?)
+            """,
+            (
+                token,
+                int(tenant_id),
+                str(node_name or "Edge Worker").strip(),
+                str(domain or "").strip(),
+                int(port or 8090),
+                1 if use_ssl else 0,
+                1 if allow_shared_pool else 0,
+                exp_str,
+                now_str,
+            ),
+        )
+    return {
+        "token": token,
+        "tenant_id": int(tenant_id),
+        "node_name": str(node_name or "Edge Worker").strip(),
+        "domain": str(domain or "").strip(),
+        "port": int(port or 8090),
+        "use_ssl": bool(use_ssl),
+        "allow_shared_pool": bool(allow_shared_pool),
+        "expires_at": exp_str,
+        "used": False,
+        "created_at": now_str,
+    }
+
+
+def get_edge_node_token(token: str) -> dict | None:
+    if not token or not str(token).strip():
+        return None
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM edge_node_tokens WHERE token = ?",
+            (str(token).strip(),),
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["use_ssl"] = bool(d.get("use_ssl"))
+        d["allow_shared_pool"] = bool(d.get("allow_shared_pool"))
+        d["used"] = bool(d.get("used"))
+        try:
+            exp_dt = datetime.fromisoformat(str(d["expires_at"]).replace("Z", "+00:00"))
+            if exp_dt.tzinfo is None:
+                exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+            d["expired"] = datetime.now(timezone.utc) > exp_dt
+        except Exception:
+            d["expired"] = False
+        return d
+
+
+def verify_and_consume_edge_node_token(
+    token: str,
+    ip: str = "",
+    port: int | None = None,
+) -> dict | None:
+    """验证并核销一键安装脚本 Token，创建或激活对应的 Edge 节点"""
+    tok_info = get_edge_node_token(token)
+    if not tok_info:
+        return None
+    if tok_info.get("expired"):
+        return None
+    if tok_info.get("used") and tok_info.get("node_id"):
+        return None
+
+    actual_port = int(port) if port else int(tok_info.get("port") or 8090)
+    actual_ip = str(ip or "").strip()
+    tok_domain = str(tok_info.get("domain") or "").strip()
+    if not tok_domain and actual_ip:
+        tok_domain = get_default_edge_domain(actual_ip)
+    tok_ssl = True if tok_domain else bool(tok_info.get("use_ssl"))
+
+    node = create_edge_node(
+        tenant_id=int(tok_info["tenant_id"]),
+        node_name=tok_info["node_name"],
+        ip=actual_ip,
+        port=actual_port,
+        domain=tok_domain,
+        use_ssl=tok_ssl,
+        allow_shared_pool=bool(tok_info.get("allow_shared_pool")),
+        status="online",
+        include_secrets=True,
+    )
+    with db_conn() as conn:
+        conn.execute(
+            "UPDATE edge_node_tokens SET used = 1, node_id = ? WHERE token = ?",
+            (int(node["id"]), str(token).strip()),
+        )
+    return node
+
+def update_edge_node_benchmark(node_id: int, benchmark_data: dict) -> dict | None:
+    """更新边缘节点的测速与体检数据"""
+    return update_edge_node(node_id, benchmark_data=benchmark_data)
+
+
+def heal_orphaned_tenant_media(channel_user_map: dict | None = None) -> dict:
+    """
+    扫描并自愈孤儿媒体数据。
+    自动检测 tg_media 中存在媒体但未被任何用户当前 bin_channel_id 引用的 channel_id，
+    根据历史基线归档记录及已知映射，将其追加至所属租户的 extra_channels 中。
+    """
+    default_mappings = {
+        -1004327294673: "xiaopeng",
+        -1003729299086: "linxiao",
+        -1004056710317: "yangyangya",
+        -1004339423265: "zxc",
+    }
+    if channel_user_map:
+        default_mappings.update(channel_user_map)
+
+    # 尝试从只读基线归档中补充历史用户与频道映射
+    try:
+        import tarfile, tempfile
+        baseline_path = "/root/MistRelay-dev/db/backups/.immutable_baseline/backup_mistrelay_20260928_125911.tar.gz"
+        if os.path.exists(baseline_path):
+            with tarfile.open(baseline_path, "r:gz") as tar:
+                if "downloads.db" in tar.getnames():
+                    f = tar.extractfile("downloads.db")
+                    if f:
+                        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+                            tmp.write(f.read())
+                            tmp.flush()
+                            b_conn = sqlite3.connect(tmp.name)
+                            for row in b_conn.execute("SELECT username, bin_channel_id FROM users WHERE bin_channel_id IS NOT NULL"):
+                                if row[1] and int(row[1]) not in default_mappings:
+                                    default_mappings[int(row[1])] = str(row[0])
+                            b_conn.close()
+    except Exception as e:
+        logger.warning(f"从只读基线提取历史映射异常 (已忽略): {e}")
+
+    global_bin = None
+    try:
+        with db_conn() as conn:
+            cfg_row = conn.execute("SELECT value FROM config_settings WHERE key = 'BIN_CHANNEL'").fetchone()
+            if cfg_row and cfg_row[0]:
+                global_bin = int(cfg_row[0])
+    except Exception:
+        pass
+
+    healed_list = []
+    total_files_restored = 0
+
+    with db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        all_users = conn.execute("SELECT id, username, bin_channel_id, extra_channels FROM users").fetchall()
+        user_by_name = {u["username"]: dict(u) for u in all_users}
+        user_by_id = {u["id"]: dict(u) for u in all_users}
+
+        active_channels = set()
+        for u in all_users:
+            if u["bin_channel_id"]:
+                active_channels.add(int(u["bin_channel_id"]))
+            for ec in parse_extra_channels(u["extra_channels"]):
+                active_channels.add(int(ec))
+        if global_bin:
+            active_channels.add(int(global_bin))
+
+        orphan_rows = conn.execute(
+            "SELECT chat_id, COUNT(*) as cnt, COALESCE(SUM(file_size), 0) as total_size FROM tg_media WHERE chat_id IS NOT NULL GROUP BY chat_id"
+        ).fetchall()
+
+        for orow in orphan_rows:
+            cid = int(orow["chat_id"])
+            if cid in active_channels:
+                continue
+
+            target_user = None
+            if cid in default_mappings:
+                identifier = default_mappings[cid]
+                if isinstance(identifier, int) and identifier in user_by_id:
+                    target_user = user_by_id[identifier]
+                elif str(identifier) in user_by_name:
+                    target_user = user_by_name[str(identifier)]
+
+            if target_user:
+                append_user_extra_channel(target_user["id"], cid)
+                healed_list.append({
+                    "user_id": target_user["id"],
+                    "username": target_user["username"],
+                    "channel_id": cid,
+                    "files_count": int(orow["cnt"]),
+                    "total_size": int(orow["total_size"]),
+                })
+                total_files_restored += int(orow["cnt"])
+                logger.info(f"成功自愈孤儿媒体：为租户 {target_user['username']} 恢复历史频道 {cid} (共 {orow['cnt']} 个文件)")
+
+    return {
+        "success": True,
+        "healed": healed_list,
+        "total_files_restored": total_files_restored,
+    }

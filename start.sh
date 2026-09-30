@@ -236,6 +236,14 @@ retry-wait=0
 # RPC settings
 rpc-max-request-size=10M
 rpc-secret=${RPC_SECRET}
+
+# BitTorrent settings
+seed-time=0
+enable-dht=true
+bt-enable-lpd=true
+bt-max-peers=55
+bt-detach-seed-only=true
+bt-tracker=udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce,udp://tracker.torrent.eu.org:451/announce,udp://tracker.moeking.me:6969/announce,http://tracker.openbittorrent.com:80/announce
 EOF
 chmod 0600 "$tmp_config"
 mv -f "$tmp_config" "$CONFIG_FILE"

@@ -48,6 +48,9 @@ from .stream_modules import (
     process_single_media,
     media_receive_handler,
     channel_link_receive_handler,
+    user_register_command_handler,
+    start_command_handler,
+    get_target_bin_channel_for_message,
 )
 
 # 导出所有接口（保持向后兼容）
@@ -92,4 +95,7 @@ __all__ = [
     'process_single_media',
     'media_receive_handler',
     'channel_link_receive_handler',
+    'user_register_command_handler',
+    'start_command_handler',
+    'get_target_bin_channel_for_message',
 ]

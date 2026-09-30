@@ -20,7 +20,8 @@ def _load_or_create_jwt_secret() -> str:
     secret_env = os.environ.get("MISTRELAY_JWT_SECRET")
     if secret_env:
         return secret_env
-    db_dir = os.path.dirname(os.environ.get("MISTRELAY_DB_PATH", "/app/db/downloads.db"))
+    import db
+    db_dir = os.path.dirname(getattr(db, "DB_PATH", None) or os.environ.get("MISTRELAY_DB_PATH", "/app/db/downloads.db"))
     key_file = os.path.join(db_dir, "jwt_signing.key")
     try:
         if os.path.exists(key_file):
@@ -100,13 +101,14 @@ def password_needs_rehash(hashed: str) -> bool:
         return True
 
 
-def create_token(user_id: int, username: str) -> str:
-    """生成 JWT token"""
+def create_token(user_id: int, username: str, role: str = "admin") -> str:
+    """生成 JWT token，包含用户角色以供权限校验"""
     header = _b64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
 
     payload_data = {
         "uid": user_id,
         "sub": username,
+        "role": role,
         "iat": int(time.time()),
         "exp": int(time.time()) + TOKEN_EXPIRE_SECONDS,
     }
@@ -165,7 +167,7 @@ def verify_token(token: str) -> dict | None:
 
 def create_resource_ticket(path: str, lifetime_seconds: int = RESOURCE_TICKET_EXPIRE_SECONDS) -> str:
     """Create a short-lived ticket that grants access to one exact API path."""
-    if not isinstance(path, str) or not path.startswith("/") or "?" in path:
+    if not isinstance(path, str) or not path.startswith("/") or "\n" in path or "\r" in path:
         raise ValueError("resource ticket path must be an absolute URL path")
     lifetime = max(1, min(int(lifetime_seconds), RESOURCE_TICKET_EXPIRE_SECONDS))
     payload = _b64url_encode(json.dumps({
@@ -201,10 +203,98 @@ def rotate_signing_secret() -> None:
     """Invalidate every outstanding access token after a security event."""
     global _JWT_SECRET
     _JWT_SECRET = secrets.token_hex(32)
-    db_dir = os.path.dirname(os.environ.get("MISTRELAY_DB_PATH", "/app/db/downloads.db"))
+    import db
+    db_dir = os.path.dirname(getattr(db, "DB_PATH", None) or os.environ.get("MISTRELAY_DB_PATH", "/app/db/downloads.db"))
     key_file = os.path.join(db_dir, "jwt_signing.key")
     try:
         with open(key_file, "w", encoding="utf-8") as f:
             f.write(_JWT_SECRET)
     except Exception:
         pass
+
+
+def verify_telegram_webapp_init_data(
+    init_data: str,
+    bot_token: str,
+    max_age_seconds: int = 86400,
+) -> dict | None:
+    """
+    验证 Telegram WebApp / Mini App 的 initData 签名。
+    符合 Telegram 官方 Mini App 签名算法：
+    1. 解析 query string 参数并提取 hash；
+    2. 其余参数按 key 字典序升序排序，用 \n 拼接为 "k=v" 字符串；
+    3. secret_key = HMAC_SHA256(b"WebAppData", bot_token)；
+    4. expected_hash = HMAC_SHA256(secret_key, data_check_string).hexdigest()；
+    5. 常量时间比较 hash 与 expected_hash；
+    6. 校验 auth_date 未过期且未超出未来时间窗口；
+    校验通过则返回包含 user 字典、auth_date、query_id 及原始参数的 dict，失败返回 None。
+    """
+    import urllib.parse
+
+    if not isinstance(init_data, str) or not init_data.strip():
+        return None
+    if not isinstance(bot_token, str) or not bot_token.strip():
+        return None
+
+    try:
+        parsed = urllib.parse.parse_qsl(init_data.strip(), keep_blank_values=True)
+        if not parsed:
+            return None
+        params = dict(parsed)
+        received_hash = params.pop("hash", None)
+        if not received_hash:
+            return None
+
+        auth_date_raw = params.get("auth_date")
+        if not auth_date_raw:
+            return None
+
+        try:
+            auth_date = int(auth_date_raw)
+        except (ValueError, TypeError):
+            return None
+
+        now = int(time.time())
+        if auth_date > now + 300 or (now - auth_date) > max_age_seconds:
+            logger.warning(
+                "TMA initData expired or invalid clock skew: auth_date=%s now=%s",
+                auth_date,
+                now,
+            )
+            return None
+
+        sorted_items = sorted(params.items(), key=lambda x: x[0])
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted_items)
+
+        secret_key = hmac.new(
+            b"WebAppData",
+            bot_token.strip().encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        expected_hash = hmac.new(
+            secret_key,
+            data_check_string.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(expected_hash.lower(), received_hash.lower()):
+            logger.warning("TMA initData hash mismatch")
+            return None
+
+        user_info = None
+        user_str = params.get("user")
+        if user_str:
+            try:
+                user_info = json.loads(user_str)
+            except Exception:
+                user_info = None
+
+        return {
+            "user": user_info,
+            "auth_date": auth_date,
+            "query_id": params.get("query_id"),
+            "params": params,
+        }
+    except Exception as e:
+        logger.warning("Failed to verify telegram webapp init_data: %s", e)
+        return None

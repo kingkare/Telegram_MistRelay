@@ -39,7 +39,7 @@ REQUIRED_TABLES = frozenset({
     "uploads",
     "users",
 })
-ALLOWED_EXTRA_TABLES = frozenset({"tg_channel_files", "tg_protocol_accounts"})
+ALLOWED_EXTRA_TABLES = frozenset({"tg_channel_files", "tg_protocol_accounts", "tg_register_codes", "edge_nodes", "edge_node_tokens"})
 REQUIRED_MOUNTS = frozenset({"/app/db", "/data/downloads", "/app/cache/thumbnails"})
 EXPECTED_HEALTHCHECK = [
     "CMD",

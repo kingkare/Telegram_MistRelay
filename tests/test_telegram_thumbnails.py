@@ -540,5 +540,64 @@ class TelegramThumbnailTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forbidden_resp.status, 403)
 
 
+    async def test_tenant_thumbnail_worker_isolation_and_stream_url_fallback(self):
+        import asyncio
+        from thumbnail_worker import TelegramThumbnailWorker
+        worker = TelegramThumbnailWorker()
+        processed_tasks = []
+
+        async def mock_ensure(mid, chat_id=None):
+            processed_tasks.append((mid, chat_id))
+            return (Path(self.temp_dir.name) / f"{chat_id}_{mid}.webp", False)
+
+        worker.set_ensure_func(mock_ensure)
+
+        # Enqueue with different tenant channels and same message_id (3)
+        worker.enqueue(3, chat_id=-100111)
+        worker.enqueue(3, chat_id=-100222)
+        # Duplicate enqueue for same tenant channel should be ignored
+        worker.enqueue(3, chat_id=-100111)
+
+        await asyncio.sleep(1.2)
+        await worker.stop()
+
+        self.assertIn((3, -100111), processed_tasks)
+        self.assertIn((3, -100222), processed_tasks)
+
+        # Test video stream_url fallback when local sample generation fails
+        mid = 99
+        fname = "tail_moov_test.mp4"
+        self.routes.get_tg_media_record_by_message_id = lambda _mid, chat_id=None: {
+            "message_id": mid,
+            "chat_id": -100999,
+            "file_unique_id": "test_tail_moov_uid",
+            "file_name": fname,
+            "mime_type": "video/mp4",
+            "file_size": 100 * 1024 * 1024,
+        }
+
+        async def mock_fail_download(_mid, out_path, _max_bytes, chat_id=None):
+            # Simulate incomplete MP4 sample downloaded to source_path
+            out_path.write_bytes(b"truncated_mp4_without_moov")
+
+        self.routes.download_telegram_media_sample = mock_fail_download
+
+        from thumbnail_generator import get_thumbnail_generator
+        gen = get_thumbnail_generator()
+
+        # Mock generate_video_thumbnail to fail on truncated source
+        # but generate_video_thumbnail_from_url to succeed via stream_url
+        with patch.object(gen, "generate_video_thumbnail", return_value=False), \
+             patch.object(gen, "generate_video_thumbnail_from_url", return_value=True) as mock_url_gen:
+            path, hit = await self.routes.ensure_telegram_thumbnail(mid, chat_id=-100999)
+            self.assertIsNotNone(path)
+            self.assertTrue(mock_url_gen.called)
+            # Verify stream_url was passed with hash
+            call_url = mock_url_gen.call_args[0][0]
+            self.assertIn(f"/{mid}/", call_url)
+            self.assertIn("hash=", call_url)
+
+
 if __name__ == "__main__":
+
     unittest.main()

@@ -1,3 +1,4 @@
+import json
 import tests  # noqa: F401
 import asyncio
 import os
@@ -950,6 +951,154 @@ class TestMultiAccountPoolAndRelay(unittest.IsolatedAsyncioTestCase):
             self.assertIn("频控限制", str(cm.exception))
             self.assertIn("Sorry, too many tries", str(cm.exception))
 
+
+    async def test_sanitize_account_record_with_tenant_and_cluster_aggregates(self):
+        """验证 sanitize_account_record 正确聚合租户专属频道、租户用户名与集群在线节点数"""
+        s1 = self._make_fake_session(1001)
+        acc = db.upsert_protocol_account(
+            phone="+16813089999",
+            session_data=s1,
+            bot_count=3,
+            status="limit_reached",
+        )
+        db.update_protocol_account(acc["id"], bot_usernames='["my_node_1_bot", "my_node_2_bot"]')
+
+        u1 = db.create_tenant_user(
+            username="tenant_alice",
+            password_hash="hash_alice",
+            role="user",
+            bin_channel_id=-1001122334455,
+            creator_account_id=acc["id"],
+        )
+
+        class MockClient:
+            def __init__(self, username):
+                self.username = username
+
+        import WebStreamer.bot as bot_mod
+        orig_clients = getattr(bot_mod, "multi_clients", {})
+        try:
+            bot_mod.multi_clients = {
+                1: MockClient("my_node_1_bot"),
+                2: MockClient("other_bot"),
+            }
+            sanitized = botfather_creator.sanitize_account_record(db.get_protocol_account_by_id(acc["id"]))
+            self.assertEqual(sanitized["created_channels_count"], 1)
+            self.assertIn("tenant_alice", sanitized["tenant_usernames"])
+            self.assertEqual(sanitized["max_channels"], 10)
+            self.assertEqual(sanitized["cluster_active_bots_count"], 1)
+            self.assertEqual(sanitized["bot_usernames"], ["my_node_1_bot", "my_node_2_bot"])
+        finally:
+            bot_mod.multi_clients = orig_clients
+
+    def test_db_list_users_creator_status_limit_reached_healthy(self):
+        """验证 db.list_users() 对 limit_reached 状态的建频母号判定为 healthy 而非误报 warning"""
+        s1 = self._make_fake_session(1002)
+        acc_full = db.upsert_protocol_account(
+            phone="+16813089988",
+            session_data=s1,
+            bot_count=20,
+            status="limit_reached",
+        )
+        acc_bad = db.upsert_protocol_account(
+            phone="+16813089977",
+            session_data=s1,
+            bot_count=5,
+            status="invalid",
+        )
+
+        u_healthy = db.create_tenant_user(
+            username="tenant_bob",
+            password_hash="hash_bob",
+            role="user",
+            bin_channel_id=-1009988776655,
+            creator_account_id=acc_full["id"],
+        )
+        u_warn = db.create_tenant_user(
+            username="tenant_carol",
+            password_hash="hash_carol",
+            role="user",
+            bin_channel_id=-1009988776644,
+            creator_account_id=acc_bad["id"],
+        )
+
+        users = db.list_users()
+        user_map = {u["username"]: u for u in users}
+
+        self.assertEqual(user_map["tenant_bob"]["creator_status"], "healthy")
+        self.assertEqual(user_map["tenant_carol"]["creator_status"], "warning")
+
+
+    async def test_telegram_botfather_accounts_sync_handler(self):
+        """测试全池数据同步接口 POST /api/telegram/botfather/accounts/sync"""
+        from aiohttp import web
+        from WebStreamer.server.stream_routes import telegram_botfather_accounts_sync_handler
+
+        s1 = self._make_fake_session(1003)
+        acc = db.upsert_protocol_account(
+            phone="+16813089966",
+            session_data=s1,
+            bot_count=1,
+            status="active",
+        )
+
+        class FakeRequest:
+            def __init__(self, data=None):
+                self._data = data or {}
+                self._dict = {"user": {"role": "admin"}}
+            def get(self, k, default=None):
+                return self._dict.get(k, default)
+            async def json(self):
+                return self._data
+
+        with patch("botfather_creator.keepalive_all_protocol_accounts", AsyncMock(return_value={"total": 1, "success_count": 1, "failed_count": 0})) as mock_keep:
+            resp = await telegram_botfather_accounts_sync_handler(FakeRequest({"check_bots": True}))
+            self.assertEqual(resp.status, 200)
+            data = resp.body if isinstance(resp.body, dict) else json.loads(resp.text or resp.body.decode("utf-8"))
+            self.assertTrue(data["success"])
+            self.assertEqual(data["summary"]["success_count"], 1)
+            self.assertTrue(len(data["data"]) >= 1)
+            mock_keep.assert_called_once_with(account_ids=None, check_bots=True)
+
+    async def test_get_protocol_account_detail_includes_tenant_channels(self):
+        """测试获取协议号详情返回名下创建的全部租户专属频道明细"""
+        from botfather_creator import get_protocol_account_detail
+
+        s1 = self._make_fake_session(8881)
+        acc = db.upsert_protocol_account(
+            phone="+16813088881",
+            session_data=s1,
+            bot_count=3,
+            status="active",
+        )
+
+        # 关联 2 个租户
+        db.create_tenant_user(
+            username="tenant_x1",
+            password_hash="hash1",
+            bin_channel_id=-100888111,
+            bin_channel_username="mr_u8881_x1",
+            creator_account_id=acc["id"],
+            role="user",
+        )
+        db.create_tenant_user(
+            username="tenant_x2",
+            password_hash="hash2",
+            bin_channel_id=-100888222,
+            bin_channel_username="mr_u8881_x2",
+            creator_account_id=acc["id"],
+            role="user",
+        )
+
+        detail = await get_protocol_account_detail(acc["id"], refresh_online=False)
+        self.assertIn("tenant_channels", detail)
+        self.assertEqual(len(detail["tenant_channels"]), 2)
+        unames = [tc["username"] for tc in detail["tenant_channels"]]
+        self.assertIn("tenant_x1", unames)
+        self.assertIn("tenant_x2", unames)
+        self.assertEqual(detail["tenant_channels"][0]["bin_channel_id"], -100888111)
+        self.assertEqual(detail["tenant_channels"][0]["bin_channel_username"], "mr_u8881_x1")
+        self.assertEqual(detail["account"]["created_channels_count"], 2)
 
 if __name__ == "__main__":
     unittest.main()

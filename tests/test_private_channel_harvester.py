@@ -368,7 +368,10 @@ class TestCopiedLinkDeepResolution(unittest.IsolatedAsyncioTestCase):
             pack_pyrogram_session,
             parse_session_to_telethon_string,
         )
-        from telethon.sessions import StringSession
+        try:
+            from telethon.sessions import StringSession
+        except ImportError:
+            self.skipTest("telethon is not installed")
 
         fake_key = b"A" * 256
         pyro_session = pack_pyrogram_session(dc_id=4, auth_key=fake_key, api_id=12345)

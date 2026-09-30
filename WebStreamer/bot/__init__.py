@@ -1,3 +1,4 @@
+import pyrogram_patch
 # This file is a part of TG-FileStreamBot
 # Coding : Jyothis Jayanth [@EverythingSuckz]
 
@@ -27,7 +28,7 @@ StreamBot = Client(
     api_id=Var.API_ID,
     api_hash=Var.API_HASH,
     workdir=sessions_dir,
-    plugins={"root": "WebStreamer.bot.plugins"},
+    plugins={"root": "WebStreamer.bot.plugins", "include": ["stream_modules.media_processor"]},
     bot_token=Var.BOT_TOKEN,
     sleep_threshold=Var.SLEEP_THRESHOLD,
     workers=Var.WORKERS,
