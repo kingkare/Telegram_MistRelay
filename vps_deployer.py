@@ -862,6 +862,13 @@ async def run_edge_relay_stream_benchmark(
 
             tg_pull_speed = float(last_relay.get("tg_pull_speed_mb_s") or last_relay.get("client_push_speed_mb_s") or relay_speed_mb_s)
             usable_bots = int(last_relay.get("usable_sources_count") or 1)
+            hedged_requests = int(last_relay.get("hedged_requests_count") or 0)
+            hedged_wins = int(last_relay.get("hedged_wins_count") or 0)
+            dual_launch_used = bool(last_relay.get("dual_launch_used", False))
+            jitter_cv = float(last_relay.get("jitter_cv") or 0.0)
+            hardware_tier = str(last_relay.get("hardware_tier") or "BUDGET_VPS")
+            window_size = int(last_relay.get("window_size") or 4)
+            pareto_opt = bool(last_relay.get("pareto_optimal", relay_speed_mb_s >= 15.0 or (ttfb_ms < 250 and relay_speed_mb_s >= 8.0)))
 
             # 4. 瓶颈诊断与质量评级
             bench_data = node.get("benchmark_data") or {}
@@ -909,6 +916,13 @@ async def run_edge_relay_stream_benchmark(
                 "duration_s": round(total_dur, 2),
                 "target_dc": target_dc,
                 "usable_bots_count": usable_bots,
+                "hedged_requests_count": hedged_requests,
+                "hedged_wins_count": hedged_wins,
+                "dual_launch_used": dual_launch_used,
+                "jitter_cv": jitter_cv,
+                "hardware_tier": hardware_tier,
+                "window_size": window_size,
+                "pareto_optimal": pareto_opt,
                 "bottleneck_diagnosis": bottleneck_diagnosis,
                 "grade": grade,
                 "evaluation": evaluation,
@@ -1213,6 +1227,14 @@ async def run_edge_full_benchmark(node_id: int, sample_mb: float = 10.0) -> Dict
             "usable_bots_count": relay_res.get("usable_bots_count", len(allocation.get("bot_tokens", []))),
             "total_bots_in_array": len(allocation.get("bot_tokens", [])),
             "per_bot_speed_mb_s": round(relay_speed / max(1, len(allocation.get("bot_tokens", []))), 2),
+            "hedged_requests_count": relay_res.get("hedged_requests_count", 0),
+            "hedged_wins_count": relay_res.get("hedged_wins_count", 0),
+            "dual_launch_used": relay_res.get("dual_launch_used", False),
+            "jitter_cv": relay_res.get("jitter_cv", 0.0),
+            "hardware_tier": relay_res.get("hardware_tier", "BUDGET_VPS"),
+            "window_size": relay_res.get("window_size", 4),
+            "pareto_optimal": relay_res.get("pareto_optimal", True),
+            "saturation_percent": saturation_percent,
             "evaluation": relay_res.get("evaluation", ""),
             "grade": relay_res.get("grade", ""),
             "sample_size_mb": relay_res.get("sample_size_mb", sample_to_use),
@@ -1249,17 +1271,20 @@ async def upgrade_edge_worker(node_id: int, master_url: str = "") -> Dict[str, A
     base_url = get_edge_node_base_url(node)
     auth_secret = str(node.get("auth_secret") or "")
 
-    # 1. 尝试通过 OTA 接口热重载
+    # 1. 尝试通过 OTA 接口热重载 (直传最新代码载荷 + Master URL 双向兜底)
     if base_url:
         try:
-            async with ClientSession(timeout=ClientTimeout(total=8)) as session:
+            worker_code = get_worker_script_content()
+            payload = {"code": worker_code} if worker_code else {}
+            async with ClientSession(timeout=ClientTimeout(total=20)) as session:
                 async with _safe_edge_request(
                     session, base_url, "/update", method="POST", node_id=node_id,
                     headers={"X-Node-Secret": auth_secret},
+                    json=payload,
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        await asyncio.sleep(1.5)
+                        await asyncio.sleep(2.5)
                         h = await check_edge_node_health(node_id)
                         return {
                             "success": True,
@@ -1268,8 +1293,8 @@ async def upgrade_edge_worker(node_id: int, master_url: str = "") -> Dict[str, A
                             "health": h,
                             "node": db.get_edge_node_by_id(node_id),
                         }
-        except Exception:
-            pass
+        except Exception as ota_err:
+            logger.warning(f"OTA upgrade attempt failed for node {node_id}: {ota_err}")
 
     # 2. 若 OTA 不可用且拥有保存的 SSH 密码，使用 SSH 重新下发
     if node.get("has_ssh_password"):

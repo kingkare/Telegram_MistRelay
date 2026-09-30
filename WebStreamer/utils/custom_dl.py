@@ -707,6 +707,12 @@ class ByteStreamer:
             for p in range(1, initial_window + 1):
                 prefetch_tasks[p] = asyncio.create_task(_fetch_part(p))
 
+            # 首包秒开优化 (Speculative Dual-Launch)：若存在多可用 Bot 且非微型探针，双发竞速首分片
+            dual_launch_companion = None
+            if not is_probe and len(stripe_bots) > 1:
+                backup_bot = stripe_bots[1] if stripe_bots[1] != current_index else stripe_bots[0]
+                dual_launch_companion = asyncio.create_task(_fetch_part(1, override_bot=backup_bot))
+
             for current_part in range(1, part_count + 1):
                 task = prefetch_tasks.pop(current_part, None)
                 if task is None:
@@ -717,11 +723,24 @@ class ByteStreamer:
                 success, r, used_bot, part_offset = False, None, assigned_bot, offset + (current_part - 1) * chunk_size
 
                 try:
-                    done, pending = await asyncio.wait([task], timeout=3.5)
-                    if done:
-                        res_tuple = task.result()
-                        if res_tuple and res_tuple[0] and isinstance(res_tuple[1], raw.types.upload.File):
-                            success, r, used_bot, part_offset = res_tuple
+                    candidates = [task]
+                    if current_part == 1 and dual_launch_companion is not None and not dual_launch_companion.done():
+                        candidates.append(dual_launch_companion)
+
+                    hedge_to = 2.0 if target_dc == 5 else 2.5
+                    done, pending = await asyncio.wait(candidates, timeout=hedge_to, return_when=asyncio.FIRST_COMPLETED)
+                    for d in done:
+                        try:
+                            res_tuple = d.result()
+                            if res_tuple and res_tuple[0] and isinstance(res_tuple[1], raw.types.upload.File):
+                                success, r, used_bot, part_offset = res_tuple
+                                break
+                        except Exception:
+                            pass
+                    if current_part == 1 and dual_launch_companion is not None:
+                        if not dual_launch_companion.done():
+                            dual_launch_companion.cancel()
+                        dual_launch_companion = None
                 except Exception as e:
                     logger.warning(f"分片 {current_part} (Bot {assigned_bot}) 预取异常 ({e})")
 
